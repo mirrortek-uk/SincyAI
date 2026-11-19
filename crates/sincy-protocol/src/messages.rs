@@ -62,7 +62,7 @@ impl MessageType {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         use MessageType::*;
         Some(match s {
             "device.register" => DeviceRegister,
@@ -121,7 +121,7 @@ impl Serialize for MessageType {
 impl<'de> Deserialize<'de> for MessageType {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;
-        MessageType::from_str(&s).ok_or_else(|| serde::de::Error::unknown_variant(&s, &[]))
+        MessageType::parse(&s).ok_or_else(|| serde::de::Error::unknown_variant(&s, &[]))
     }
 }
 
