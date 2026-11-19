@@ -1,0 +1,18 @@
+# Copy to config/local.toml (git-ignored) for local development.
+# Never put real secrets here; use SINCY_* env vars or a vault:// reference.
+
+[http]
+host = "127.0.0.1"
+port = 8080
+
+[database]
+url = "postgres://sincy:sincy@127.0.0.1:5432/sincy_dev"
+max_connections = 10
+
+[worker]
+nats_url = "nats://127.0.0.1:4222"
+redis_url = "redis://127.0.0.1:6379"
+
+[log]
+filter = "info,sincy=debug,cloud_api=debug"
+json = false

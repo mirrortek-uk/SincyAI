@@ -1,0 +1,12 @@
+[package]
+name = "sincy-database"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "PostgreSQL pool, migrations and per-transaction tenant (RLS) context (TDD 11, ADR-008, WP-03)"
+
+[dependencies]
+sqlx = { workspace = true }
+sincy-common = { path = "../sincy-common" }
+tracing = { workspace = true }
+thiserror = { workspace = true }

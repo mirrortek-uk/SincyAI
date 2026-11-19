@@ -1,0 +1,36 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.off
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# env / secrets — never commit real credentials
+.env
+.env.*
+*.pem
+*.key
+config/local.toml
+
+# local dev data
+/tmp/
+/data/
+*.log
+
+# frontend / android
+frontend/node_modules/
+frontend/.next/
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+
+# test artifacts
+coverage/

@@ -1,0 +1,14 @@
+[package]
+name = "router-worker"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Execution Router worker: capability matrix, route selection, fallback chain, route audit (FR-019, WP-05)"
+
+[dependencies]
+sincy-common = { path = "../../crates/sincy-common" }
+sincy-config = { path = "../../crates/sincy-config" }
+sincy-protocol = { path = "../../crates/sincy-protocol" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

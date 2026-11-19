@@ -1,0 +1,37 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.1
+          components: rustfmt, clippy
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: fmt
+        run: cargo fmt --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: test
+        run: cargo test --workspace
+      - name: build
+        run: cargo build --workspace
+  adapter-schema:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Adapter schema validation (placeholder until WP-13 schema lands)
+        run: |
+          if ls adapters/*.yaml adapters/*.yml adapters/*.json 2>/dev/null; then
+            echo "adapter definitions found; schema validation lands with WP-13"
+          else
+            echo "no adapter definitions yet (expected before WP-13)"
+          fi
