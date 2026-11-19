@@ -1,0 +1,31 @@
+// Large-file transfer messages (TDD 12.1: never through WSS).
+// Chunk bytes travel via pre-signed HTTPS URLs / chunked PUT (REST) or
+// authorized LAN HTTPS; only control messages use this proto over WSS.
+syntax = "proto3";
+
+package sincy.protocol.v1;
+
+message TransferRequest {
+  string transfer_id = 1;
+  string task_id = 2;
+  string direction = 3;       // upload | download
+  string object_key = 4;      // S3 key
+  uint64 total_bytes = 5;
+  uint32 chunk_size = 6;
+  string sha256 = 7;
+  string presigned_url = 8;   // short-lived
+  uint64 expires_unix = 9;
+}
+
+message TransferProgress {
+  string transfer_id = 1;
+  uint64 bytes_done = 2;
+  uint32 chunk_index = 3;
+  string chunk_sha256 = 4;
+}
+
+message TransferComplete {
+  string transfer_id = 1;
+  string final_sha256 = 2;
+  bool verified = 3;
+}

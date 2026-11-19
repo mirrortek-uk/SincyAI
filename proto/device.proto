@@ -1,0 +1,112 @@
+// Device <-> Cloud messages (TDD 12.3, WP-07/WP-08/WP-09).
+syntax = "proto3";
+
+package sincy.protocol.v1;
+
+import "google/protobuf/timestamp.proto";
+
+message DeviceRegister {
+  string device_id = 1;
+  string platform = 2;        // android | windows
+  string os_version = 3;
+  string agent_version = 4;
+  // challenge-response proof (WP-07): HMAC(device_secret, nonce)
+  string nonce = 5;
+  string proof = 6;
+}
+
+message DeviceHeartbeat {
+  google.protobuf.Timestamp at = 1;
+  string status = 2;          // online | busy | waiting_user
+  uint32 pending_tasks = 3;
+}
+
+message Capability {
+  string name = 1;
+  bool available = 2;
+  string detail = 3;
+}
+
+message DeviceCapabilitiesUpdate {
+  repeated Capability capabilities = 1;
+  repeated string permissions = 2;   // accessibility, media_projection, notifications, background
+}
+
+message AppVersion {
+  string package = 1;
+  string version_name = 2;
+  uint32 version_code = 3;
+}
+
+message DeviceAppVersionsUpdate {
+  repeated AppVersion apps = 1;
+}
+
+// cloud -> device: assign a task (WP-09)
+message DeviceTaskAssign {
+  string task_id = 1;
+  string idempotency_key = 2;
+  string adapter_id = 3;
+  uint32 adapter_version = 4;
+  string package_ref = 5;     // pre-signed URL or transfer session, never inline media
+  uint64 lease_expiry_unix = 6;
+  uint64 deadline_unix = 7;
+  string policy_version = 8;
+  string route_id = 9;
+}
+
+message DeviceTaskAck {
+  string task_id = 1;
+  google.protobuf.Timestamp at = 2;
+}
+
+message DeviceTaskProgress {
+  string task_id = 1;
+  string step_id = 2;
+  string state = 3;           // lifecycle state per TDD 14.2
+  string detail = 4;
+}
+
+// device -> cloud: final outcome. success | no_side_effect_failure | uncertain
+message DeviceTaskResult {
+  string task_id = 1;
+  string outcome = 2;
+  string external_content_id = 3;  // platform receipt when available
+  string error_code = 4;
+  string error_message = 5;
+  google.protobuf.Timestamp at = 6;
+}
+
+// per-step evidence (TDD 9.1 EVIDENCE): redacted screenshot hash etc.
+message DeviceStepEvidence {
+  string task_id = 1;
+  string step_id = 2;
+  string screen_id = 3;
+  string action = 4;
+  string node_refs = 5;       // JSON array of matched anchors
+  string screenshot_hash = 6; // SHA-256 of redacted screenshot; bytes never sent by default
+}
+
+message DeviceUiDriftDetected {
+  string task_id = 1;
+  string adapter_id = 2;
+  uint32 adapter_version = 3;
+  string app_package = 4;
+  string app_version = 5;
+  string reason = 6;          // version_out_of_range | anchor_match_low | step_timeout
+  google.protobuf.Timestamp at = 7;
+}
+
+// captcha / security challenge: ALWAYS routes to WAITING_USER, never solved in-app
+message DeviceChallengeDetected {
+  string task_id = 1;
+  string screen_id = 2;
+  string challenge_kind = 3;  // captcha | security_check | risk_control | login
+  google.protobuf.Timestamp at = 4;
+}
+
+// cloud -> device: revoke session / authorization (FR-023)
+message DeviceSessionRevoke {
+  string reason = 1;
+  google.protobuf.Timestamp at = 2;
+}

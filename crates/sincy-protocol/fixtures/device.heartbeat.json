@@ -1,0 +1,10 @@
+{
+  "message_id": "msg-0001",
+  "correlation_id": "corr-0001",
+  "sent_at": "2026-11-20T08:00:00Z",
+  "schema_version": 1,
+  "tenant_id": "agency-1",
+  "device_id": "device-1",
+  "message_type": "device.heartbeat",
+  "payload": { "at": "2026-11-20T08:00:00Z", "status": "online", "pending_tasks": 0 }
+}

@@ -1,0 +1,10 @@
+{
+  "message_id": "msg-0003",
+  "correlation_id": "corr-0003",
+  "sent_at": "2026-11-20T08:02:00Z",
+  "schema_version": 1,
+  "tenant_id": "agency-1",
+  "device_id": "device-1",
+  "message_type": "device.challenge.detected",
+  "payload": { "task_id": "task-1", "screen_id": "challenge", "challenge_kind": "captcha" }
+}

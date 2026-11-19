@@ -1,0 +1,23 @@
+// Sincy control-plane envelope (TDD 12.1).
+// Transport: WSS over TLS. schema_version mismatches must be rejected explicitly.
+syntax = "proto3";
+
+package sincy.protocol.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// Every control message is wrapped in an Envelope.
+// Large media payloads MUST NOT be carried here — use pre-signed URLs /
+// chunked transfer (transfer.proto) instead.
+message Envelope {
+  string message_id = 1;
+  string correlation_id = 2;
+  google.protobuf.Timestamp sent_at = 3;
+  uint32 schema_version = 4;
+  string tenant_id = 5;
+  string device_id = 6;
+  // one of the message types defined in device/publishing/transfer/adapter.proto
+  string message_type = 7;
+  // JSON-encoded typed message body
+  bytes payload = 8;
+}

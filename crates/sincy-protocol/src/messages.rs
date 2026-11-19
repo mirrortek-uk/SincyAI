@@ -4,8 +4,8 @@
 use serde::{Deserialize, Serialize};
 
 /// All control message types exchanged over the Agent WSS gateway.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// Serialized in the dotted form used by TDD 12.3 (e.g. "device.heartbeat").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MessageType {
     // device -> cloud
     DeviceRegister,
@@ -62,6 +62,31 @@ impl MessageType {
         }
     }
 
+    pub fn from_str(s: &str) -> Option<Self> {
+        use MessageType::*;
+        Some(match s {
+            "device.register" => DeviceRegister,
+            "device.heartbeat" => DeviceHeartbeat,
+            "device.capabilities.update" => DeviceCapabilitiesUpdate,
+            "device.app_versions.update" => DeviceAppVersionsUpdate,
+            "device.task.assign" => DeviceTaskAssign,
+            "device.task.ack" => DeviceTaskAck,
+            "device.task.progress" => DeviceTaskProgress,
+            "device.task.result" => DeviceTaskResult,
+            "device.step.evidence" => DeviceStepEvidence,
+            "device.ui_drift.detected" => DeviceUiDriftDetected,
+            "device.challenge.detected" => DeviceChallengeDetected,
+            "adapter.bundle.update" => AdapterBundleUpdate,
+            "transfer.request" => TransferRequest,
+            "transfer.progress" => TransferProgress,
+            "transfer.complete" => TransferComplete,
+            "publishing.execution.request" => PublishingExecutionRequest,
+            "publishing.execution.result" => PublishingExecutionResult,
+            "device.session.revoke" => DeviceSessionRevoke,
+            _ => return None,
+        })
+    }
+
     pub fn as_str(&self) -> &'static str {
         use MessageType::*;
         match self {
@@ -84,6 +109,19 @@ impl MessageType {
             PublishingExecutionResult => "publishing.execution.result",
             DeviceSessionRevoke => "device.session.revoke",
         }
+    }
+}
+
+impl Serialize for MessageType {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for MessageType {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        MessageType::from_str(&s).ok_or_else(|| serde::de::Error::unknown_variant(&s, &[]))
     }
 }
 

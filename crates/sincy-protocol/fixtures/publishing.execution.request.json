@@ -1,0 +1,22 @@
+{
+  "message_id": "msg-0002",
+  "correlation_id": "corr-0002",
+  "sent_at": "2026-11-20T08:01:00Z",
+  "schema_version": 1,
+  "tenant_id": "agency-1",
+  "device_id": "",
+  "message_type": "publishing.execution.request",
+  "payload": {
+    "execution_id": "exec-1",
+    "package_id": "pkg-1",
+    "package_version": 3,
+    "agency_id": "agency-1",
+    "brand_id": "brand-1",
+    "platform": "youtube",
+    "action": "publish_video",
+    "route": "api",
+    "account_id": "acc-1",
+    "idempotency_key": "idem-1",
+    "route_id": "route-1"
+  }
+}

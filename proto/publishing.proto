@@ -1,0 +1,35 @@
+// Publishing execution messages (TDD 12.3).
+syntax = "proto3";
+
+package sincy.protocol.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// cloud -> device/worker: execute a PublishingPackage on a route
+message PublishingExecutionRequest {
+  string execution_id = 1;
+  string package_id = 2;
+  uint32 package_version = 3;
+  string agency_id = 4;
+  string brand_id = 5;
+  string platform = 6;        // youtube | instagram | xiaohongshu ...
+  string action = 7;          // publish_video | publish_image | schedule | reply_comment | read_metrics
+  string route = 8;           // api | device | assisted
+  string account_id = 9;
+  string idempotency_key = 10;
+  string route_id = 11;
+  google.protobuf.Timestamp scheduled_at = 12;
+  // adapter input mapping or API field mapping is done by the adapter layer;
+  // the package itself is fetched by package_id, never inlined here.
+}
+
+message PublishingExecutionResult {
+  string execution_id = 1;
+  // success | no_side_effect_failure | uncertain  (TDD 7.3 ExecOutcome)
+  string outcome = 2;
+  string external_content_id = 3;
+  string receipt_json = 4;    // platform回执 (raw JSON, small)
+  string error_code = 5;
+  string error_message = 6;
+  google.protobuf.Timestamp at = 7;
+}

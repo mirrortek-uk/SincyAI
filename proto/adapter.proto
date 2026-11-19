@@ -1,0 +1,15 @@
+// App Adapter bundle distribution (TDD 9.3, WP-13).
+syntax = "proto3";
+
+package sincy.protocol.v1;
+
+// cloud -> device: signed adapter bundle update
+message AdapterBundleUpdate {
+  string adapter_id = 1;        // e.g. xiaohongshu.publish_video
+  uint32 version = 2;
+  string app_package = 3;
+  string version_range = 4;     // e.g. ">=8.10 <8.20"
+  bytes definition = 5;         // YAML/JSON adapter definition (signed at rest)
+  bytes signature = 6;          // Sincy signing key signature over definition
+  string sha256 = 7;
+}
