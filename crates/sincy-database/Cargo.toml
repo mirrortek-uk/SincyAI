@@ -10,3 +10,7 @@ sqlx = { workspace = true }
 sincy-common = { path = "../sincy-common" }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+uuid = { workspace = true }

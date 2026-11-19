@@ -2014,7 +2014,9 @@ dependencies = [
  "sincy-common",
  "sqlx",
  "thiserror",
+ "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
