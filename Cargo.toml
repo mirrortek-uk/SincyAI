@@ -6,6 +6,8 @@ members = [
     "crates/sincy-protocol",
     "crates/sincy-database",
     "crates/sincy-security",
+    "crates/sincy-routing",
+    "crates/sincy-platform",
     "apps/cloud-api",
     "apps/cloud-scheduler",
     "apps/agent-worker",
