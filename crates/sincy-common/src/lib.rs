@@ -12,5 +12,5 @@ pub mod ids;
 pub mod paging;
 
 pub use error::{AppError, ErrorKind};
-pub use ids::{AgencyId, BrandId, DeviceId, RequestId, TaskId};
+pub use ids::{AgencyId, BrandId, DeviceId, IdempotencyKey, RequestId, TaskId};
 pub use paging::{Page, PageRequest};

@@ -2019,6 +2019,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "sincy-content"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sincy-common",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "sincy-database"
 version = "0.1.0"
 dependencies = [
@@ -2027,6 +2040,20 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "sincy-execution"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "sincy-common",
+ "sqlx",
+ "thiserror",
+ "tokio",
  "uuid",
 ]
 

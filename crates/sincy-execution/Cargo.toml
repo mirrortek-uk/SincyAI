@@ -1,0 +1,18 @@
+[package]
+name = "sincy-execution"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Task state machines, idempotency, leases, kill switches (FR-011/015/025, TDD 14, WP-09/WP-14)"
+
+[dependencies]
+sincy-common = { path = "../sincy-common" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
