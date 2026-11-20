@@ -4,7 +4,9 @@ import { useCallback, useEffect, useState } from "react";
 import {
   api,
   getToken,
+  type CollectResult,
   type IntelItem,
+  type IntelJob,
   type IntelProvider,
   type IntelSource,
   type OpportunityItem,
@@ -17,6 +19,9 @@ export default function IntelPage() {
   const [providers, setProviders] = useState<IntelProvider[]>([]);
   const [items, setItems] = useState<IntelItem[]>([]);
   const [opps, setOpps] = useState<OpportunityItem[]>([]);
+  const [jobs, setJobs] = useState<IntelJob[]>([]);
+  const [collectResult, setCollectResult] = useState<CollectResult | null>(null);
+  const [collecting, setCollecting] = useState(false);
   const [capability, setCapability] = useState("social_search");
   const [platform, setPlatform] = useState("x");
   const [route, setRoute] = useState<string | null>(null);
@@ -26,16 +31,18 @@ export default function IntelPage() {
   const load = useCallback(async () => {
     if (!getToken()) return;
     try {
-      const [s, p, i, o] = await Promise.all([
+      const [s, p, i, o, j] = await Promise.all([
         api.listIntelSources(),
         api.listIntelProviders(),
-        api.listIntelItems(undefined, 30),
+        api.listIntelItems(undefined, 50),
         api.listOpportunities(30),
+        api.listIntelJobs(),
       ]);
       setSources(s.items);
       setProviders(p.items);
       setItems(i.items);
       setOpps(o.items);
+      setJobs(j.items);
     } catch (e) {
       setError(String(e));
     }
@@ -43,6 +50,8 @@ export default function IntelPage() {
 
   useEffect(() => {
     load();
+    const t = setInterval(load, 30_000); // 采集是后台持续跑的, 页面 30s 自动刷新
+    return () => clearInterval(t);
   }, [load]);
 
   return (
@@ -76,6 +85,23 @@ export default function IntelPage() {
             路由
           </button>
           <button
+            disabled={collecting}
+            onClick={async () => {
+              setCollecting(true);
+              try {
+                const r = await api.collectNow();
+                setCollectResult(r);
+                await load();
+              } catch (e) {
+                setError(String(e));
+              } finally {
+                setCollecting(false);
+              }
+            }}
+          >
+            {collecting ? "采集中…" : "立即采集一轮"}
+          </button>
+          <button
             onClick={async () => {
               try {
                 const r = await api.refreshOpportunities();
@@ -90,6 +116,13 @@ export default function IntelPage() {
           </button>
         </div>
         {route && <p className="muted">路由结果: {route}</p>}
+        {collectResult && (
+          <p className="muted">
+            本轮采集: 新入库 {collectResult.inserted} 条 · 去重 {collectResult.duplicates} 条 · 失败 {collectResult.failures.length} 条
+            {collectResult.failures.length > 0 && <span style={{ color: "#ef4444" }}>({collectResult.failures[0].slice(0, 60)})</span>}
+            {" "}· 机会引擎 {collectResult.opportunities} 个候选, 写入 {collectResult.opportunities_upserted} 条
+          </p>
+        )}
       </section>
 
       <section className="panel">
@@ -104,6 +137,25 @@ export default function IntelPage() {
                 <td>{Number(o.score).toFixed(3)}</td>
                 <td>{o.status}</td>
                 <td className="muted">{o.evidence.join(", ").slice(0, 60)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </section>
+
+      <section className="panel">
+        <h2>采集任务 (后台定时跑, 可手动触发)</h2>
+        {jobs.length === 0 && <p className="muted">暂无任务记录。</p>}
+        <table>
+          <thead><tr><th>信源</th><th>计划</th><th>状态</th><th>最近运行</th><th>最近错误</th></tr></thead>
+          <tbody>
+            {jobs.map((j, i) => (
+              <tr key={i}>
+                <td>{j.source_id}</td>
+                <td className="muted">{j.schedule}</td>
+                <td style={{ color: j.status === "failed" ? "#ef4444" : undefined }}>{j.status}</td>
+                <td className="muted">{j.last_run_at ? j.last_run_at.slice(0, 19).replace("T", " ") : "-"}</td>
+                <td className="muted" style={{ color: "#ef4444" }}>{j.last_error ? j.last_error.slice(0, 50) : ""}</td>
               </tr>
             ))}
           </tbody>
@@ -165,16 +217,28 @@ export default function IntelPage() {
       <section className="panel">
         <h2>最近采集条目</h2>
         <table>
-          <thead><tr><th>kind</th><th>信源</th><th>dedup_key</th><th>时间</th></tr></thead>
+          <thead><tr><th>kind</th><th>信源</th><th>内容</th><th>时间</th></tr></thead>
           <tbody>
-            {items.map((i) => (
-              <tr key={i.id}>
-                <td>{i.kind}</td>
-                <td>{i.source_id}</td>
-                <td className="muted">{i.dedup_key}</td>
-                <td className="muted">{i.collected_at.slice(0, 19).replace("T", " ")}</td>
-              </tr>
-            ))}
+            {items.map((i) => {
+              const p = i.payload as Record<string, unknown>;
+              const title = (p.title as string) ?? (p.topic as string) ?? "";
+              const extra = p.volume !== undefined ? ` ★${p.volume} vel${p.velocity}` : (p.summary as string) ?? (p.content as string) ?? "";
+              return (
+                <tr key={i.id}>
+                  <td>{i.kind}</td>
+                  <td>{i.source_id}</td>
+                  <td>
+                    {p.url ? (
+                      <a href={p.url as string} target="_blank" rel="noreferrer" style={{ color: "var(--accent)" }}>{title.slice(0, 60)}</a>
+                    ) : (
+                      title.slice(0, 60)
+                    )}
+                    <span className="muted"> {String(extra).slice(0, 80)}</span>
+                  </td>
+                  <td className="muted">{i.collected_at.slice(0, 19).replace("T", " ")}</td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </section>

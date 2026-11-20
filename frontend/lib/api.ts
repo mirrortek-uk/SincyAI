@@ -247,6 +247,22 @@ export interface IntelItem {
   collected_at: string;
 }
 
+export interface IntelJob {
+  source_id: string;
+  schedule: string;
+  status: string;
+  last_run_at: string | null;
+  last_error: string | null;
+}
+
+export interface CollectResult {
+  inserted: number;
+  duplicates: number;
+  failures: string[];
+  opportunities: number;
+  opportunities_upserted: number;
+}
+
 export interface OpportunityItem {
   id: string;
   topic: string;
@@ -414,6 +430,9 @@ export const api = {
     req<{ items: IntelItem[] }>("/intel/items" + (kind ? `?kind=${kind}&limit=${limit}` : `?limit=${limit}`)),
   listOpportunities: (limit = 50) =>
     req<{ items: OpportunityItem[] }>(`/intel/opportunities?limit=${limit}`),
+  listIntelJobs: () => req<{ items: IntelJob[] }>("/intel/jobs"),
+  collectNow: () =>
+    req<CollectResult>("/intel/collect", { method: "POST" }),
   refreshOpportunities: () =>
     req<{ opportunities: number; upserted: number }>("/intel/opportunities", { method: "POST" }),
   approvePackage: (id: string) =>

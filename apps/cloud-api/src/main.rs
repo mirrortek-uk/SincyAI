@@ -38,12 +38,28 @@ async fn main() {
         }
     };
 
-    let state = AppState::from_config(pool, &cfg);
+    let state = AppState::from_config(pool.clone(), &cfg);
 
     let app = Router::new()
         .nest("/api/v1", cloud_api::routes())
         .with_state(state)
         .fallback(cloud_api::api::not_found);
+
+    // World Intelligence collector (WI §9): background loop over registered
+    // read-only public sources. Disable with SINCY_INTEL_COLLECT_ENABLED=false.
+    if let Some(pool) = pool.clone()
+        && std::env::var("SINCY_INTEL_COLLECT_ENABLED")
+            .map(|v| v != "false")
+            .unwrap_or(true)
+    {
+        let cfg = cloud_api::intel_collector::CollectorConfig::from_env();
+        tracing::info!(
+            interval_secs = cfg.interval_secs,
+            feeds = cfg.feeds.len(),
+            "intel collector starting"
+        );
+        tokio::spawn(cloud_api::intel_collector::run_loop(pool, cfg));
+    }
 
     let addr = SocketAddr::from(([0, 0, 0, 0], cfg.http.port));
     tracing::info!(%addr, env = %cfg.env, "cloud-api listening");

@@ -59,6 +59,8 @@ async fn architecture(State(_state): State<AppState>) -> Json<Value> {
                      "x.publish_post v1: home→composer→set_text→Post(side effect)→posted_confirm 验证; 锚点匹配率判漂移 UiDrift"),
                 node("device", "设备管理 sincy-device", "配对 · 会话",
                      "challenge-response: proof=sha256(sha256(secret)+nonce), secret 只存哈希; 长期 device token"),
+                node("collector", "情报采集器 intel_collector", "tokio 定时任务 · WI §9",
+                     "按注册表拉取只读公开源(RSS/榜单/搜索), 归一化 WI §11 模型, dedup_key 去重入 intel_items; 失败记 intel_collection_jobs 不强攻; 红线: 不绕认证/验证码/限流"),
                 node("ai", "AI sincy-ai", "LLM gateway · budget · analytics",
                      "mock 仅本地(SINCY_ALLOW_MOCK_ADAPTERS)/openai-compatible; 月度预算检查+熔断(FR-026); 成本落账; 指标回流内容版本(FR-016)"),
             ]
@@ -150,6 +152,25 @@ async fn architecture(State(_state): State<AppState>) -> Json<Value> {
         edge("wi", "db", "intel_items / opportunities", "data"),
         edge("api", "db", "全部业务读写 (RLS 按 agency 隔离)", "data"),
         edge("wi", "wisrc", "只读采集/搜索/趋势", "external"),
+        edge(
+            "collector",
+            "wisrc",
+            "定时拉取注册的只读公开源 (RSS/热榜)",
+            "external"
+        ),
+        edge(
+            "collector",
+            "db",
+            "intel_items 归一化入库 (dedup_key 去重) + jobs 状态",
+            "data"
+        ),
+        edge("collector", "wi", "新信号触发机会引擎重算", "internal"),
+        edge(
+            "api",
+            "collector",
+            "POST /intel/collect 手动触发一轮",
+            "internal"
+        ),
         edge("ai", "llm", "generate (生产环境)", "external"),
         edge("ai", "db", "成本落账/预算熔断", "data"),
         edge("device", "vault", "secret 哈希与凭证引用", "external"),

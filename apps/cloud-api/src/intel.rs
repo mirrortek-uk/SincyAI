@@ -32,6 +32,47 @@ pub fn routes() -> Router<AppState> {
             "/intel/opportunities",
             get(list_opportunities).post(refresh_opportunities),
         )
+        .route("/intel/jobs", get(list_jobs))
+        .route("/intel/collect", post(collect_now))
+}
+
+/// GET /intel/jobs — collection job status (WI §9 scheduler view).
+async fn list_jobs(State(state): State<AppState>) -> Result<Json<Value>, axum::response::Response> {
+    let pool = state.pool().map_err(app_error_response)?;
+    let rows = sqlx::query(
+        "SELECT source_id, schedule, status, last_run_at, last_error FROM intel_collection_jobs ORDER BY source_id, schedule",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(err)?;
+    let items: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            json!({
+                "source_id": r.get::<String, _>("source_id"),
+                "schedule": r.get::<String, _>("schedule"),
+                "status": r.get::<String, _>("status"),
+                "last_run_at": r.get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_run_at"),
+                "last_error": r.get::<Option<String>, _>("last_error"),
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "items": items })))
+}
+
+/// POST /intel/collect — run one collection pass immediately (WI §9 manual
+/// trigger) and refresh the opportunity engine afterwards.
+async fn collect_now(
+    State(state): State<AppState>,
+) -> Result<Json<Value>, axum::response::Response> {
+    let pool = state.pool().map_err(app_error_response)?;
+    let cfg = crate::intel_collector::CollectorConfig::from_env();
+    let (inserted, dups, failures) = crate::intel_collector::collect_once(pool, &cfg).await;
+    let (opps, upserted) = refresh_opportunities_db(pool).await?;
+    Ok(Json(json!({
+        "inserted": inserted, "duplicates": dups, "failures": failures,
+        "opportunities": opps, "opportunities_upserted": upserted,
+    })))
 }
 
 fn err(e: sqlx::Error) -> axum::response::Response {
@@ -431,14 +472,22 @@ async fn list_opportunities(
     Ok(Json(json!({ "items": items })))
 }
 
-/// POST /intel/opportunities — run the opportunity engine (WI §19) over
-/// recent trend items and upsert scored opportunities. Platform-level:
-/// pillar match defaults to 0.5 (no employee context); employee-specific
-/// re-scoring happens in the DE adapter (WI §20).
+/// POST /intel/opportunities — run the opportunity engine (WI §19).
 async fn refresh_opportunities(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, axum::response::Response> {
     let pool = state.pool().map_err(app_error_response)?;
+    let (n, up) = refresh_opportunities_db(pool).await?;
+    Ok(Json(json!({ "opportunities": n, "upserted": up })))
+}
+
+/// Shared opportunity-engine pass (REST route + collector after new items
+/// land). Platform-level: pillar match defaults to 0.5 (no employee context);
+/// employee-specific re-scoring happens in the DE adapter (WI §20).
+/// Returns (opportunities scored, upserted rows).
+pub(crate) async fn refresh_opportunities_db(
+    pool: &sqlx::PgPool,
+) -> Result<(usize, usize), axum::response::Response> {
     let rows = sqlx::query(
         "SELECT dedup_key, payload, collected_at FROM intel_items WHERE kind = 'trend' ORDER BY collected_at DESC LIMIT 200",
     )
@@ -481,7 +530,10 @@ async fn refresh_opportunities(
             upserted += 1;
         }
     }
-    Ok(Json(
-        json!({ "opportunities": ranked.len(), "upserted": upserted }),
-    ))
+    Ok((ranked.len(), upserted))
+}
+
+#[doc(hidden)]
+pub async fn refresh_opportunities_db_for_test(pool: &sqlx::PgPool) -> (usize, usize) {
+    refresh_opportunities_db(pool).await.unwrap()
 }
