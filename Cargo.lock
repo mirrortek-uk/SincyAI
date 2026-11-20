@@ -2187,6 +2187,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "sincy-transfer"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "rand 0.9.5",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sincy-common",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
