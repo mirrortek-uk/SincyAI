@@ -2,8 +2,9 @@
 // NEXT_PUBLIC_API_BASE (defaults to the local dev server). The console JWT
 // is stored in localStorage and attached as Authorization: Bearer.
 
-const BASE =
-  process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:18080/api/v1";
+// 默认走同源 /api/v1 (next.config.mjs rewrites 到后端); 需要直连后端时
+// 设置 NEXT_PUBLIC_API_BASE=http://127.0.0.1:18080/api/v1 (需后端 CORS 放行).
+const BASE = process.env.NEXT_PUBLIC_API_BASE ?? "/api/v1";
 
 const TOKEN_KEY = "sincy.console.token";
 

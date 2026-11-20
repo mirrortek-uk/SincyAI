@@ -60,6 +60,28 @@ pub fn routes() -> Router<AppState> {
         .route("/metrics", get(crate::metrics::metrics_handler))
         .layer(axum::middleware::from_fn(request_id_middleware))
         .layer(axum::middleware::from_fn(crate::auth::auth_middleware))
+        .layer(cors_layer())
+}
+
+/// CORS: origins from SINCY_CORS_ORIGINS (comma-separated); defaults to the
+/// local console. Production deployments should serve the console from the
+/// same domain (frontend rewrites /api -> cloud-api) and keep this tight.
+fn cors_layer() -> tower_http::cors::CorsLayer {
+    use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin};
+    let origins = std::env::var("SINCY_CORS_ORIGINS")
+        .unwrap_or_else(|_| "http://localhost:3000,http://127.0.0.1:3000".to_string());
+    let allow_origin: Vec<axum::http::HeaderValue> = origins
+        .split(',')
+        .filter_map(|o| o.trim().parse::<axum::http::HeaderValue>().ok())
+        .collect();
+    tower_http::cors::CorsLayer::new()
+        .allow_origin(if allow_origin.is_empty() {
+            AllowOrigin::any()
+        } else {
+            AllowOrigin::list(allow_origin)
+        })
+        .allow_methods(AllowMethods::any())
+        .allow_headers(AllowHeaders::any())
 }
 
 async fn healthz() -> impl IntoResponse {

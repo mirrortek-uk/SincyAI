@@ -35,7 +35,13 @@ export default function LoginPage() {
 
   return (
     <div style={{ maxWidth: 380, margin: "80px auto" }}>
-      <div className="panel">
+      <form
+        className="panel"
+        onSubmit={(e) => {
+          e.preventDefault();
+          submit();
+        }}
+      >
         <h2 style={{ marginTop: 0 }}>{mode === "login" ? "登录 Sincy Console" : "注册机构账号"}</h2>
         {mode === "register" && (
           <>
@@ -44,27 +50,34 @@ export default function LoginPage() {
           </>
         )}
         <label>邮箱</label>
-        <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="owner@agency.dev" />
+        <input
+          type="email"
+          autoComplete="username"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          placeholder="owner@agency.dev"
+        />
         <label>密码（至少 8 位）</label>
         <input
           type="password"
+          autoComplete={mode === "login" ? "current-password" : "new-password"}
           value={password}
           onChange={(e) => setPassword(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && submit()}
         />
         {error && <p className="muted" style={{ color: "#e06c5a" }}>错误: {error}</p>}
         <div style={{ marginTop: 14, display: "flex", gap: 8 }}>
-          <button onClick={submit} disabled={busy || !email || !password || (mode === "register" && !name)}>
+          <button type="submit" disabled={busy || !email || !password || (mode === "register" && !name)}>
             {mode === "login" ? "登录" : "创建机构并登录"}
           </button>
           <button
+            type="button"
             style={{ background: "transparent", border: "1px solid var(--border)" }}
             onClick={() => setMode(mode === "login" ? "register" : "login")}
           >
             {mode === "login" ? "没有账号? 注册" : "已有账号? 登录"}
           </button>
         </div>
-      </div>
+      </form>
     </div>
   );
 }
