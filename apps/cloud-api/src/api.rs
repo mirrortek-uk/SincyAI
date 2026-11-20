@@ -41,6 +41,7 @@ pub fn routes() -> Router<AppState> {
         .route("/tasks/{id}/route", get(get_task_route))
         .route("/kill-switches", post(create_kill_switch))
         .route("/kill-switches/{id}", delete(remove_kill_switch))
+        .route("/metrics", get(crate::metrics::metrics_handler))
         .layer(axum::middleware::from_fn(request_id_middleware))
 }
 
@@ -176,6 +177,7 @@ async fn publish_task(
     let pool = state.pool().map_err(app_error_response)?;
     let agency = AgencyId::from_uuid(body.agency_id);
     let task_id = Uuid::new_v4();
+    crate::metrics::Metrics::inc(&crate::metrics::metrics().tasks_published_total);
 
     // 0. idempotency: duplicate key => return recorded result, never re-execute
     if let Some(row) = sqlx::query(
@@ -355,6 +357,7 @@ async fn publish_task(
 
     match decision.reason.selected {
         Route::Api => {
+            crate::metrics::Metrics::inc(&crate::metrics::metrics().route_api_total);
             let pool_id = quota_pool_id.ok_or_else(|| {
                 app_error_response(AppError::no_side_effect(
                     "no_quota_pool",
@@ -364,6 +367,7 @@ async fn publish_task(
             let ledger = QuotaLedger::new(pool);
             match ledger.reserve(agency, pool_id, cost, task_id).await {
                 Ok(reservation) => {
+                    crate::metrics::Metrics::inc(&crate::metrics::metrics().quota_reserved_total);
                     let adapter = MockYouTubeAdapter {
                         quota_pool_id: pool_id,
                         quota_cost: cost,
@@ -407,6 +411,8 @@ async fn publish_task(
                 }
                 Err(_) => {
                     // QUOTA_WAIT semantics: no side effect, degrade to assisted
+                    crate::metrics::Metrics::inc(&crate::metrics::metrics().quota_exceeded_total);
+                    crate::metrics::Metrics::inc(&crate::metrics::metrics().route_degraded_total);
                     Ok(Json(PublishTaskResponse {
                         task_id,
                         route: "api".into(),
@@ -418,22 +424,28 @@ async fn publish_task(
                 }
             }
         }
-        Route::Assisted => Ok(Json(PublishTaskResponse {
-            task_id,
-            route: "assisted".into(),
-            status: "ASSISTED_READY".into(),
-            external_content_id: None,
-            receipt: None,
-            fallback: None,
-        })),
-        Route::Device => Ok(Json(PublishTaskResponse {
-            task_id,
-            route: "device".into(),
-            status: "DEVICE_QUEUED".into(),
-            external_content_id: None,
-            receipt: None,
-            fallback: None,
-        })),
+        Route::Assisted => {
+            crate::metrics::Metrics::inc(&crate::metrics::metrics().route_assisted_total);
+            Ok(Json(PublishTaskResponse {
+                task_id,
+                route: "assisted".into(),
+                status: "ASSISTED_READY".into(),
+                external_content_id: None,
+                receipt: None,
+                fallback: None,
+            }))
+        }
+        Route::Device => {
+            crate::metrics::Metrics::inc(&crate::metrics::metrics().route_device_total);
+            Ok(Json(PublishTaskResponse {
+                task_id,
+                route: "device".into(),
+                status: "DEVICE_QUEUED".into(),
+                external_content_id: None,
+                receipt: None,
+                fallback: None,
+            }))
+        }
     }
 }
 
@@ -498,6 +510,7 @@ async fn create_kill_switch(
             e.to_string(),
         ))
     })?;
+    crate::metrics::Metrics::inc(&crate::metrics::metrics().kill_switch_toggles_total);
     Ok(Json(json!({ "id": id, "active": true })))
 }
 
@@ -522,6 +535,7 @@ async fn remove_kill_switch(
             "kill switch not found",
         )));
     }
+    crate::metrics::Metrics::inc(&crate::metrics::metrics().kill_switch_toggles_total);
     Ok(Json(json!({ "id": id, "active": false })))
 }
 
@@ -531,6 +545,7 @@ async fn remove_kill_switch(
 
 /// Middleware: attach a fresh request_id header + log line for every request.
 pub async fn request_id_middleware(req: Request, next: axum::middleware::Next) -> Response {
+    crate::metrics::Metrics::inc(&crate::metrics::metrics().http_requests_total);
     let rid = req
         .headers()
         .get("x-request-id")

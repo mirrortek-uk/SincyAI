@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod gateway;
+pub mod metrics;
 pub mod state;
 
 pub use api::routes;

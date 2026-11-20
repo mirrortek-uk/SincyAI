@@ -63,6 +63,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, device_id: Uuid, agen
     let (mut sender, mut receiver) = socket.split();
 
     tracing::info!(%device_id, %agency_id, "agent connected");
+    crate::metrics::Metrics::inc(&crate::metrics::metrics().agent_connections_total);
 
     // dispatch loop: poll QUEUED device tasks for this tenant and assign them
     let dispatch_pool = pool.clone();
@@ -96,10 +97,14 @@ async fn handle_socket(socket: WebSocket, state: AppState, device_id: Uuid, agen
                         "route_id": r.get::<Option<Uuid>, _>("route_id"),
                     }),
                 );
-                let _ = sqlx::query("UPDATE device_tasks SET state = 'EXECUTING', attempt = attempt + 1 WHERE id = $1")
+                let _ = sqlx::query(
+                    "UPDATE device_tasks SET state = 'EXECUTING', attempt = attempt + 1, assigned_device_id = $2, updated_at = now() WHERE id = $1",
+                )
                     .bind(task_id)
+                    .bind(dispatch_device)
                     .execute(&dispatch_pool)
                     .await;
+                crate::metrics::Metrics::inc(&crate::metrics::metrics().agent_tasks_assigned_total);
                 if let Ok(text) = env.to_json()
                     && tx_dispatch.send(Message::Text(text.into())).await.is_err()
                 {
@@ -156,6 +161,39 @@ async fn handle_socket(socket: WebSocket, state: AppState, device_id: Uuid, agen
     dispatch.abort();
     fwd.abort();
     let _ = mgr.heartbeat(device_id).await;
+    crate::metrics::Metrics::inc(&crate::metrics::metrics().agent_disconnects_total);
+    // WP-15 resilience: device lost mid-task. Requeue EXECUTING tasks that never
+    // crossed the side-effect boundary; tasks past it go to VERIFICATION_PENDING
+    // (Uncertain: never auto-retry, never degrade).
+    let requeued = sqlx::query(
+        "UPDATE device_tasks SET state = 'QUEUED', assigned_device_id = NULL, updated_at = now()
+         WHERE agency_id = $1 AND assigned_device_id = $2 AND state = 'EXECUTING' AND side_effect_done = false
+         RETURNING id",
+    )
+    .bind(agency_id.as_uuid())
+    .bind(device_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default();
+    if !requeued.is_empty() {
+        for r in &requeued {
+            crate::metrics::Metrics::inc(&crate::metrics::metrics().agent_tasks_requeued_total);
+            tracing::warn!(%device_id, task_id = %r.get::<Uuid, _>("id"), "device lost: task requeued");
+        }
+    }
+    let uncertain = sqlx::query(
+        "UPDATE device_tasks SET state = 'VERIFICATION_PENDING', assigned_device_id = NULL, updated_at = now()
+         WHERE agency_id = $1 AND assigned_device_id = $2 AND state = 'EXECUTING' AND side_effect_done = true
+         RETURNING id",
+    )
+    .bind(agency_id.as_uuid())
+    .bind(device_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default();
+    for r in &uncertain {
+        tracing::error!(%device_id, task_id = %r.get::<Uuid, _>("id"), "device lost after side effect: VERIFICATION_PENDING, manual review required");
+    }
     tracing::info!(%device_id, "agent disconnected");
 }
 
@@ -240,6 +278,7 @@ async fn handle_envelope(
             .map_err(db)?;
         }
         MessageType::DeviceTaskResult => {
+            crate::metrics::Metrics::inc(&crate::metrics::metrics().agent_task_results_total);
             let task_id = Uuid::parse_str(env.payload["task_id"].as_str().unwrap_or_default())
                 .map_err(|e| AppError::non_retryable("bad_task_id", e.to_string()))?;
             let outcome = env.payload["outcome"].as_str().unwrap_or("");
@@ -264,26 +303,35 @@ async fn handle_envelope(
             .execute(&mut *tx)
             .await
             .map_err(db)?;
-            sqlx::query("UPDATE device_tasks SET state = $1, updated_at = now() WHERE id = $2 AND agency_id = $3")
-                .bind(format!("{:?}", new_state).to_uppercase())
-                .bind(task_id)
-                .bind(agency_id.as_uuid())
-                .execute(&mut *tx)
-                .await
-                .map_err(db)?;
-            sqlx::query(
-                "INSERT INTO task_events (agency_id, task_id, event, from_state, to_state, detail)
-                 VALUES ($1, $2, $3, $4, $5, $6)",
+            // idempotent: a result is only applied from an active execution state;
+            // duplicate deliveries (at-least-once WS) are dropped here
+            let upd = sqlx::query(
+                "UPDATE device_tasks SET state = $1, updated_at = now()
+                 WHERE id = $2 AND agency_id = $3 AND state IN ('EXECUTING', 'EXECUTING_STEPS')",
             )
-            .bind(agency_id.as_uuid())
+            .bind(format!("{:?}", new_state).to_uppercase())
             .bind(task_id)
-            .bind(&ev.event)
-            .bind(&ev.from)
-            .bind(&ev.to)
-            .bind(&env.payload)
+            .bind(agency_id.as_uuid())
             .execute(&mut *tx)
             .await
             .map_err(db)?;
+            if upd.rows_affected() == 1 {
+                sqlx::query(
+                    "INSERT INTO task_events (agency_id, task_id, event, from_state, to_state, detail)
+                     VALUES ($1, $2, $3, $4, $5, $6)",
+                )
+                .bind(agency_id.as_uuid())
+                .bind(task_id)
+                .bind(&ev.event)
+                .bind(&ev.from)
+                .bind(&ev.to)
+                .bind(&env.payload)
+                .execute(&mut *tx)
+                .await
+                .map_err(db)?;
+            } else {
+                tracing::info!(%task_id, "duplicate task.result ignored (already terminal)");
+            }
             tx.commit().await.map_err(db)?;
         }
         MessageType::DeviceStepEvidence => {
@@ -301,6 +349,7 @@ async fn handle_envelope(
         }
         MessageType::DeviceChallengeDetected => {
             // captcha / security challenge => WAITING_USER, never auto-solved
+            crate::metrics::Metrics::inc(&crate::metrics::metrics().challenges_total);
             let task_id = Uuid::parse_str(env.payload["task_id"].as_str().unwrap_or_default())
                 .map_err(|e| AppError::non_retryable("bad_task_id", e.to_string()))?;
             let mut tx = pool.begin().await.map_err(db)?;
@@ -328,6 +377,7 @@ async fn handle_envelope(
         }
         MessageType::DeviceUiDriftDetected => {
             // mark the adapter degraded for that platform/action (WP-13)
+            crate::metrics::Metrics::inc(&crate::metrics::metrics().ui_drift_events_total);
             let platform = env.payload["platform"].as_str().unwrap_or("");
             let action = env.payload["action"].as_str().unwrap_or("publish_video");
             let evidence = env.payload["reason"].as_str().unwrap_or("ui_drift");

@@ -10,7 +10,9 @@
 pub mod error;
 pub mod ids;
 pub mod paging;
+pub mod redaction;
 
 pub use error::{AppError, ErrorKind};
 pub use ids::{AgencyId, BrandId, DeviceId, IdempotencyKey, RequestId, TaskId};
 pub use paging::{Page, PageRequest};
+pub use redaction::redact;
