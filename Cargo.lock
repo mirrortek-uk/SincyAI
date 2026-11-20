@@ -330,7 +330,9 @@ dependencies = [
  "sincy-content",
  "sincy-database",
  "sincy-device",
+ "sincy-employee",
  "sincy-execution",
+ "sincy-intel",
  "sincy-platform",
  "sincy-protocol",
  "sincy-routing",
@@ -2666,6 +2668,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "sincy-employee"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "serde",
+ "serde_json",
+ "sincy-common",
+ "sincy-intel",
+ "thiserror 2.0.21",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "sincy-execution"
 version = "0.1.0"
 dependencies = [
@@ -2677,6 +2694,18 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "sincy-intel"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "sincy-common",
+ "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]

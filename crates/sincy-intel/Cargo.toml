@@ -1,0 +1,16 @@
+[package]
+name = "sincy-intel"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "World Intelligence Station core (WI guide): source/provider registry, capability router with scoring+fallback, unified intelligence model, opportunity engine, employee intelligence adapter"
+
+[dependencies]
+sincy-common = { path = "../sincy-common" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

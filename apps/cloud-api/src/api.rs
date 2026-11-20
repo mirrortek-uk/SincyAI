@@ -64,10 +64,13 @@ pub fn routes() -> Router<AppState> {
         .route("/kill-switches/{id}", delete(remove_kill_switch))
         .route("/analytics/metrics", post(import_metrics))
         .route("/ai/generate", post(ai_generate))
-        .route("/brands", get(list_brands))
+        .route("/clients", get(list_clients).post(create_client))
+        .route("/brands", get(list_brands).post(create_brand))
         .route("/packages", get(list_packages).post(create_package))
         .route("/packages/{id}/approve", post(approve_package))
         .route("/metrics", get(crate::metrics::metrics_handler))
+        .merge(crate::intel::routes())
+        .merge(crate::employees::routes())
         .layer(axum::middleware::from_fn(request_id_middleware))
         .layer(axum::middleware::from_fn(crate::auth::auth_middleware))
         .layer(cors_layer())
@@ -234,25 +237,25 @@ async fn list_capabilities(
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-struct PublishTaskBody {
+pub(crate) struct PublishTaskBody {
     /// 兼容旧调用; 受保护路由上 agency 一律以 JWT 为准, 此字段若存在必须一致
-    agency_id: Option<Uuid>,
-    brand_id: Uuid,
-    platform: String,
-    action: String,
-    package_id: Uuid,
-    package_version: u32,
-    idempotency_key: String,
+    pub(crate) agency_id: Option<Uuid>,
+    pub(crate) brand_id: Uuid,
+    pub(crate) platform: String,
+    pub(crate) action: String,
+    pub(crate) package_id: Uuid,
+    pub(crate) package_version: u32,
+    pub(crate) idempotency_key: String,
 }
 
 #[derive(Debug, Serialize)]
-struct PublishTaskResponse {
-    task_id: Uuid,
-    route: String,
-    status: String,
-    external_content_id: Option<String>,
-    receipt: Option<Value>,
-    fallback: Option<String>,
+pub(crate) struct PublishTaskResponse {
+    pub(crate) task_id: Uuid,
+    pub(crate) route: String,
+    pub(crate) status: String,
+    pub(crate) external_content_id: Option<String>,
+    pub(crate) receipt: Option<Value>,
+    pub(crate) fallback: Option<String>,
 }
 
 async fn publish_task(
@@ -270,7 +273,17 @@ async fn publish_task(
             "agency_id in body does not match the authenticated tenant",
         )));
     }
-    let agency = auth.agency_id;
+    publish_core(pool, auth.agency_id, body, state.allow_mock_adapters).await
+}
+
+/// 核心发布逻辑: REST handler 与数字员工的 PublishPort 共用同一套
+/// (急停/审批/路由/配额/审计), 保证员工自动发布和人工发布行为一致。
+pub(crate) async fn publish_core(
+    pool: &sqlx::PgPool,
+    agency: AgencyId,
+    body: PublishTaskBody,
+    allow_mock: bool,
+) -> Result<Json<PublishTaskResponse>, Response> {
     let task_id = Uuid::new_v4();
     crate::metrics::Metrics::inc(&crate::metrics::metrics().tasks_published_total);
 
@@ -515,7 +528,7 @@ async fn publish_task(
                     crate::metrics::Metrics::inc(&crate::metrics::metrics().quota_reserved_total);
                     // 真实产品路径: 生产环境(allow_mock_adapters=false)走真实平台
                     // adapter; mock 仅在显式开启的 dev 环境可用 (DoD 红线)
-                    let outcome = if state.allow_mock_adapters {
+                    let outcome = if allow_mock {
                         let adapter: Box<dyn ChannelAction> = Box::new(MockYouTubeAdapter {
                             quota_pool_id: pool_id,
                             quota_cost: cost,
@@ -1287,19 +1300,19 @@ async fn ai_generate(
 }
 
 /// Shared insert input for manual + AI-sourced publishing packages.
-struct NewPackage<'a> {
-    brand_id: Uuid,
-    platform: &'a str,
-    action: &'a str,
-    text: &'a str,
+pub(crate) struct NewPackage<'a> {
+    pub(crate) brand_id: Uuid,
+    pub(crate) platform: &'a str,
+    pub(crate) action: &'a str,
+    pub(crate) text: &'a str,
     /// "manual" (直接 approved) | "ai" (pending 人工审核, FR-024)
-    source: &'a str,
-    provenance: serde_json::Value,
-    approval_status: &'a str,
+    pub(crate) source: &'a str,
+    pub(crate) provenance: serde_json::Value,
+    pub(crate) approval_status: &'a str,
 }
 
 /// Shared insert for manual + AI-sourced publishing packages.
-async fn insert_package(
+pub(crate) async fn insert_package(
     pool: &sqlx::PgPool,
     agency: AgencyId,
     pkg: NewPackage<'_>,
@@ -1386,6 +1399,102 @@ async fn list_brands(
         })
         .collect();
     Ok(Json(json!({ "items": items })))
+}
+
+/// GET /api/v1/clients — 客户列表 (品牌归属客户).
+async fn list_clients(
+    State(state): State<AppState>,
+    axum::extract::Extension(auth): axum::extract::Extension<crate::auth::AuthCtx>,
+) -> Result<Json<Value>, Response> {
+    let pool = state.pool().map_err(app_error_response)?;
+    let rows = sqlx::query("SELECT id, name, status, created_at FROM clients WHERE agency_id = $1 ORDER BY created_at DESC")
+        .bind(auth.agency_id.as_uuid())
+        .fetch_all(pool)
+        .await
+        .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
+    let items: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            json!({
+                "id": r.get::<Uuid, _>("id"),
+                "name": r.get::<String, _>("name"),
+                "status": r.get::<String, _>("status"),
+                "created_at": r.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "items": items })))
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateClientBody {
+    name: String,
+}
+
+/// POST /api/v1/clients — 创建客户 (正式注册路径, 非演示).
+async fn create_client(
+    State(state): State<AppState>,
+    axum::extract::Extension(auth): axum::extract::Extension<crate::auth::AuthCtx>,
+    Json(body): Json<CreateClientBody>,
+) -> Result<Json<Value>, Response> {
+    let pool = state.pool().map_err(app_error_response)?;
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO clients (id, agency_id, name) VALUES ($1, $2, $3)")
+        .bind(id)
+        .bind(auth.agency_id.as_uuid())
+        .bind(&body.name)
+        .execute(pool)
+        .await
+        .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
+    Ok(Json(
+        json!({ "id": id, "name": body.name, "status": "active" }),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateBrandBody {
+    client_id: Uuid,
+    name: String,
+    /// 品牌调性/受众/禁区/合规规则 (FR-002)
+    config: Option<Value>,
+}
+
+/// POST /api/v1/brands — 创建品牌, 归属某客户; 数字员工挂载在品牌上.
+async fn create_brand(
+    State(state): State<AppState>,
+    axum::extract::Extension(auth): axum::extract::Extension<crate::auth::AuthCtx>,
+    Json(body): Json<CreateBrandBody>,
+) -> Result<Json<Value>, Response> {
+    let pool = state.pool().map_err(app_error_response)?;
+    let owns = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM clients WHERE id = $1 AND agency_id = $2)",
+    )
+    .bind(body.client_id)
+    .bind(auth.agency_id.as_uuid())
+    .fetch_one(pool)
+    .await
+    .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
+    if !owns {
+        return Err(app_error_response(AppError::non_retryable(
+            "client_not_found",
+            "client does not belong to this agency",
+        )));
+    }
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO brands (id, agency_id, client_id, name, config) VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(id)
+    .bind(auth.agency_id.as_uuid())
+    .bind(body.client_id)
+    .bind(&body.name)
+    .bind(body.config.unwrap_or_else(|| json!({})))
+    .execute(pool)
+    .await
+    .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
+    Ok(Json(
+        json!({ "id": id, "name": body.name, "client_id": body.client_id }),
+    ))
 }
 
 #[derive(Debug, Deserialize)]

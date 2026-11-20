@@ -148,6 +148,115 @@ export interface PackageItem {
   created_at: string;
 }
 
+
+export interface ClientItem {
+  id: string;
+  name: string;
+  status: string;
+  created_at: string;
+}
+
+export interface EmployeeItem {
+  id: string;
+  name: string;
+  role: string;
+  status: string;
+  channel: string;
+  auto_publish: boolean;
+  brand_id: string | null;
+  config_version: number;
+}
+
+export interface CycleItem {
+  id: string;
+  state: string;
+  trigger: string;
+  summary: Record<string, unknown> | null;
+  started_at: string | null;
+  finished_at: string | null;
+  created_at: string;
+}
+
+export interface CycleDetail extends CycleItem {
+  employee_id: string;
+  tasks: { id: string; agent: string; step: string; state: string; output: unknown }[];
+}
+
+export interface CycleOutcome {
+  cycle_id: string;
+  state: string;
+  selected_opportunity: string | null;
+  package_id: string | null;
+  task_id: string | null;
+  task_state: string | null;
+  summary: Record<string, unknown>;
+}
+
+export interface MemoryItem {
+  id: string;
+  type: string;
+  content: string;
+  evidence: unknown;
+  confidence: string;
+  created_at: string;
+}
+
+export interface InsightItem {
+  id: string;
+  cycle_id: string | null;
+  content: string;
+  evidence: unknown;
+  confidence: string;
+  created_at: string;
+}
+
+export interface IntelSource {
+  id: string;
+  name: string;
+  category: string;
+  access_method: string;
+  capabilities: string[];
+  platforms: string[];
+  auth_ref: string | null;
+  terms: string | null;
+  enabled: boolean;
+}
+
+export interface IntelProvider {
+  id: string;
+  source_id: string;
+  name: string;
+  endpoint: string | null;
+  capabilities: string[];
+  platforms: string[];
+  cost_model: Record<string, unknown>;
+  rate_limit: Record<string, unknown>;
+  health: string;
+  reliability: string;
+  enabled: boolean;
+  last_health_at: string | null;
+}
+
+export interface IntelItem {
+  id: string;
+  source_id: string;
+  provider_id: string | null;
+  kind: string;
+  dedup_key: string;
+  payload: Record<string, unknown>;
+  collected_at: string;
+}
+
+export interface OpportunityItem {
+  id: string;
+  topic: string;
+  score: string;
+  rationale: Record<string, unknown>;
+  evidence: string[];
+  status: string;
+  created_at: string;
+}
+
 export const api = {
   health: () => req<Health>("/healthz"),
   version: () => req<VersionInfo>("/version"),
@@ -211,6 +320,63 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  listClients: () => req<{ items: ClientItem[] }>("/clients"),
+  createClient: (name: string) =>
+    req<{ id: string; name: string; status: string }>("/clients", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    }),
+  createBrand: (body: { client_id: string; name: string; config?: unknown }) =>
+    req<{ id: string; name: string; client_id: string }>("/brands", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  listEmployees: () => req<{ items: EmployeeItem[] }>("/employees"),
+  createEmployee: (body: {
+    name: string;
+    role?: string;
+    brand_id?: string;
+    channel?: string;
+    auto_publish?: boolean;
+    identity?: unknown;
+    mission?: unknown;
+    strategy?: unknown;
+  }) => req<{ id: string; status: string }>("/employees", { method: "POST", body: JSON.stringify(body) }),
+  patchEmployee: (id: string, body: { name?: string; auto_publish?: boolean }) =>
+    req<{ id: string; patched: boolean }>(`/employees/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  employeeAction: (id: string, action: "start" | "pause" | "resume" | "stop") =>
+    req<{ id: string; status: string }>(`/employees/${id}/${action}`, { method: "POST" }),
+  listCycles: (id: string, limit = 20) =>
+    req<{ items: CycleItem[] }>(`/employees/${id}/cycles?limit=${limit}`),
+  runCycle: (id: string, trigger = "manual") =>
+    req<CycleOutcome>(`/employees/${id}/cycles`, {
+      method: "POST",
+      body: JSON.stringify({ trigger }),
+    }),
+  getCycle: (id: string) => req<CycleDetail>(`/cycles/${id}`),
+  listMemory: (id: string) => req<{ items: MemoryItem[] }>(`/employees/${id}/memory`),
+  listInsights: (id: string) => req<{ items: InsightItem[] }>(`/employees/${id}/insights`),
+  listIntelSources: () => req<{ items: IntelSource[] }>("/intel/sources"),
+  listIntelProviders: () => req<{ items: IntelProvider[] }>("/intel/providers"),
+  providerHealth: (id: string) =>
+    req<{ id: string; name: string; health: string; latency_ms: number; detail: string }>(
+      `/intel/providers/${id}/health`,
+      { method: "POST" },
+    ),
+  intelRoute: (body: { capability: string; platform?: string; max_cost_usd?: number }) =>
+    req<{ chain: string[]; providers: { id: string; name: string }[]; reason: string }>(
+      "/intel/route",
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+  listIntelItems: (kind?: string, limit = 50) =>
+    req<{ items: IntelItem[] }>("/intel/items" + (kind ? `?kind=${kind}&limit=${limit}` : `?limit=${limit}`)),
+  listOpportunities: (limit = 50) =>
+    req<{ items: OpportunityItem[] }>(`/intel/opportunities?limit=${limit}`),
+  refreshOpportunities: () =>
+    req<{ opportunities: number; upserted: number }>("/intel/opportunities", { method: "POST" }),
   approvePackage: (id: string) =>
     req<{ id: string; approval_status: string }>(`/packages/${id}/approve`, { method: "POST" }),
 };

@@ -33,6 +33,8 @@ export function Nav() {
       <span className="brand">Sincy Console</span>
       <Link href="/">总览</Link>
       <Link href="/tasks">任务</Link>
+      <Link href="/employees">数字员工</Link>
+      <Link href="/intel">世界情报</Link>
       <Link href="/devices">设备</Link>
       <Link href="/ai">AI 生成</Link>
       <Link href="/kill-switches">急停开关</Link>

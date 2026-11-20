@@ -13,6 +13,8 @@ members = [
     "crates/sincy-device",
     "crates/sincy-adapter",
     "crates/sincy-agent",
+    "crates/sincy-intel",
+    "crates/sincy-employee",
     "crates/sincy-transfer",
     "crates/sincy-ai",
     "apps/cloud-api",

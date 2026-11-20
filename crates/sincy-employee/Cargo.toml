@@ -1,0 +1,19 @@
+[package]
+name = "sincy-employee"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Digital Employee domain (SINCY-ARCH-DE-001): identity/mission/goals/strategy, lifecycle state machine, operating-cycle orchestration over port traits"
+
+[dependencies]
+sincy-common = { path = "../sincy-common" }
+sincy-intel = { path = "../sincy-intel" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+async-trait = "0.1"
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
