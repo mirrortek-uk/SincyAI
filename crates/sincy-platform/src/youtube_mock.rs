@@ -18,6 +18,8 @@ use sincy_routing::capability::Route;
 pub struct MockYouTubeAdapter {
     pub quota_pool_id: uuid::Uuid,
     pub quota_cost: i64,
+    /// dev-only: label the fake receipt with the requested platform
+    pub platform: String,
     /// when true, simulate quota exhaustion (WP-06 acceptance: QUOTA_WAIT / degrade)
     pub simulate_quota_exhausted: bool,
 }
@@ -47,12 +49,12 @@ impl ChannelAction for MockYouTubeAdapter {
     async fn execute(&self, ctx: &ExecCtx, pkg: &PublishingPackageRef) -> ExecOutcome {
         // Mock: no real network call. Returns a deterministic fake receipt.
         // Real adapter would call videos.insert here after quota reserve.
-        let external_id = format!("mock-yt-{}", ctx.idempotency_key);
+        let external_id = format!("mock-{}-{}", self.platform, ctx.idempotency_key);
         ExecOutcome::Success {
             external_content_id: Some(external_id.clone()),
             receipt: json!({
                 "mock": true,
-                "platform": "youtube",
+                "platform": self.platform,
                 "package_id": pkg.package_id,
                 "package_version": pkg.version,
                 "external_content_id": external_id,
@@ -65,7 +67,7 @@ impl ChannelAction for MockYouTubeAdapter {
         // Mock verification: the fake receipt is always "verified".
         VerifyOutcome {
             verified: true,
-            external_content_id: Some(format!("mock-yt-{}", ctx.idempotency_key)),
+            external_content_id: Some(format!("mock-{}-{}", self.platform, ctx.idempotency_key)),
             evidence: json!({"mock": true, "verified_via": "mock_receipt"}),
         }
     }
@@ -90,6 +92,7 @@ mod tests {
             quota_pool_id: uuid::Uuid::new_v4(),
             quota_cost: 1600,
             simulate_quota_exhausted: false,
+            platform: "youtube".into(),
         };
         let ctx = ExecCtx {
             agency_id: "a".into(),
@@ -110,7 +113,7 @@ mod tests {
                 external_content_id,
                 receipt,
             } => {
-                assert_eq!(external_content_id.as_deref(), Some("mock-yt-idem-1"));
+                assert_eq!(external_content_id.as_deref(), Some("mock-youtube-idem-1"));
                 assert_eq!(receipt["mock"], true);
             }
             _ => panic!("expected success"),

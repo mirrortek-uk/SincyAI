@@ -9,6 +9,7 @@ export default function TasksPage() {
   const [brandId, setBrandId] = useState("");
   const [packageId, setPackageId] = useState("");
   const [platform, setPlatform] = useState("youtube");
+  const actions = platform === "x" ? ["publish_post", "read_metrics"] : platform === "youtube" ? ["publish_video", "publish_image", "read_metrics"] : ["publish_video"];
   const [action, setAction] = useState("publish_video");
   const [result, setResult] = useState<PublishTaskResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -56,11 +57,22 @@ export default function TasksPage() {
         <input value={packageId} onChange={(e) => setPackageId(e.target.value)} placeholder="uuid" size={40} />
         <label>平台 / 动作</label>
         <div className="row">
-          <input value={platform} onChange={(e) => setPlatform(e.target.value)} />
+          <select
+            value={platform}
+            onChange={(e) => {
+              setPlatform(e.target.value);
+              setAction(e.target.value === "x" ? "publish_post" : "publish_video");
+            }}
+          >
+            <option value="youtube">youtube</option>
+            <option value="x">x (Twitter)</option>
+          </select>
           <select value={action} onChange={(e) => setAction(e.target.value)}>
-            <option value="publish_video">publish_video</option>
-            <option value="publish_image">publish_image</option>
-            <option value="read_metrics">read_metrics</option>
+            {actions.map((a) => (
+              <option key={a} value={a}>
+                {a}
+              </option>
+            ))}
           </select>
         </div>
         <div style={{ marginTop: 12 }}>

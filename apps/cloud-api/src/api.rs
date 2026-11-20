@@ -334,12 +334,14 @@ async fn publish_task(
     let router = ExecutionRouter::new(&snap);
 
     // quota availability decides api_ready
+    let quota_kind = quota_kind_for(&body.platform, &body.action);
     let quota_row = sqlx::query(
         "SELECT qp.id AS pool_id, qp.limit_value - qp.used_value AS avail, pa.platform
          FROM quota_pools qp JOIN platform_apps pa ON pa.id = qp.platform_app_id
-         WHERE pa.platform = $1 AND qp.quota_kind = 'videos.insert'",
+         WHERE pa.platform = $1 AND qp.quota_kind = $2",
     )
     .bind(&body.platform)
+    .bind(quota_kind)
     .fetch_optional(pool)
     .await
     .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
@@ -347,7 +349,7 @@ async fn publish_task(
         Some(r) => (Some(r.get::<Uuid, _>("pool_id")), r.get::<i64, _>("avail")),
         None => (None, 0),
     };
-    let cost: i64 = 1600; // videos.insert cost (mock; real adapter reads constraints)
+    let cost: i64 = quota_cost_for(&body.platform, &body.action);
     // route-time check is coarse (any headroom); the ledger reserve is authoritative
     let pre = Preconditions {
         api_ready: quota_avail > 0,
@@ -460,6 +462,7 @@ async fn publish_task(
                             quota_pool_id: pool_id,
                             quota_cost: cost,
                             simulate_quota_exhausted: false,
+                            platform: body.platform.clone(),
                         });
                         adapter.execute(&ctx, &pkg).await
                     } else {
@@ -1010,6 +1013,25 @@ async fn ai_generate(
     })))
 }
 
+/// platform+action -> quota kind (FR-020 共享配额池按种类记账)
+fn quota_kind_for(platform: &str, action: &str) -> &'static str {
+    match (platform, action) {
+        ("youtube", "publish_video") => "videos.insert",
+        ("x", "publish_post") => "tweets.create",
+        ("x", "read_metrics") => "tweets.read",
+        ("youtube", "read_metrics") => "youtube.read",
+        _ => "generic_units",
+    }
+}
+
+fn quota_cost_for(platform: &str, action: &str) -> i64 {
+    match (platform, action) {
+        ("youtube", "publish_video") => 1600,
+        ("x", "publish_post") => 1,
+        _ => 1,
+    }
+}
+
 /// 为 API 路由构建真实平台 adapter: 从发布包取账号与媒体资产,
 /// 媒体字节从对象存储取出 (大文件不走控制面, ADR-005).
 async fn build_real_adapter(
@@ -1038,6 +1060,46 @@ async fn build_real_adapter(
     let text: String = pkg_row.get("text_content");
     let constraints: Value = pkg_row.get("constraints");
 
+    if body.platform == "x" {
+        let mut x = sincy_platform::XAdapter::for_account(pool, agency.as_uuid(), &account_id)
+            .await
+            .map_err(app_error_response)?;
+        x.text = text;
+        if let Some(asset_id) = constraints["media_asset_id"].as_str() {
+            let asset = sqlx::query(
+                "SELECT storage_ref, mime, bytes FROM assets WHERE id = $1 AND agency_id = $2",
+            )
+            .bind(Uuid::parse_str(asset_id).map_err(|e| {
+                app_error_response(AppError::non_retryable("bad_asset_id", e.to_string()))
+            })?)
+            .bind(agency.as_uuid())
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?
+            .ok_or_else(|| {
+                app_error_response(AppError::no_side_effect(
+                    "asset_not_found",
+                    "media asset missing",
+                ))
+            })?;
+            let store = LocalObjectStore::new(
+                std::env::var("SINCY_OBJECT_STORE_ROOT").unwrap_or_else(|_| "./var/objects".into()),
+            );
+            let bytes = store
+                .get(&asset.get::<String, _>("storage_ref"))
+                .await
+                .map_err(|e| {
+                    app_error_response(AppError::no_side_effect("asset_read_failed", e.to_string()))
+                })?;
+            x.media = Some(MediaBlob {
+                bytes,
+                mime: asset.get("mime"),
+                filename: asset_id.to_string(),
+            });
+        }
+        let _ = pkg;
+        return Ok(Box::new(x));
+    }
     let mut adapter = YouTubeAdapter::for_account(pool, agency.as_uuid(), &account_id)
         .await
         .map_err(app_error_response)?;

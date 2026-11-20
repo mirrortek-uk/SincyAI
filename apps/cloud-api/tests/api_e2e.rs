@@ -12,6 +12,9 @@ use uuid::Uuid;
 
 const TEST_URL_ENV: &str = "SINCY_TEST_DATABASE_URL";
 
+/// 每个测试会 TRUNCATE 共享测试库, 必须串行执行
+static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn setup() -> Option<(
     sqlx::PgPool,
     cloud_api::state_for_test::AppState,
@@ -125,6 +128,7 @@ async fn call(
 
 #[tokio::test]
 async fn publish_flow_e2e() {
+    let _guard = TEST_LOCK.lock().await;
     let Some((pool, state, agency_id, brand_id, token)) = setup().await else {
         eprintln!("skip: {TEST_URL_ENV} not set");
         return;
@@ -174,7 +178,7 @@ async fn publish_flow_e2e() {
     assert_eq!(v["route"], "api");
     assert_eq!(v["status"], "PUBLISHED");
     let ext = v["external_content_id"].as_str().unwrap().to_string();
-    assert!(ext.starts_with("mock-yt-"));
+    assert!(ext.starts_with("mock-youtube-"));
     let task_id = v["task_id"].as_str().unwrap().to_string();
 
     // route audit
@@ -273,4 +277,73 @@ async fn publish_flow_e2e() {
     .await;
     assert_eq!(st, StatusCode::CONFLICT, "{v}");
     assert_eq!(v["error"]["code"], "kill_switch_active");
+}
+
+#[tokio::test]
+async fn x_platform_routes_to_api_and_publishes() {
+    let _guard = TEST_LOCK.lock().await;
+    let Some((pool, state, agency_id, brand_id, token)) = setup().await else {
+        eprintln!("skip: {TEST_URL_ENV} not set");
+        return;
+    };
+    // X capability + shared tweet quota pool (as migration 0013 seeds)
+    sqlx::query(
+        "INSERT INTO channel_capabilities (platform, action, route, status, priority, constraints)
+         VALUES ('x', 'publish_post', 'api', 'verified', 10, '{\"quota_cost\": 1}'),
+                ('x', 'publish_post', 'assisted', 'verified', 90, '{}')",
+    )
+    .execute(&pool)
+    .await
+    .expect("caps");
+    let x_app: Uuid = sqlx::query(
+        "INSERT INTO platform_apps (platform, client_id, client_secret_ref)
+         VALUES ('x', 'mock', 'vault://kv/mock') RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("app")
+    .get("id");
+    sqlx::query("INSERT INTO quota_pools (platform_app_id, quota_kind, limit_value, used_value) VALUES ($1, 'tweets.create', 1500, 0)")
+        .bind(x_app)
+        .execute(&pool)
+        .await
+        .expect("pool");
+
+    let idem = format!("idem-x-{}", Uuid::new_v4());
+    let (st, v) = call(
+        &state,
+        &token,
+        Request::builder()
+            .method("POST")
+            .uri("/tasks/publish")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "agency_id": agency_id, "brand_id": brand_id,
+                    "platform": "x", "action": "publish_post",
+                    "package_id": Uuid::new_v4(), "package_version": 1,
+                    "idempotency_key": idem,
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["route"], "api", "X publish_post must route to api: {v}");
+    assert_eq!(v["status"], "PUBLISHED");
+    assert!(
+        v["external_content_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("mock-x-")
+    );
+    // quota consumed from the tweets.create pool
+    let used: i64 =
+        sqlx::query_scalar("SELECT used_value FROM quota_pools WHERE platform_app_id = $1")
+            .bind(x_app)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(used, 1);
 }

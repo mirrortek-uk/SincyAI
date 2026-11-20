@@ -163,6 +163,7 @@ async fn route_quota_execute_receipt_audit() {
         quota_pool_id,
         quota_cost: 1600,
         simulate_quota_exhausted: false,
+        platform: "youtube".into(),
     };
     assert!(adapter.precheck(&ctx(task_id), &pkg()).await.ok);
     let exec = adapter.execute(&ctx(task_id), &pkg()).await;
@@ -171,7 +172,7 @@ async fn route_quota_execute_receipt_audit() {
             external_content_id,
             ..
         } => {
-            assert!(external_content_id.unwrap().starts_with("mock-yt-"));
+            assert!(external_content_id.unwrap().starts_with("mock-youtube-"));
         }
         _ => panic!("expected success"),
     }

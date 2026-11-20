@@ -66,9 +66,13 @@ cargo run -p cloud-api          # http://127.0.0.1:8080/api/v1/healthz
 - 受保护路由一律校验 `Authorization: Bearer <jwt>`，**agency_id 只从令牌推导**，不信任客户端传参（防越权）
 - 控制台：`frontend/` 下 `npm run dev` → http://localhost:3000 （未登录自动跳 /login；
   页面：总览 / 任务 / 设备 / AI 生成 / 急停开关 / 指标）
-- 生产环境发布走**真实 YouTube Data API v3 adapter**（resumable upload，配额 1600/call，
-  媒体从对象存储取）；mock adapter 仅在 `SINCY_ALLOW_MOCK_ADAPTERS=true`（local）可用，
-  `sincy-config` 在非 local 环境拒绝该配置。账号 OAuth token 只存 `vault://` 引用。
+- 生产环境发布走**真实平台 API adapter**：
+  - YouTube: Data API v3 `videos.insert` resumable upload，配额 1600/call，媒体从对象存储取
+  - **X (Twitter)**: API v2 `POST /2/tweets`（OAuth 2.0 user context，280 字 + 可选单媒体
+    `POST /2/media/upload`，共享配额池 `tweets.create` 1500/月，migration 0013 种子）
+    错误分档：4xx=无副作用可降级，5xx/断网=Uncertain 转人工核验
+  - mock adapter 仅在 `SINCY_ALLOW_MOCK_ADAPTERS=true`（local）可用，
+    `sincy-config` 在非 local 环境拒绝该配置。账号 OAuth token 只存 `vault://` 引用。
 - AI 生成：`POST /api/v1/ai/generate` 受月预算熔断（FR-026）保护，成本落账 `model_cost_records`
 - 指标导入：`POST /api/v1/analytics/metrics`（source 必须标注 api|device|manual）
 
