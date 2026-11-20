@@ -216,6 +216,76 @@ async fn employee_phase(pool: &sqlx::PgPool, port: &u16, token: &str, brand_id: 
     let emp_id = emp["id"].as_str().unwrap().to_string();
     assert_eq!(emp["status"], "READY");
 
+    // language: brand default zh-CN flows into the employee identity
+    let det = auth(client.get(format!("{base}/employees/{emp_id}")))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(det["language"], "zh-CN");
+    // PATCH employee language (versioned identity) + invalid language rejected
+    let patched = auth(
+        client
+            .patch(format!("{base}/employees/{emp_id}"))
+            .json(&json!({"language":"en-US"})),
+    )
+    .send()
+    .await
+    .unwrap();
+    assert!(patched.status().is_success());
+    let det2 = auth(client.get(format!("{base}/employees/{emp_id}")))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(det2["language"], "en-US");
+    let bad_lang = auth(
+        client
+            .patch(format!("{base}/employees/{emp_id}"))
+            .json(&json!({"language":"xx-XX"})),
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(bad_lang.status(), 400);
+    // brand-level language via PATCH /brands/{id}
+    let bp = auth(
+        client
+            .patch(format!("{base}/brands/{brand_id}"))
+            .json(&json!({"language":"ja-JP"})),
+    )
+    .send()
+    .await
+    .unwrap();
+    assert!(bp.status().is_success());
+    let bl = auth(client.get(format!("{base}/brands")))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert!(
+        bl["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b["language"] == "ja-JP")
+    );
+    // back to zh-CN for the cycle assertions below
+    auth(
+        client
+            .patch(format!("{base}/employees/{emp_id}"))
+            .json(&json!({"language":"zh-CN"})),
+    )
+    .send()
+    .await
+    .unwrap();
+
     // illegal transition: stop from READY is rejected (409-ish non_retryable)
     let bad = auth(client.post(format!("{base}/employees/{emp_id}/stop")))
         .send()

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import {
+  LANGUAGES,
   api,
   getToken,
   type BrandItem,
@@ -26,6 +27,7 @@ export default function EmployeesPage() {
   const [insights, setInsights] = useState<InsightItem[]>([]);
   const [name, setName] = useState("");
   const [brandId, setBrandId] = useState("");
+  const [language, setLanguage] = useState("zh-CN");
   const [autoPublish, setAutoPublish] = useState(false);
   const [lastCycle, setLastCycle] = useState<CycleOutcome | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -98,10 +100,22 @@ export default function EmployeesPage() {
         <h2>创建员工</h2>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <input placeholder="姓名 (如 Aria)" value={name} onChange={(e) => setName(e.target.value)} />
-          <select value={brandId} onChange={(e) => setBrandId(e.target.value)}>
+          <select
+            value={brandId}
+            onChange={(e) => {
+              setBrandId(e.target.value);
+              const b = brands.find((x) => x.id === e.target.value);
+              if (b?.language) setLanguage(b.language); // 品牌语言作为员工默认输出语言
+            }}
+          >
             {brands.length === 0 && <option value="">先创建品牌</option>}
             {brands.map((b) => (
-              <option key={b.id} value={b.id}>{b.name}</option>
+              <option key={b.id} value={b.id}>{b.name} · {b.language}</option>
+            ))}
+          </select>
+          <select value={language} onChange={(e) => setLanguage(e.target.value)} title="内容输出语言">
+            {LANGUAGES.map((l) => (
+              <option key={l.code} value={l.code}>{l.label}</option>
             ))}
           </select>
           <label>
@@ -118,7 +132,7 @@ export default function EmployeesPage() {
                   brand_id: brandId,
                   channel: "x",
                   auto_publish: autoPublish,
-                  identity: { name, role: "content_operator", voice: "neutral", audience: ["developers"], expertise: ["ai agents"], values: [], boundaries: [] },
+                  identity: { name, role: "content_operator", voice: "neutral", language, audience: ["developers"], expertise: ["ai agents"], values: [], boundaries: [] },
                   mission: { statement: "在 X 上建立品牌在 AI agents 领域的权威", domain: "content", audience: ["developers"], value_proposition: "实用、不灌水", constraints: ["280 字以内"], success_definition: "互动增长" },
                   strategy: { pillars: ["ai agents", "llm ops", "multi-agent"], cadence_per_week: 7, formats: ["text"], risk_tolerance: 0.3, exploration_budget: 0.2 },
                 });
@@ -143,7 +157,17 @@ export default function EmployeesPage() {
             >
               {e.name}
             </button>
-            <span className="muted">{e.status} · {e.channel} · auto_publish={String(e.auto_publish)}</span>
+            <span className="muted">{e.status} · {e.channel} · {e.language ?? "zh-CN"} · auto_publish={String(e.auto_publish)}</span>
+            <select
+              value={e.language ?? "zh-CN"}
+              disabled={busy}
+              title="内容输出语言"
+              onChange={(ev) => act(() => api.patchEmployee(e.id, { language: ev.target.value }))}
+            >
+              {LANGUAGES.map((l) => (
+                <option key={l.code} value={l.code}>{l.code}</option>
+              ))}
+            </select>
             {e.status === "READY" && <button disabled={busy} onClick={() => act(() => api.employeeAction(e.id, "start"))}>启动</button>}
             {e.status === "RUNNING" && <button disabled={busy} onClick={() => act(() => api.employeeAction(e.id, "pause"))}>暂停</button>}
             {e.status === "PAUSED" && <button disabled={busy} onClick={() => act(() => api.employeeAction(e.id, "resume"))}>恢复</button>}

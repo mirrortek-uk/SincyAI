@@ -85,6 +85,9 @@ pub struct Identity {
     pub personality: Value,
     #[serde(default = "default_voice")]
     pub voice: String,
+    /// 输出语言 (BCP-47), 默认中文; 由品牌 language 或创建时显式指定
+    #[serde(default = "default_language")]
+    pub language: String,
     #[serde(default)]
     pub audience: Vec<String>,
     #[serde(default)]
@@ -97,6 +100,10 @@ pub struct Identity {
 
 fn default_voice() -> String {
     "neutral".into()
+}
+
+pub fn default_language() -> String {
+    "zh-CN".into()
 }
 
 /// Mission as structured fields + text (DE §6).

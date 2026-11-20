@@ -15,7 +15,9 @@ use sincy_employee::agents::AgentKind;
 use sincy_employee::cycle::{
     CycleDeps, CycleStep, CycleStore, IntelPort, LlmPort, PublishPort, PublishReceipt, run_cycle,
 };
-use sincy_employee::domain::{Employee, EmployeeStatus, Identity, Mission, Strategy};
+use sincy_employee::domain::{
+    Employee, EmployeeStatus, Identity, Mission, Strategy, default_language,
+};
 use sincy_employee::lifecycle::transition;
 use sincy_employee::memory::MemoryItem;
 use sincy_intel::adapter::EmployeeContext;
@@ -101,6 +103,7 @@ async fn load_full(
             role: emp.role.clone(),
             personality: json!({}),
             voice: "neutral".into(),
+            language: default_language(),
             audience: vec![],
             expertise: vec![],
             values: vec![],
@@ -158,20 +161,25 @@ async fn create_employee(
     Json(body): Json<CreateEmployeeBody>,
 ) -> Result<Json<Value>, axum::response::Response> {
     let pool = state.pool().map_err(app_error_response)?;
+    // brand language becomes the employee's default output language (identity.language)
+    let mut brand_language: Option<String> = None;
     if let Some(b) = body.brand_id {
-        let owns: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM brands WHERE id = $1 AND agency_id = $2)",
-        )
-        .bind(b)
-        .bind(auth.agency_id.as_uuid())
-        .fetch_one(pool)
-        .await
-        .map_err(err)?;
-        if !owns {
-            return Err(app_error_response(sincy_common::AppError::non_retryable(
-                "brand_not_found",
-                "brand not owned by agency",
-            )));
+        let row = sqlx::query("SELECT EXISTS(SELECT 1 FROM brands WHERE id = $1 AND agency_id = $2) AS owns, language FROM brands WHERE id = $1 AND agency_id = $2")
+            .bind(b)
+            .bind(auth.agency_id.as_uuid())
+            .fetch_optional(pool)
+            .await
+            .map_err(err)?;
+        match row {
+            Some(r) if r.get::<bool, _>("owns") => {
+                brand_language = r.try_get::<String, _>("language").ok();
+            }
+            _ => {
+                return Err(app_error_response(sincy_common::AppError::non_retryable(
+                    "brand_not_found",
+                    "brand not owned by agency",
+                )));
+            }
         }
     }
     let id = Uuid::new_v4();
@@ -189,11 +197,14 @@ async fn create_employee(
     .execute(pool)
     .await
     .map_err(err)?;
-    // identity version 1
-    let identity = body.identity.clone().unwrap_or_else(|| json!({
+    // identity version 1 — language defaults to the brand's language, then zh-CN
+    let mut identity = body.identity.clone().unwrap_or_else(|| json!({
         "name": body.name, "role": body.role.clone().unwrap_or_else(|| "content_operator".into()),
         "personality": {}, "voice": "neutral", "audience": [], "expertise": [], "values": [], "boundaries": []
     }));
+    if identity.get("language").and_then(|v| v.as_str()).is_none() {
+        identity["language"] = json!(brand_language.unwrap_or_else(default_language));
+    }
     sqlx::query("INSERT INTO employee_identity_versions (employee_id, version, identity, status) VALUES ($1, 1, $2, 'active')")
         .bind(id).bind(&identity).execute(pool).await.map_err(err)?;
     let mission = body.mission.clone().unwrap_or_else(|| json!({
@@ -221,7 +232,9 @@ async fn list_employees(
 ) -> Result<Json<Value>, axum::response::Response> {
     let pool = state.pool().map_err(app_error_response)?;
     let rows = sqlx::query(
-        "SELECT * FROM digital_employees WHERE agency_id = $1 ORDER BY created_at DESC",
+        "SELECT e.*, (SELECT v.identity->>'language' FROM employee_identity_versions v
+                      WHERE v.employee_id = e.id AND v.status = 'active' ORDER BY v.version DESC LIMIT 1) AS language
+         FROM digital_employees e WHERE e.agency_id = $1 ORDER BY e.created_at DESC",
     )
     .bind(auth.agency_id.as_uuid())
     .fetch_all(pool)
@@ -229,7 +242,8 @@ async fn list_employees(
     .map_err(err)?;
     let items: Vec<Value> = rows.iter().map(|r| {
         let e = row_to_employee(r);
-        json!({"id": e.id, "name": e.name, "role": e.role, "status": e.status.as_str(), "channel": e.channel, "auto_publish": e.auto_publish, "brand_id": e.brand_id, "config_version": e.config_version})
+        let lang: Option<String> = r.try_get("language").ok().flatten();
+        json!({"id": e.id, "name": e.name, "role": e.role, "status": e.status.as_str(), "channel": e.channel, "auto_publish": e.auto_publish, "brand_id": e.brand_id, "config_version": e.config_version, "language": lang.unwrap_or_else(default_language)})
     }).collect();
     Ok(Json(json!({ "items": items })))
 }
@@ -253,8 +267,16 @@ async fn get_employee(
             ))
         })?;
     let e = row_to_employee(&r);
+    let lang: Option<String> = sqlx::query_scalar(
+        "SELECT identity->>'language' FROM employee_identity_versions WHERE employee_id = $1 AND status = 'active' ORDER BY version DESC LIMIT 1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .map_err(err)?
+    .flatten();
     Ok(Json(
-        json!({"id": e.id, "name": e.name, "role": e.role, "status": e.status.as_str(), "channel": e.channel, "auto_publish": e.auto_publish, "brand_id": e.brand_id, "config_version": e.config_version, "created_at": e.created_at}),
+        json!({"id": e.id, "name": e.name, "role": e.role, "status": e.status.as_str(), "channel": e.channel, "auto_publish": e.auto_publish, "brand_id": e.brand_id, "config_version": e.config_version, "language": lang.unwrap_or_else(default_language), "created_at": e.created_at}),
     ))
 }
 
@@ -262,6 +284,8 @@ async fn get_employee(
 struct PatchBody {
     name: Option<String>,
     auto_publish: Option<bool>,
+    /// 修改输出语言 — 会写入新的 identity 版本 (DE §6 identity 版本化)
+    language: Option<String>,
 }
 
 async fn patch_employee(
@@ -291,6 +315,37 @@ async fn patch_employee(
             "not_found",
             "employee not found",
         )));
+    }
+    if let Some(lang) = &body.language {
+        crate::api::validate_language(lang).map_err(crate::api::app_error_response)?;
+        // version the identity change: supersede current active, insert new version
+        let cur = sqlx::query(
+            "SELECT version, identity FROM employee_identity_versions WHERE employee_id = $1 AND status = 'active' ORDER BY version DESC LIMIT 1",
+        )
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(err)?;
+        let (version, mut identity) = match cur {
+            Some(r) => (
+                r.get::<i32, _>("version") + 1,
+                r.get::<Value, _>("identity"),
+            ),
+            None => (1, json!({"name": body.name.clone().unwrap_or_default()})),
+        };
+        identity["language"] = json!(lang);
+        sqlx::query("UPDATE employee_identity_versions SET status = 'superseded' WHERE employee_id = $1 AND status = 'active'")
+            .bind(id)
+            .execute(pool)
+            .await
+            .map_err(err)?;
+        sqlx::query("INSERT INTO employee_identity_versions (employee_id, version, identity, status) VALUES ($1, $2, $3, 'active')")
+            .bind(id)
+            .bind(version)
+            .bind(&identity)
+            .execute(pool)
+            .await
+            .map_err(err)?;
     }
     Ok(Json(json!({ "id": id, "patched": true })))
 }

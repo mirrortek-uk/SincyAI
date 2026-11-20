@@ -161,21 +161,75 @@ fn mock_draft(prompt: &str, max_tokens: u32) -> String {
                 })
         })
         .unwrap_or_else(|| "the topic at hand".to_string());
-    // platform limit for X posts is 280 chars INCLUDING the [mock:...] label
+    // output language from the prompt's "Language: <bcp47>" line (default zh-CN)
+    let language = prompt
+        .lines()
+        .find_map(|l| {
+            l.to_lowercase()
+                .split("language:")
+                .nth(1)
+                .and_then(|t| t.split_whitespace().next())
+                .map(|t| {
+                    t.trim_matches(|c| c == '.' || c == ',' || c == ';')
+                        .to_string()
+                })
+        })
+        .unwrap_or_else(|| "zh-CN".to_string());
+    let is_zh = language.starts_with("zh");
+    // platform limit for X posts is 280 WEIGHTED chars INCLUDING the [mock:...] label
+    // (CJK counts double, same as the critic in sincy-employee)
     let prefix = "[mock:mock-1] ";
     let limit = if max_tokens > 0 {
         (max_tokens as usize * 3).min(280)
     } else {
         280
     };
-    let body = format!(
-        "3 things I learned about {topic} this week:\n1) it compounds faster than expected;\n2) the boring parts (evals, guardrails) matter most;\n3) start with one narrow use case, not a grand agent. What would you add?"
-    );
+    let budget = limit.saturating_sub(weighted_len(prefix));
+    let body = if is_zh {
+        format!(
+            "本周聊聊 {topic} 的三个收获：\n1) 它带来的复利比想象中快；\n2) 最不起眼的部分（评测、护栏）反而最关键；\n3) 先从一个窄场景做起，别一上来就想做大而全的 agent。你会补充哪一条？"
+        )
+    } else {
+        format!(
+            "3 things I learned about {topic} this week:\n1) it compounds faster than expected;\n2) the boring parts (evals, guardrails) matter most;\n3) start with one narrow use case, not a grand agent. What would you add?"
+        )
+    };
+    let mut w = 0usize;
     let body: String = body
         .chars()
-        .take(limit.saturating_sub(prefix.chars().count()))
+        .take_while(|c| {
+            let cw = char_weight(*c);
+            if w + cw > budget {
+                false
+            } else {
+                w += cw;
+                true
+            }
+        })
         .collect();
     format!("{prefix}{body}")
+}
+
+/// X-style weighted length: CJK ideographs/kana/hangul count 2, the rest 1.
+fn char_weight(c: char) -> usize {
+    let v = c as u32;
+    if (0x1100..=0x115F).contains(&v)
+        || (0x2E80..=0xA4CF).contains(&v)
+        || (0xAC00..=0xD7A3).contains(&v)
+        || (0xF900..=0xFAFF).contains(&v)
+        || (0xFE30..=0xFE4F).contains(&v)
+        || (0xFF00..=0xFF60).contains(&v)
+        || (0xFFE0..=0xFFE6).contains(&v)
+        || (0x20000..=0x3FFFD).contains(&v)
+    {
+        2
+    } else {
+        1
+    }
+}
+
+fn weighted_len(s: &str) -> usize {
+    s.chars().map(char_weight).sum()
 }
 
 #[cfg(test)]
@@ -196,11 +250,13 @@ mod tests {
             .expect("gen");
         assert!(r.mock);
         assert!(r.text.starts_with("[mock:mock-1]"));
-        assert!(r.text.contains("3 things I learned")); // post-shaped draft, not a prompt echo
-        // topic-aware draft
+        // no Language line in prompt -> default zh-CN -> Chinese draft
+        assert!(r.text.contains("本周聊聊")); // post-shaped draft, not a prompt echo
+        assert!(weighted_len(&r.text) <= 280); // X weighted limit includes the mock label
+        // topic-aware draft, explicit en-US
         let r2 = gw
             .generate(&GenerationRequest {
-                prompt: "Write ONE x post about: obra/superpowers. Evidence: []".into(),
+                prompt: "You are Aria. Language: en-US.\nWrite ONE x post about: obra/superpowers. Evidence: []".into(),
                 model: "mock-1".into(),
                 max_tokens: 512,
                 content_item_id: None,
@@ -208,6 +264,20 @@ mod tests {
             .await
             .unwrap();
         assert!(r2.text.contains("obra/superpowers"));
-        assert!(r2.text.chars().count() <= 280); // X post limit includes the mock label
+        assert!(r2.text.contains("3 things I learned"));
+        assert!(weighted_len(&r2.text) <= 280);
+        // explicit zh-CN -> Chinese, topic-aware
+        let r3 = gw
+            .generate(&GenerationRequest {
+                prompt: "You are Aria. Language: zh-CN.\nWrite ONE x post about: addyosmani/agent-skills. Evidence: []".into(),
+                model: "mock-1".into(),
+                max_tokens: 512,
+                content_item_id: None,
+            })
+            .await
+            .unwrap();
+        assert!(r3.text.contains("addyosmani/agent-skills"));
+        assert!(r3.text.contains("本周聊聊"));
+        assert!(weighted_len(&r3.text) <= 280);
     }
 }

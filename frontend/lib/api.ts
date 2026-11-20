@@ -133,6 +133,7 @@ export interface BrandItem {
   id: string;
   name: string;
   client_id: string;
+  language: string;
   created_at: string;
 }
 
@@ -166,7 +167,20 @@ export interface EmployeeItem {
   auto_publish: boolean;
   brand_id: string | null;
   config_version: number;
+  language?: string;
 }
+
+export const LANGUAGES: { code: string; label: string }[] = [
+  { code: "zh-CN", label: "简体中文 (zh-CN)" },
+  { code: "zh-TW", label: "繁體中文 (zh-TW)" },
+  { code: "en-US", label: "English (en-US)" },
+  { code: "ja-JP", label: "日本語 (ja-JP)" },
+  { code: "ko-KR", label: "한국어 (ko-KR)" },
+  { code: "fr-FR", label: "Français (fr-FR)" },
+  { code: "de-DE", label: "Deutsch (de-DE)" },
+  { code: "es-ES", label: "Español (es-ES)" },
+  { code: "pt-BR", label: "Português (pt-BR)" },
+];
 
 export interface CycleItem {
   id: string;
@@ -391,9 +405,14 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ name }),
     }),
-  createBrand: (body: { client_id: string; name: string; config?: unknown }) =>
-    req<{ id: string; name: string; client_id: string }>("/brands", {
+  createBrand: (body: { client_id: string; name: string; config?: unknown; language?: string }) =>
+    req<{ id: string; name: string; client_id: string; language: string }>("/brands", {
       method: "POST",
+      body: JSON.stringify(body),
+    }),
+  updateBrand: (id: string, body: { name?: string; config?: unknown; language?: string }) =>
+    req<BrandItem>(`/brands/${id}`, {
+      method: "PATCH",
       body: JSON.stringify(body),
     }),
   listEmployees: () => req<{ items: EmployeeItem[] }>("/employees"),
@@ -407,7 +426,7 @@ export const api = {
     mission?: unknown;
     strategy?: unknown;
   }) => req<{ id: string; status: string }>("/employees", { method: "POST", body: JSON.stringify(body) }),
-  patchEmployee: (id: string, body: { name?: string; auto_publish?: boolean }) =>
+  patchEmployee: (id: string, body: { name?: string; auto_publish?: boolean; language?: string }) =>
     req<{ id: string; patched: boolean }>(`/employees/${id}`, {
       method: "PATCH",
       body: JSON.stringify(body),

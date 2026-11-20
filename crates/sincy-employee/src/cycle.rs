@@ -201,6 +201,30 @@ pub fn platform_text_limit(channel: &str) -> usize {
     }
 }
 
+/// X counts most CJK chars as weight 2 toward the 280 limit; ASCII counts 1.
+/// The critic enforces the *weighted* length so Chinese drafts are not over-long.
+pub fn weighted_len(s: &str) -> usize {
+    s.chars()
+        .map(|c| {
+            if (c as u32) >= 0x1100
+                && ((c as u32) <= 0x115F
+                    || (0x2E80..=0xA4CF).contains(&(c as u32))
+                    || (0xAC00..=0xD7A3).contains(&(c as u32))
+                    || (0xF900..=0xFAFF).contains(&(c as u32))
+                    || (0xFE30..=0xFE4F).contains(&(c as u32))
+                    || (0xFF00..=0xFF60).contains(&(c as u32))
+                    || (0xFFE0..=0xFFE6).contains(&(c as u32))
+                    || (0x20000..=0x2FFFD).contains(&(c as u32))
+                    || (0x30000..=0x3FFFD).contains(&(c as u32)))
+            {
+                2
+            } else {
+                1
+            }
+        })
+        .sum()
+}
+
 /// Run one operating cycle for an employee. Idempotent per (cycle, step) key.
 pub async fn run_cycle(
     deps: &CycleDeps,
@@ -313,8 +337,8 @@ pub async fn run_cycle(
 
     // --- Create: LLM draft via Content Factory port
     let prompt = format!(
-        "You are {name} ({role}). Mission: {mission}. Audience: {audience:?}. Voice: {voice}. Pillars: {pillars:?}.\n\
-         Write ONE {channel} post (max {limit} chars) about: {topic}. Evidence: {evidence:?}.\n\
+        "You are {name} ({role}). Mission: {mission}. Audience: {audience:?}. Voice: {voice}. Pillars: {pillars:?}. Language: {language}.\n\
+         Write ONE {channel} post (max {limit} weighted chars; CJK counts double) entirely in {language}, about: {topic}. Evidence: {evidence:?}.\n\
          Do NOT repeat these recent topics: {recent:?}.",
         name = identity.name,
         role = identity.role,
@@ -322,6 +346,7 @@ pub async fn run_cycle(
         audience = identity.audience,
         voice = identity.voice,
         pillars = strategy.pillars,
+        language = identity.language,
         channel = employee.channel,
         limit = platform_text_limit(&employee.channel),
         topic = opp.topic,
@@ -341,10 +366,12 @@ pub async fn run_cycle(
 
     // --- Review: critic gate (length, duplication, boundaries)
     let limit = platform_text_limit(&employee.channel);
+    let draft_weight = weighted_len(&draft);
     let mut verdict = json!({"pass": true, "checks": {}});
-    if draft.chars().count() > limit {
+    if draft_weight > limit {
         verdict["pass"] = json!(false);
-        verdict["checks"]["length"] = json!({"ok": false, "limit": limit});
+        verdict["checks"]["length"] =
+            json!({"ok": false, "limit": limit, "weighted_len": draft_weight});
     }
     if ctx.recent_topics.iter().any(|r| r == &opp.topic) {
         verdict["pass"] = json!(false);

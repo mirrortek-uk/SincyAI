@@ -11,7 +11,7 @@ use axum::{
     extract::{Path, Query, Request, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -66,6 +66,7 @@ pub fn routes() -> Router<AppState> {
         .route("/ai/generate", post(ai_generate))
         .route("/clients", get(list_clients).post(create_client))
         .route("/brands", get(list_brands).post(create_brand))
+        .route("/brands/{id}", patch(update_brand))
         .route("/packages", get(list_packages).post(create_package))
         .route("/packages/{id}/approve", post(approve_package))
         .route("/metrics", get(crate::metrics::metrics_handler))
@@ -1383,7 +1384,7 @@ async fn list_brands(
     axum::extract::Extension(auth): axum::extract::Extension<crate::auth::AuthCtx>,
 ) -> Result<Json<Value>, Response> {
     let pool = state.pool().map_err(app_error_response)?;
-    let rows = sqlx::query("SELECT id, name, client_id, created_at FROM brands WHERE agency_id = $1 ORDER BY created_at DESC")
+    let rows = sqlx::query("SELECT id, name, client_id, language, created_at FROM brands WHERE agency_id = $1 ORDER BY created_at DESC")
         .bind(auth.agency_id.as_uuid())
         .fetch_all(pool)
         .await
@@ -1395,6 +1396,7 @@ async fn list_brands(
                 "id": r.get::<Uuid, _>("id"),
                 "name": r.get::<String, _>("name"),
                 "client_id": r.get::<Uuid, _>("client_id"),
+                "language": r.get::<String, _>("language"),
                 "created_at": r.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
             })
         })
@@ -1452,12 +1454,30 @@ async fn create_client(
     ))
 }
 
+/// Allowed output languages (BCP-47 subset); brand default is zh-CN (migration 0020).
+pub(crate) const ALLOWED_LANGUAGES: [&str; 9] = [
+    "zh-CN", "zh-TW", "en-US", "ja-JP", "ko-KR", "fr-FR", "de-DE", "es-ES", "pt-BR",
+];
+
+pub(crate) fn validate_language(lang: &str) -> Result<(), AppError> {
+    if ALLOWED_LANGUAGES.contains(&lang) {
+        Ok(())
+    } else {
+        Err(AppError::non_retryable(
+            "invalid_language",
+            format!("language must be one of {ALLOWED_LANGUAGES:?}"),
+        ))
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct CreateBrandBody {
     client_id: Uuid,
     name: String,
     /// 品牌调性/受众/禁区/合规规则 (FR-002)
     config: Option<Value>,
+    /// 品牌内容输出语言 (BCP-47), 默认 zh-CN
+    language: Option<String>,
 }
 
 /// POST /api/v1/brands — 创建品牌, 归属某客户; 数字员工挂载在品牌上.
@@ -1481,21 +1501,74 @@ async fn create_brand(
             "client does not belong to this agency",
         )));
     }
+    let language = body.language.unwrap_or_else(|| "zh-CN".into());
+    validate_language(&language).map_err(app_error_response)?;
     let id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO brands (id, agency_id, client_id, name, config) VALUES ($1, $2, $3, $4, $5)",
+        "INSERT INTO brands (id, agency_id, client_id, name, config, language) VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(id)
     .bind(auth.agency_id.as_uuid())
     .bind(body.client_id)
     .bind(&body.name)
     .bind(body.config.unwrap_or_else(|| json!({})))
+    .bind(&language)
     .execute(pool)
     .await
     .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
     Ok(Json(
-        json!({ "id": id, "name": body.name, "client_id": body.client_id }),
+        json!({ "id": id, "name": body.name, "client_id": body.client_id, "language": language }),
     ))
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateBrandBody {
+    name: Option<String>,
+    config: Option<Value>,
+    /// 修改品牌内容输出语言 (BCP-47)
+    language: Option<String>,
+}
+
+/// PATCH /api/v1/brands/{id} — 更新品牌名称/配置/输出语言.
+async fn update_brand(
+    State(state): State<AppState>,
+    axum::extract::Extension(auth): axum::extract::Extension<crate::auth::AuthCtx>,
+    axum::extract::Path(id): axum::extract::Path<Uuid>,
+    Json(body): Json<UpdateBrandBody>,
+) -> Result<Json<Value>, Response> {
+    let pool = state.pool().map_err(app_error_response)?;
+    if let Some(l) = &body.language {
+        validate_language(l).map_err(app_error_response)?;
+    }
+    let row = sqlx::query(
+        "UPDATE brands SET
+           name = COALESCE($3, name),
+           config = COALESCE($4, config),
+           language = COALESCE($5, language)
+         WHERE id = $1 AND agency_id = $2
+         RETURNING id, name, client_id, language, created_at",
+    )
+    .bind(id)
+    .bind(auth.agency_id.as_uuid())
+    .bind(&body.name)
+    .bind(&body.config)
+    .bind(&body.language)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
+    let Some(r) = row else {
+        return Err(app_error_response(AppError::non_retryable(
+            "brand_not_found",
+            "brand does not belong to this agency",
+        )));
+    };
+    Ok(Json(json!({
+        "id": r.get::<Uuid, _>("id"),
+        "name": r.get::<String, _>("name"),
+        "client_id": r.get::<Uuid, _>("client_id"),
+        "language": r.get::<String, _>("language"),
+        "created_at": r.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
+    })))
 }
 
 #[derive(Debug, Deserialize)]
