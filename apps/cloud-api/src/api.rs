@@ -1536,6 +1536,7 @@ async fn list_packages(
                 "platform": r.get::<String, _>("platform"),
                 "action": r.get::<String, _>("action"),
                 "text_preview": text.chars().take(n).collect::<String>(),
+                "text_content": text,
                 "constraints": r.get::<serde_json::Value, _>("constraints"),
                 "approval_status": r.get::<String, _>("approval_status"),
                 "created_at": r.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),

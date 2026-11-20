@@ -143,6 +143,7 @@ export interface PackageItem {
   platform: string;
   action: string;
   text_preview: string;
+  text_content: string;
   constraints: { source?: string; provenance?: unknown };
   approval_status: string;
   created_at: string;

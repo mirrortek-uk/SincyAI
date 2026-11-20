@@ -98,6 +98,34 @@ export default function TasksPage() {
             </option>
           ))}
         </select>
+        {(() => {
+          const sel = packages.find((p) => p.id === packageId);
+          if (!sel) return null;
+          const prov = (sel.constraints?.provenance ?? {}) as Record<string, unknown>;
+          return (
+            <div className="panel" style={{ marginTop: 8 }}>
+              <strong>已选内容包全文（审阅用）</strong>
+              <p className="muted" style={{ margin: "4px 0" }}>
+                id {sel.id.slice(0, 8)} · {sel.platform}/{sel.action} · 状态 {sel.approval_status}
+                {prov.topic ? ` · topic=${String(prov.topic)}` : ""}
+                {prov.employee_id ? ` · 数字员工 ${String(prov.employee_id).slice(0, 8)} 生成` : ""}
+                {" "}· {sel.text_content.length} 字
+              </p>
+              <pre style={{
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-word",
+                background: "var(--bg)",
+                border: "1px solid var(--border)",
+                borderRadius: 6,
+                padding: 10,
+                margin: 0,
+                maxHeight: 260,
+                overflowY: "auto",
+                fontSize: 13,
+              }}>{sel.text_content}</pre>
+            </div>
+          );
+        })()}
         {packages.find((p) => p.id === packageId)?.approval_status === "pending" && (
           <p className="muted" style={{ color: "#e0a75a" }}>
             该包待审核（AI 生成），发布前需先在下方"待审核包"里点通过
@@ -148,7 +176,11 @@ export default function TasksPage() {
             {packages.filter((p) => p.approval_status === "pending").map((p) => (
               <tr key={p.id}>
                 <td className="muted">{p.platform}/{p.action}</td>
-                <td>{p.text_preview.slice(0, 60)}</td>
+                <td style={{ maxWidth: 480 }}>
+                  <pre style={{ whiteSpace: "pre-wrap", wordBreak: "break-word", margin: 0, fontSize: 12, maxHeight: 120, overflowY: "auto" }}>
+                    {p.text_content}
+                  </pre>
+                </td>
                 <td>
                   <button onClick={async () => { await api.approvePackage(p.id); await loadPackages(); }}>
                     审核通过
