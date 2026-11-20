@@ -34,6 +34,9 @@ chrono = { workspace = true }
 sqlx = { workspace = true }
 
 [dev-dependencies]
+sincy-agent = { path = "../../crates/sincy-agent" }
+sincy-adapter = { path = "../../crates/sincy-adapter" }
+reqwest = { workspace = true }
 tokio = { workspace = true }
 tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "handshake"] }
 sha2 = { workspace = true }

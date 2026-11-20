@@ -43,4 +43,6 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
     // WSS control channel to cloud-api /api/v1/agent/connect (ADR-005)
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    // device token at rest: Keystore-backed encrypted prefs
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
 }

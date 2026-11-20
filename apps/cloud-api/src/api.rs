@@ -20,6 +20,7 @@ use sincy_ai::{
     MockLlmGateway, OpenAiCompatibleGateway,
 };
 use sincy_common::{AgencyId, AppError, RequestId};
+use sincy_device::DeviceManager;
 use sincy_execution::killswitch::{KillScope, is_paused};
 use sincy_platform::matrix::PgCapabilityMatrix;
 use sincy_platform::quota::QuotaLedger;
@@ -43,6 +44,7 @@ pub fn routes() -> Router<AppState> {
         .route("/version", get(version))
         .route("/auth/login", post(crate::auth::login))
         .route("/agent/connect", get(crate::gateway::agent_connect))
+        .route("/agent/tasks/{id}", get(get_agent_task))
         .route("/agencies", post(create_agency))
         .route("/agencies/me", get(get_my_agency))
         .route("/capabilities", get(list_capabilities))
@@ -50,6 +52,11 @@ pub fn routes() -> Router<AppState> {
         .route("/tasks/publish", post(publish_task))
         .route("/tasks/{id}/route", get(get_task_route))
         .route("/devices", get(list_devices))
+        .route("/devices/register/start", post(start_device_registration))
+        .route(
+            "/devices/register/complete",
+            post(complete_device_registration),
+        )
         .route(
             "/kill-switches",
             get(list_kill_switches).post(create_kill_switch),
@@ -415,8 +422,8 @@ async fn publish_task(
         _ => "EXECUTING",
     };
     sqlx::query(
-        "INSERT INTO device_tasks (id, agency_id, brand_id, idempotency_key, state, route_id)
-         VALUES ($1, $2, $3, $4, $5, $6)",
+        "INSERT INTO device_tasks (id, agency_id, brand_id, idempotency_key, state, route_id, package_id, package_version)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     )
     .bind(task_id)
     .bind(agency.as_uuid())
@@ -424,6 +431,8 @@ async fn publish_task(
     .bind(&body.idempotency_key)
     .bind(task_state)
     .bind(Uuid::new_v4())
+    .bind(body.package_id)
+    .bind(body.package_version as i32)
     .execute(&mut *tx)
     .await
     .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
@@ -867,6 +876,185 @@ async fn list_tasks(
         })
         .collect();
     Ok(Json(json!({ "items": items })))
+}
+
+/// Device-authenticated task detail for the agent: package payload + the
+/// signed adapter version to execute. Device token (JWT) in ?token= — the
+/// same credential the WSS gateway authenticates (WP-07).
+#[derive(Debug, Deserialize)]
+struct AgentTaskQuery {
+    token: String,
+}
+
+async fn get_agent_task(
+    State(state): State<AppState>,
+    Query(q): Query<AgentTaskQuery>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, Response> {
+    let pool = state.pool().map_err(app_error_response)?;
+    let mgr = DeviceManager::new(pool, state.jwt_secret());
+    let (_device_id, agency_id) = mgr.authenticate(&q.token).await.map_err(|e| {
+        app_error_response(AppError::non_retryable("device_auth_failed", e.to_string()))
+    })?;
+
+    let task = sqlx::query(
+        "SELECT t.id, t.state, t.package_id, t.package_version, r.platform, r.action
+         FROM device_tasks t LEFT JOIN execution_routes r ON r.task_id = t.id
+         WHERE t.id = $1 AND t.agency_id = $2",
+    )
+    .bind(id)
+    .bind(agency_id.as_uuid())
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?
+    .ok_or_else(|| {
+        app_error_response(AppError::non_retryable(
+            "not_found",
+            "task not found for this agency",
+        ))
+    })?;
+
+    let platform: String = task.get("platform");
+    let action: String = task.get("action");
+
+    // adapter named by the device-route capability constraints
+    let cap = sqlx::query(
+        "SELECT constraints FROM channel_capabilities
+         WHERE platform = $1 AND action = $2 AND route = 'device'",
+    )
+    .bind(&platform)
+    .bind(&action)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
+    let adapter_id = cap
+        .and_then(|c| {
+            c.get::<serde_json::Value, _>("constraints")["adapter"]
+                .as_str()
+                .map(String::from)
+        })
+        .ok_or_else(|| {
+            app_error_response(AppError::non_retryable(
+                "no_adapter",
+                "device route has no signed adapter bound",
+            ))
+        })?;
+
+    // latest active signed version of that adapter (platform-level registry)
+    let av = sqlx::query(
+        "SELECT v.version, v.definition, v.signature, a.app_package
+         FROM app_adapter_versions v JOIN app_adapters a ON a.id = v.adapter_id
+         WHERE v.adapter_id = $1 AND v.state = 'active'
+         ORDER BY v.version DESC LIMIT 1",
+    )
+    .bind(&adapter_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?
+    .ok_or_else(|| {
+        app_error_response(AppError::non_retryable(
+            "adapter_not_registered",
+            format!("adapter {adapter_id} has no active signed version"),
+        ))
+    })?;
+
+    // package payload (text to post). Media stays in object storage (never in
+    // the control channel) — the agent pulls it via the transfer service.
+    let package_id: Option<Uuid> = task.get("package_id");
+    let package_version: Option<i32> = task.get("package_version");
+    let text = match (package_id, package_version) {
+        (Some(pid), Some(pv)) => sqlx::query_scalar::<_, String>(
+            "SELECT text_content FROM publishing_packages WHERE id = $1 AND version = $2",
+        )
+        .bind(pid)
+        .bind(pv)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?
+        .unwrap_or_default(),
+        _ => String::new(),
+    };
+
+    // the adapter travels as its canonical JSON; the device re-serializes and
+    // verifies the HMAC signature before running anything.
+    let definition: serde_json::Value = av.get("definition");
+    let adapter_yaml = serde_json::to_string_pretty(&definition)
+        .map_err(|e| app_error_response(AppError::retryable("serde", e.to_string())))?;
+
+    Ok(Json(json!({
+        "task_id": task.get::<Uuid, _>("id"),
+        "state": task.get::<String, _>("state"),
+        "platform": platform,
+        "action": action,
+        "package_text": text,
+        "app_package": av.get::<String, _>("app_package"),
+        "adapter_id": adapter_id,
+        "adapter_version": av.get::<i32, _>("version"),
+        "adapter_yaml": adapter_yaml,
+        "signature": av.get::<String, _>("signature"),
+    })))
+}
+
+/// Device pairing step 1: an authenticated owner starts registration; the
+/// one-time device secret is returned ONCE and only its hash is stored
+/// (WP-07 challenge-response). agency_id comes from the JWT only.
+#[derive(Debug, Deserialize)]
+struct RegisterStartBody {
+    platform: String,
+    name: Option<String>,
+}
+
+async fn start_device_registration(
+    State(state): State<AppState>,
+    axum::extract::Extension(auth): axum::extract::Extension<crate::auth::AuthCtx>,
+    Json(body): Json<RegisterStartBody>,
+) -> Result<Json<Value>, Response> {
+    let pool = state.pool().map_err(app_error_response)?;
+    let agency_id = auth.agency_id;
+    let mgr = DeviceManager::new(pool, state.jwt_secret());
+    let ch = mgr
+        .start_registration(agency_id, &body.platform, body.name.as_deref())
+        .await
+        .map_err(|e| {
+            app_error_response(AppError::non_retryable(
+                "registration_failed",
+                e.to_string(),
+            ))
+        })?;
+    Ok(Json(json!({
+        "device_id": ch.device_id,
+        "nonce": ch.nonce,
+        "device_secret": ch.device_secret,   // shown ONCE; only the hash is stored
+    })))
+}
+
+/// Device pairing step 2: proof = HMAC-style sha256(sha256(secret) + nonce);
+/// returns the long-lived device session token the agent uses on WSS/HTTP.
+#[derive(Debug, Deserialize)]
+struct RegisterCompleteBody {
+    device_id: Uuid,
+    nonce: String,
+    proof: String,
+}
+
+async fn complete_device_registration(
+    State(state): State<AppState>,
+    Json(body): Json<RegisterCompleteBody>,
+) -> Result<Json<Value>, Response> {
+    let pool = state.pool().map_err(app_error_response)?;
+    let mgr = DeviceManager::new(pool, state.jwt_secret());
+    let session = mgr
+        .complete_registration(body.device_id, &body.nonce, &body.proof)
+        .await
+        .map_err(|e| {
+            app_error_response(AppError::non_retryable(
+                "registration_failed",
+                e.to_string(),
+            ))
+        })?;
+    Ok(Json(
+        json!({ "device_id": body.device_id, "token": session.token }),
+    ))
 }
 
 async fn list_devices(

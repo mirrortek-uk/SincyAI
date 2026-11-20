@@ -8,7 +8,7 @@ use sincy_adapter::interpreter::{
 use sincy_adapter::schema::{AdapterDefinition, FlowStep};
 use sincy_adapter::sign::{definition_sha256, sign_definition, verify_definition};
 use sincy_adapter::version_range::VersionRange;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 fn sample_def() -> AdapterDefinition {
     let yaml = include_str!("../../../adapters/xiaohongshu.publish_video.yaml");
@@ -236,7 +236,7 @@ fn version_range_gates_execution() {
 #[test]
 fn screen_identification_prefers_challenge() {
     let def = sample_def();
-    let mut screens: HashMap<String, sincy_adapter::schema::ScreenDef> = def.screens.clone();
+    let mut screens: BTreeMap<String, sincy_adapter::schema::ScreenDef> = def.screens.clone();
     let _ = &mut screens;
     // a screen that matches both home and challenge anchors must resolve to challenge
     let both = MockSnapshot::new(

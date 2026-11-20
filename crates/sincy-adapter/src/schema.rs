@@ -2,6 +2,8 @@
 //! and are published signed; devices only execute signed, version-matching ones.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap as Map;
+#[allow(unused_imports)]
 use std::collections::HashMap;
 
 #[derive(Debug, thiserror::Error)]
@@ -17,7 +19,7 @@ pub struct AdapterDefinition {
     pub adapter: String, // e.g. xiaohongshu.publish_video
     pub version: u32,
     pub app: AppTarget,
-    pub screens: HashMap<String, ScreenDef>,
+    pub screens: Map<String, ScreenDef>,
     pub flow: Vec<FlowStep>,
     #[serde(default)]
     pub known_interrupts: Vec<Interrupt>,

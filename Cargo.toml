@@ -12,12 +12,14 @@ members = [
     "crates/sincy-execution",
     "crates/sincy-device",
     "crates/sincy-adapter",
+    "crates/sincy-agent",
     "crates/sincy-transfer",
     "crates/sincy-ai",
     "apps/cloud-api",
     "apps/cloud-scheduler",
     "apps/agent-worker",
     "apps/router-worker",
+    "android/rust-core",
 ]
 
 [workspace.package]

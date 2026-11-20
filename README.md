@@ -80,6 +80,27 @@ cargo run -p cloud-api          # http://127.0.0.1:8080/api/v1/healthz
 - AI 生成：`POST /api/v1/ai/generate` 受月预算熔断（FR-026）保护，成本落账 `model_cost_records`
 - 指标导入：`POST /api/v1/analytics/metrics`（source 必须标注 api|device|manual）
 
+## 设备 Agent（手机端，X 等平台走设备路线时使用）
+
+- 代码：`android/`（Kotlin App `com.sincy.agent` + `android/rust-core` Rust cdylib）。
+  真正的执行逻辑在 `crates/sincy-agent`（host 可测），Android 侧只是 JNI 薄包装，
+  保证手机端行为与服务端策略零偏差。
+- 配对：App 内登录账号 → `POST /devices/register/start`（Bearer）→ 拿到一次性
+  device_secret + nonce → proof = sha256(sha256(secret)+nonce) →
+  `POST /devices/register/complete`（公开，proof 即凭证）→ 设备 token 存
+  EncryptedSharedPreferences（Keystore）。服务端只存密钥哈希。
+- 运行：前台服务连 WSS `/api/v1/agent/connect?token=...`，心跳 10s；
+  云端把 QUEUED 任务以 `device.task.assign` 派发；agent 用
+  `GET /agent/tasks/{id}`（Bearer 设备 token）拉任务包 + 签名 adapter，
+  验签（HMAC，pinned key）+ 版本门禁（version_range）后由解释器逐步执行，
+  每步证据上报；挑战界面 → WAITING_USER 转人工；side_effect 之后失败一律
+  VERIFICATION_PENDING，绝不自动重试。
+- 本地验证（不用手机）：`cargo run -p sincy-agent --bin sincy-agent-sim -- ...`
+  用脚本化屏幕跑真实 agent 核心走完整 WSS 链路；集成测试
+  `apps/cloud-api/tests/device_agent_e2e.rs` 断言任务从 QUEUED 到 COMPLETED。
+- 打包 APK：需要 Android SDK platform 35 + build-tools + cargo-ndk
+  （本机 SDK 为空，CI 或装了 SDK 的机器上 `./gradlew assembleRelease`）。
+
 ## 工程规则（指导书 3.2）
 
 - 一次只实现一个可验收的垂直切片；先读 PRD/TDD 与现有代码，不凭空假设文件/表/API 存在。

@@ -5,6 +5,8 @@
 //! recovery at most N times then WAITING_USER; side_effect steps are tracked
 //! so the caller can forbid retry/degrade afterwards.
 
+use std::collections::BTreeMap as Map;
+#[allow(unused_imports)]
 use std::collections::HashMap;
 
 use crate::drift::{DriftVerdict, anchor_match_rate, judge};
@@ -118,7 +120,7 @@ pub struct ScreenMatch {
 
 pub fn identify_screen(
     snap: &dyn ScreenSnapshot,
-    screens: &HashMap<String, ScreenDef>,
+    screens: &Map<String, ScreenDef>,
     challenge: Option<&str>,
 ) -> ScreenMatch {
     // challenge screen wins first (safety)

@@ -42,7 +42,9 @@ pub fn auth_jwt() -> Option<&'static Arc<JwtIssuer>> {
 }
 
 /// Paths that stay public: health/version, login, agency registration (POST
-/// /agencies creates the tenant + owner), and the device gateway.
+/// /agencies creates the tenant + owner), the device gateway, and the device
+/// pairing completion (its proof-of-possession IS the credential).
+/// /devices/register/start stays protected: it needs the owner's Bearer JWT.
 fn is_public(path: &str, method: &axum::http::Method) -> bool {
     path.ends_with("/healthz")
         || path.ends_with("/version")
@@ -50,6 +52,7 @@ fn is_public(path: &str, method: &axum::http::Method) -> bool {
         || path.ends_with("/agent/connect")
         || path.ends_with("/metrics")  // Prometheus scrape, network-isolated
         || (method == axum::http::Method::POST && path.ends_with("/agencies"))
+        || (method == axum::http::Method::POST && path.ends_with("/devices/register/complete"))
 }
 
 /// Verify `Authorization: Bearer <jwt>` and inject AuthCtx into extensions.
