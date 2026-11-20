@@ -111,7 +111,7 @@ async fn list_jobs(State(state): State<AppState>) -> Result<Json<Value>, axum::r
                 "status": r.get::<String, _>("status"),
                 "last_run_at": r.get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_run_at"),
                 "last_error": r.get::<Option<String>, _>("last_error"),
-                "last_inserted": r.get::<Option<i64>, _>("last_inserted"),
+                "last_inserted": r.get::<Option<i32>, _>("last_inserted").map(|v| v as i64),
             })
         })
         .collect();

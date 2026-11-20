@@ -390,7 +390,7 @@ pub async fn collect_once(
                     &f.label,
                     "idle",
                     None,
-                    Some((ins + dup) as i64),
+                    Some((ins + dup) as i32),
                 )
                 .await;
                 tracing::info!(source = %f.source_id, label = %f.label, inserted = ins, dups = dup, "intel feed collected");
@@ -546,7 +546,7 @@ async fn mark_job(
     label: &str,
     status: &str,
     err: Option<&str>,
-    inserted: Option<i64>,
+    inserted: Option<i32>,
 ) {
     let _ = sqlx::query(
         "INSERT INTO intel_collection_jobs (source_id, schedule, status, last_run_at, last_error, last_inserted)
