@@ -51,7 +51,7 @@ fn make_file(mib: usize) -> Vec<u8> {
 
 #[tokio::test]
 async fn chunked_upload_resume_and_verify() {
-    let Some((pool, agency, other, store)) = setup().await else {
+    let Some((pool, agency, _other, store)) = setup().await else {
         eprintln!("skip: {TEST_URL_ENV} not set");
         return;
     };
