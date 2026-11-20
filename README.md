@@ -80,6 +80,17 @@ cargo run -p cloud-api          # http://127.0.0.1:8080/api/v1/healthz
 - AI 生成：`POST /api/v1/ai/generate` 受月预算熔断（FR-026）保护，成本落账 `model_cost_records`
 - 指标导入：`POST /api/v1/analytics/metrics`（source 必须标注 api|device|manual）
 
+## 内容从哪里来（X/YouTube 发布内容的来源）
+
+内容 = **内容包（publishing_packages）**，来源两条路：
+1. **AI 生成页** `/ai`：`POST /ai/generate` 带 `save_as_package` → 生成文本自动存包
+   （带 provenance，状态 `pending`，须人工 `POST /packages/{id}/approve` 后才可发布，FR-024）；
+2. **手工创建**：`POST /packages`（状态直接 `approved`）。
+   X 文案在入库时即校验 280 字上限。
+
+任务页 `/tasks` 的品牌/内容包都是下拉选择（`GET /brands`、`GET /packages?platform=&action=`），
+不再手填 UUID；发布时后端强制校验包已审批（否则 409 `package_not_approved`）。
+
 ## 设备 Agent（手机端，X 等平台走设备路线时使用）
 
 - 代码：`android/`（Kotlin App `com.sincy.agent` + `android/rust-core` Rust cdylib）。

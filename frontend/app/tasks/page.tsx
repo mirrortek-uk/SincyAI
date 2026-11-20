@@ -1,16 +1,19 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { api, getToken, type PublishTaskResponse, type TaskItem } from "@/lib/api";
+import { api, getToken, type BrandItem, type PackageItem, type PublishTaskResponse, type TaskItem } from "@/lib/api";
 
-// 任务页: 发布新任务 (FR-019 路由 + FR-020 配额 + 幂等) + 任务列表。
+// 任务页: 选品牌 + 选内容包 → 发布 (FR-019 路由 + FR-020 配额 + 幂等) + 任务列表。
+// 内容包来自 "AI 生成页存包" 或手工创建 (GET /packages)。
 export default function TasksPage() {
   const [tasks, setTasks] = useState<TaskItem[]>([]);
+  const [brands, setBrands] = useState<BrandItem[]>([]);
+  const [packages, setPackages] = useState<PackageItem[]>([]);
   const [brandId, setBrandId] = useState("");
   const [packageId, setPackageId] = useState("");
-  const [platform, setPlatform] = useState("youtube");
+  const [platform, setPlatform] = useState("x");
   const actions = platform === "x" ? ["publish_post", "read_metrics"] : platform === "youtube" ? ["publish_video", "publish_image", "read_metrics"] : ["publish_video"];
-  const [action, setAction] = useState("publish_video");
+  const [action, setAction] = useState("publish_post");
   const [result, setResult] = useState<PublishTaskResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -24,9 +27,36 @@ export default function TasksPage() {
     }
   }, []);
 
+  const loadMeta = useCallback(async () => {
+    if (!getToken()) return;
+    try {
+      const b = await api.listBrands();
+      setBrands(b.items);
+      if (!brandId && b.items.length > 0) setBrandId(b.items[0].id);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [brandId]);
+
+  const loadPackages = useCallback(async () => {
+    if (!getToken()) return;
+    try {
+      const r = await api.listPackages(platform, action);
+      setPackages(r.items);
+      setPackageId((cur) => (r.items.some((p) => p.id === cur) ? cur : r.items[0]?.id ?? ""));
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [platform, action]);
+
   useEffect(() => {
     load();
-  }, [load]);
+    loadMeta();
+  }, [load, loadMeta]);
+
+  useEffect(() => {
+    loadPackages();
+  }, [loadPackages]);
 
   async function onPublish() {
     setError(null);
@@ -52,10 +82,27 @@ export default function TasksPage() {
     <div>
       <h1>发布任务</h1>
       <div className="panel">
-        <label>Brand ID</label>
-        <input value={brandId} onChange={(e) => setBrandId(e.target.value)} placeholder="uuid" size={40} />
-        <label>Package ID（已审批的发布包）</label>
-        <input value={packageId} onChange={(e) => setPackageId(e.target.value)} placeholder="uuid" size={40} />
+        <label>品牌</label>
+        <select value={brandId} onChange={(e) => setBrandId(e.target.value)}>
+          {brands.length === 0 && <option value="">（无品牌，先建品牌）</option>}
+          {brands.map((b) => (
+            <option key={b.id} value={b.id}>{b.name}</option>
+          ))}
+        </select>
+        <label>内容包（X 内容从这里来：AI 生成页保存 / 手工创建）</label>
+        <select value={packageId} onChange={(e) => setPackageId(e.target.value)}>
+          {packages.length === 0 && <option value="">（暂无 {platform}/{action} 内容包）</option>}
+          {packages.map((p) => (
+            <option key={p.id} value={p.id}>
+              [{p.approval_status}] {p.text_preview.slice(0, 40)}…
+            </option>
+          ))}
+        </select>
+        {packages.find((p) => p.id === packageId)?.approval_status === "pending" && (
+          <p className="muted" style={{ color: "#e0a75a" }}>
+            该包待审核（AI 生成），发布前需先在下方"待审核包"里点通过
+          </p>
+        )}
         <label>平台 / 动作</label>
         <div className="row">
           <select
@@ -91,6 +138,27 @@ export default function TasksPage() {
           <pre>{JSON.stringify(result, null, 2)}</pre>
         </div>
       )}
+      <div className="panel">
+        <h3>待审核内容包（AI 生成）</h3>
+        <table cellPadding={8}>
+          <tbody>
+            {packages.filter((p) => p.approval_status === "pending").length === 0 && (
+              <tr><td className="muted">无</td></tr>
+            )}
+            {packages.filter((p) => p.approval_status === "pending").map((p) => (
+              <tr key={p.id}>
+                <td className="muted">{p.platform}/{p.action}</td>
+                <td>{p.text_preview.slice(0, 60)}</td>
+                <td>
+                  <button onClick={async () => { await api.approvePackage(p.id); await loadPackages(); }}>
+                    审核通过
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
       <div className="panel">
         <h3>最近任务</h3>
         <table cellPadding={8}>

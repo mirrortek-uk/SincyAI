@@ -64,6 +64,9 @@ pub fn routes() -> Router<AppState> {
         .route("/kill-switches/{id}", delete(remove_kill_switch))
         .route("/analytics/metrics", post(import_metrics))
         .route("/ai/generate", post(ai_generate))
+        .route("/brands", get(list_brands))
+        .route("/packages", get(list_packages).post(create_package))
+        .route("/packages/{id}/approve", post(approve_package))
         .route("/metrics", get(crate::metrics::metrics_handler))
         .layer(axum::middleware::from_fn(request_id_middleware))
         .layer(axum::middleware::from_fn(crate::auth::auth_middleware))
@@ -332,6 +335,32 @@ async fn publish_task(
         )));
     }
 
+    // 1.5 the referenced package must exist for this agency and be approved
+    //     (FR: only approved packages are published; AI content needs human review first)
+    let pkg_row = sqlx::query(
+        "SELECT approval_status FROM publishing_packages
+         WHERE id = $1 AND version = $2 AND agency_id = $3",
+    )
+    .bind(body.package_id)
+    .bind(body.package_version as i32)
+    .bind(agency.as_uuid())
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?
+    .ok_or_else(|| {
+        app_error_response(AppError::non_retryable(
+            "package_not_found",
+            "publishing package not found for this agency",
+        ))
+    })?;
+    let approval: String = pkg_row.get("approval_status");
+    if !matches!(approval.as_str(), "approved" | "auto_approved") {
+        return Err(app_error_response(AppError::needs_user(
+            "package_not_approved",
+            format!("package approval_status is {approval}; approve it first"),
+        )));
+    }
+
     // 2. capability matrix + route selection
     let matrix = PgCapabilityMatrix::new(pool);
     let snap = matrix
@@ -506,6 +535,13 @@ async fn publish_task(
                             receipt,
                         } => {
                             let _ = ledger.confirm(reservation.reservation_id).await;
+                            // api 路线内联执行成功: 任务行落 COMPLETED
+                            let _ = sqlx::query(
+                                "UPDATE device_tasks SET state = 'COMPLETED', updated_at = now() WHERE id = $1",
+                            )
+                            .bind(task_id)
+                            .execute(pool)
+                            .await;
                             Ok(Json(PublishTaskResponse {
                                 task_id,
                                 route: "api".into(),
@@ -1137,6 +1173,15 @@ struct AiGenerateBody {
     max_tokens: Option<u32>,
     /// 关联内容项, 用于成本归因 (FR-026)
     content_item_id: Option<Uuid>,
+    /// 生成后直接保存为发布包（内容来源: AI 生成页 → 内容包 → 发布）
+    save_as_package: Option<SaveAsPackage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SaveAsPackage {
+    brand_id: Uuid,
+    platform: String,
+    action: String,
 }
 
 /// POST /api/v1/ai/generate — 受预算熔断保护的 LLM 生成 (FR-026 + WP-14).
@@ -1211,6 +1256,25 @@ async fn ai_generate(
             },
         )
         .await;
+    // AI 生成内容落为内容包: 带 provenance (FR-024), 状态 pending 待人工审核
+    let mut package_id: Option<Uuid> = None;
+    if let Some(save) = &body.save_as_package {
+        let pid = insert_package(
+            pool,
+            auth.agency_id,
+            NewPackage {
+                brand_id: save.brand_id,
+                platform: &save.platform,
+                action: &save.action,
+                text: &result.text,
+                source: "ai",
+                provenance: json!({"model": result.model, "tools": [format!("sincy-ai/{}", result.model)], "mock": result.mock}),
+                approval_status: "pending",
+            },
+        )
+        .await?;
+        package_id = Some(pid);
+    }
     Ok(Json(json!({
         "text": result.text,
         "model": result.model,
@@ -1218,7 +1282,216 @@ async fn ai_generate(
         "tokens_out": result.tokens_out,
         "mock": result.mock,
         "estimated_cost_usd": est.to_string(),
+        "package_id": package_id,
     })))
+}
+
+/// Shared insert input for manual + AI-sourced publishing packages.
+struct NewPackage<'a> {
+    brand_id: Uuid,
+    platform: &'a str,
+    action: &'a str,
+    text: &'a str,
+    /// "manual" (直接 approved) | "ai" (pending 人工审核, FR-024)
+    source: &'a str,
+    provenance: serde_json::Value,
+    approval_status: &'a str,
+}
+
+/// Shared insert for manual + AI-sourced publishing packages.
+async fn insert_package(
+    pool: &sqlx::PgPool,
+    agency: AgencyId,
+    pkg: NewPackage<'_>,
+) -> Result<Uuid, Response> {
+    let NewPackage {
+        brand_id,
+        platform,
+        action,
+        text,
+        source,
+        provenance,
+        approval_status,
+    } = pkg;
+    // brand must belong to this agency (防越权)
+    let owns = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM brands WHERE id = $1 AND agency_id = $2)",
+    )
+    .bind(brand_id)
+    .bind(agency.as_uuid())
+    .fetch_one(pool)
+    .await
+    .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
+    if !owns {
+        return Err(app_error_response(AppError::non_retryable(
+            "brand_not_found",
+            "brand does not belong to this agency",
+        )));
+    }
+    // platform limits (X 280 chars) enforced at content time, not publish time
+    let max_chars = match platform {
+        "x" => 280,
+        _ => 40_000,
+    };
+    if text.chars().count() > max_chars {
+        return Err(app_error_response(AppError::needs_user(
+            "text_too_long",
+            format!(
+                "text is {} chars, platform {platform} allows {max_chars}",
+                text.chars().count()
+            ),
+        )));
+    }
+    let pid = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO publishing_packages
+         (id, version, agency_id, brand_id, platform, account_id, action, text_content, constraints, approval_status)
+         VALUES ($1, 1, $2, $3, $4, $5, $6, $7, $8, $9)",
+    )
+    .bind(pid)
+    .bind(agency.as_uuid())
+    .bind(brand_id)
+    .bind(platform)
+    .bind(brand_id) // account_id: 默认绑定品牌账号 (社交账号绑定 WP 后续细化)
+    .bind(action)
+    .bind(text)
+    .bind(json!({"source": source, "provenance": provenance}))
+    .bind(approval_status)
+    .execute(pool)
+    .await
+    .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
+    Ok(pid)
+}
+
+/// GET /api/v1/brands — 当前机构的品牌列表 (发布表单下拉框的数据源).
+async fn list_brands(
+    State(state): State<AppState>,
+    axum::extract::Extension(auth): axum::extract::Extension<crate::auth::AuthCtx>,
+) -> Result<Json<Value>, Response> {
+    let pool = state.pool().map_err(app_error_response)?;
+    let rows = sqlx::query("SELECT id, name, client_id, created_at FROM brands WHERE agency_id = $1 ORDER BY created_at DESC")
+        .bind(auth.agency_id.as_uuid())
+        .fetch_all(pool)
+        .await
+        .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
+    let items: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            json!({
+                "id": r.get::<Uuid, _>("id"),
+                "name": r.get::<String, _>("name"),
+                "client_id": r.get::<Uuid, _>("client_id"),
+                "created_at": r.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "items": items })))
+}
+
+#[derive(Debug, Deserialize)]
+struct PackagesQuery {
+    platform: Option<String>,
+    action: Option<String>,
+}
+
+/// GET /api/v1/packages?platform=x&action=publish_post — 内容包列表 (X 内容的来源).
+async fn list_packages(
+    State(state): State<AppState>,
+    axum::extract::Extension(auth): axum::extract::Extension<crate::auth::AuthCtx>,
+    Query(q): Query<PackagesQuery>,
+) -> Result<Json<Value>, Response> {
+    let pool = state.pool().map_err(app_error_response)?;
+    let rows = sqlx::query(
+        "SELECT id, version, brand_id, platform, action, text_content, constraints, approval_status, created_at
+         FROM publishing_packages WHERE agency_id = $1
+           AND ($2::text IS NULL OR platform = $2)
+           AND ($3::text IS NULL OR action = $3)
+         ORDER BY created_at DESC LIMIT 200",
+    )
+    .bind(auth.agency_id.as_uuid())
+    .bind(&q.platform)
+    .bind(&q.action)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
+    let items: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            let text: String = r.get("text_content");
+            let n = text.chars().count().min(120);
+            json!({
+                "id": r.get::<Uuid, _>("id"),
+                "version": r.get::<i32, _>("version"),
+                "brand_id": r.get::<Uuid, _>("brand_id"),
+                "platform": r.get::<String, _>("platform"),
+                "action": r.get::<String, _>("action"),
+                "text_preview": text.chars().take(n).collect::<String>(),
+                "constraints": r.get::<serde_json::Value, _>("constraints"),
+                "approval_status": r.get::<String, _>("approval_status"),
+                "created_at": r.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "items": items })))
+}
+
+/// POST /api/v1/packages — 手工创建内容包 (manual 直接 approved).
+#[derive(Debug, Deserialize)]
+struct CreatePackageBody {
+    brand_id: Uuid,
+    platform: String,
+    action: String,
+    text: String,
+}
+
+async fn create_package(
+    State(state): State<AppState>,
+    axum::extract::Extension(auth): axum::extract::Extension<crate::auth::AuthCtx>,
+    Json(body): Json<CreatePackageBody>,
+) -> Result<Json<Value>, Response> {
+    let pool = state.pool().map_err(app_error_response)?;
+    let pid = insert_package(
+        pool,
+        auth.agency_id,
+        NewPackage {
+            brand_id: body.brand_id,
+            platform: &body.platform,
+            action: &body.action,
+            text: &body.text,
+            source: "manual",
+            provenance: json!({}),
+            approval_status: "approved",
+        },
+    )
+    .await?;
+    Ok(Json(
+        json!({ "package_id": pid, "version": 1, "approval_status": "approved" }),
+    ))
+}
+
+/// POST /api/v1/packages/{id}/approve — 人工审核通过 AI 生成的内容包.
+async fn approve_package(
+    State(state): State<AppState>,
+    axum::extract::Extension(auth): axum::extract::Extension<crate::auth::AuthCtx>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, Response> {
+    let pool = state.pool().map_err(app_error_response)?;
+    let upd = sqlx::query(
+        "UPDATE publishing_packages SET approval_status = 'approved'
+         WHERE id = $1 AND agency_id = $2 AND approval_status = 'pending'",
+    )
+    .bind(id)
+    .bind(auth.agency_id.as_uuid())
+    .execute(pool)
+    .await
+    .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
+    if upd.rows_affected() == 0 {
+        return Err(app_error_response(AppError::needs_user(
+            "not_pending",
+            "package not found or not pending approval",
+        )));
+    }
+    Ok(Json(json!({ "id": id, "approval_status": "approved" })))
 }
 
 /// platform+action -> quota kind (FR-020 共享配额池按种类记账)

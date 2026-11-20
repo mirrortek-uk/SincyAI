@@ -126,6 +126,26 @@ export interface AiGenerateResponse {
   tokens_out: number;
   mock: boolean;
   estimated_cost_usd: string;
+  package_id: string | null;
+}
+
+export interface BrandItem {
+  id: string;
+  name: string;
+  client_id: string;
+  created_at: string;
+}
+
+export interface PackageItem {
+  id: string;
+  version: number;
+  brand_id: string;
+  platform: string;
+  action: string;
+  text_preview: string;
+  constraints: { source?: string; provenance?: unknown };
+  approval_status: string;
+  created_at: string;
 }
 
 export const api = {
@@ -175,6 +195,22 @@ export const api = {
     metrics: unknown;
     source: "api" | "device" | "manual";
   }) => req<{ id: string }>("/analytics/metrics", { method: "POST", body: JSON.stringify(body) }),
-  aiGenerate: (body: { prompt: string; max_tokens?: number; model?: string }) =>
-    req<AiGenerateResponse>("/ai/generate", { method: "POST", body: JSON.stringify(body) }),
+  aiGenerate: (body: {
+    prompt: string;
+    max_tokens?: number;
+    model?: string;
+    save_as_package?: { brand_id: string; platform: string; action: string };
+  }) => req<AiGenerateResponse>("/ai/generate", { method: "POST", body: JSON.stringify(body) }),
+  listBrands: () => req<{ items: BrandItem[] }>("/brands"),
+  listPackages: (platform?: string, action?: string) =>
+    req<{ items: PackageItem[] }>(
+      "/packages" + (platform ? `?platform=${platform}${action ? `&action=${action}` : ""}` : ""),
+    ),
+  createPackage: (body: { brand_id: string; platform: string; action: string; text: string }) =>
+    req<{ package_id: string; version: number; approval_status: string }>("/packages", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  approvePackage: (id: string) =>
+    req<{ id: string; approval_status: string }>(`/packages/${id}/approve`, { method: "POST" }),
 };

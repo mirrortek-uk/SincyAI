@@ -223,6 +223,10 @@ impl AgentClient {
         .await
         .map_err(|e| AgentError::Ws(e.to_string()))?;
 
+        // grace period: let the gateway apply the result before the socket
+        // closes (exiting immediately can truncate the final frame)
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+
         Ok(result)
     }
 }

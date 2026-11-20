@@ -21,6 +21,7 @@ async fn setup() -> Option<(
     Uuid,
     Uuid,
     String,
+    Uuid,
 )> {
     let url = std::env::var(TEST_URL_ENV).ok()?;
     let pool = PgPoolOptions::new()
@@ -94,6 +95,19 @@ async fn setup() -> Option<(
     .await
     .expect("member");
 
+    // approved package so publish passes the approval gate
+    let package_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO publishing_packages (id, version, agency_id, brand_id, platform, account_id, action, text_content, approval_status)
+         VALUES ($1, 1, $2, $3, 'youtube', $3, 'publish_video', 'seed', 'approved')",
+    )
+    .bind(package_id)
+    .bind(agency_id)
+    .bind(brand_id)
+    .execute(&pool)
+    .await
+    .expect("package");
+
     let state = cloud_api::state_for_test::test_state(Some(pool.clone()));
     let token = state
         .jwt()
@@ -103,7 +117,7 @@ async fn setup() -> Option<(
             vec!["owner".into()],
         )
         .expect("token");
-    Some((pool, state, agency_id, brand_id, token))
+    Some((pool, state, agency_id, brand_id, token, package_id))
 }
 
 async fn call(
@@ -129,7 +143,7 @@ async fn call(
 #[tokio::test]
 async fn publish_flow_e2e() {
     let _guard = TEST_LOCK.lock().await;
-    let Some((pool, state, agency_id, brand_id, token)) = setup().await else {
+    let Some((pool, state, agency_id, brand_id, token, package_id)) = setup().await else {
         eprintln!("skip: {TEST_URL_ENV} not set");
         return;
     };
@@ -166,7 +180,7 @@ async fn publish_flow_e2e() {
                 json!({
                     "agency_id": agency_id, "brand_id": brand_id,
                     "platform": "youtube", "action": "publish_video",
-                    "package_id": Uuid::new_v4(), "package_version": 1,
+                    "package_id": package_id, "package_version": 1,
                     "idempotency_key": idem,
                 })
                 .to_string(),
@@ -206,7 +220,7 @@ async fn publish_flow_e2e() {
                 json!({
                     "agency_id": agency_id, "brand_id": brand_id,
                     "platform": "youtube", "action": "publish_video",
-                    "package_id": Uuid::new_v4(), "package_version": 1,
+                    "package_id": package_id, "package_version": 1,
                     "idempotency_key": idem,
                 })
                 .to_string(),
@@ -236,7 +250,7 @@ async fn publish_flow_e2e() {
                 json!({
                     "agency_id": agency_id, "brand_id": brand_id,
                     "platform": "youtube", "action": "publish_video",
-                    "package_id": Uuid::new_v4(), "package_version": 1,
+                    "package_id": package_id, "package_version": 1,
                     "idempotency_key": format!("idem-{}", Uuid::new_v4()),
                 })
                 .to_string(),
@@ -267,7 +281,7 @@ async fn publish_flow_e2e() {
                 json!({
                     "agency_id": agency_id, "brand_id": brand_id,
                     "platform": "youtube", "action": "publish_video",
-                    "package_id": Uuid::new_v4(), "package_version": 1,
+                    "package_id": package_id, "package_version": 1,
                     "idempotency_key": format!("idem-{}", Uuid::new_v4()),
                 })
                 .to_string(),
@@ -282,7 +296,7 @@ async fn publish_flow_e2e() {
 #[tokio::test]
 async fn x_platform_routes_to_api_and_publishes() {
     let _guard = TEST_LOCK.lock().await;
-    let Some((pool, state, agency_id, brand_id, token)) = setup().await else {
+    let Some((pool, state, agency_id, brand_id, token, package_id)) = setup().await else {
         eprintln!("skip: {TEST_URL_ENV} not set");
         return;
     };
@@ -321,7 +335,7 @@ async fn x_platform_routes_to_api_and_publishes() {
                 json!({
                     "agency_id": agency_id, "brand_id": brand_id,
                     "platform": "x", "action": "publish_post",
-                    "package_id": Uuid::new_v4(), "package_version": 1,
+                    "package_id": package_id, "package_version": 1,
                     "idempotency_key": idem,
                 })
                 .to_string(),
