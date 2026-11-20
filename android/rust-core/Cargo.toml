@@ -1,0 +1,15 @@
+[package]
+name = "sincy-agent-core"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Sincy Android agent Rust core (JNI): state machines + adapter interpreter, reusing sincy-execution / sincy-adapter"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+sincy-execution = { path = "../../crates/sincy-execution" }
+sincy-adapter = { path = "../../crates/sincy-adapter" }
+sincy-protocol = { path = "../../crates/sincy-protocol" }
+serde_json = "1"
