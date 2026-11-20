@@ -25,9 +25,12 @@ pub struct FeedConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Parser {
-    Rss,
+    Rss, // RSS 2.0 + Atom (arxiv uses Atom <entry>, handled by the same parser)
     SearxngJson,
     GithubTrending,
+    HnJson,     // HN Algolia: hits -> social_content/trend
+    DevToJson,  // dev.to articles API
+    WikiRcJson, // Wikipedia recentchanges
 }
 
 #[derive(Debug, Clone)]
@@ -42,16 +45,15 @@ impl CollectorConfig {
     /// - SINCY_INTEL_SEARXNG_BASE replaces the SearXNG instance
     /// - SINCY_INTEL_COLLECT_INTERVAL_SECS sets the loop interval
     pub fn from_env() -> Self {
-        // Self-hosted overrides (WI §26 deployment model). Public SearXNG
-        // instances sit behind bot checks — per the red line (WI §29) we do
-        // NOT bypass them, so searxng feeds are only enabled when an operator
-        // points us at their own instance.
+        // Self-hosted overrides (WI §26). Public SearXNG instances sit behind
+        // bot checks — per the red line (WI §29) we do NOT bypass them, so
+        // searxng feeds only run when pointed at a self-hosted instance.
         let rsshub_base = std::env::var("SINCY_INTEL_RSSHUB_BASE").ok();
         let searx_base = std::env::var("SINCY_INTEL_SEARXNG_BASE").ok();
         let interval_secs = std::env::var("SINCY_INTEL_COLLECT_INTERVAL_SECS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(300);
+            .unwrap_or(1800); // default: one pass every 30 min
         let feed =
             |source: &str, label: &str, url: String, kind: &str, parser: Parser| FeedConfig {
                 source_id: source.into(),
@@ -59,20 +61,46 @@ impl CollectorConfig {
                 url,
                 kind: kind.into(),
                 parser,
-                max_items: 20,
+                max_items: 100,
             };
         let mut feeds = vec![
-            // RSS 新闻/资讯 (source: rsshub, category rss) — 直连公开 RSS
+            // ===== 高吞吐公开 API =====
+            // arXiv 论文 (Atom) — AI 研究, 每查询 100 篇
+            feed("arxiv", "arxiv: ai agent",        "https://export.arxiv.org/api/query?search_query=all:%22ai%20agent%22&sortBy=submittedDate&sortOrder=descending&max_results=100".into(), "knowledge", Parser::Rss),
+            feed("arxiv", "arxiv: large language model", "https://export.arxiv.org/api/query?search_query=all:%22large%20language%20model%22&sortBy=submittedDate&sortOrder=descending&max_results=100".into(), "knowledge", Parser::Rss),
+            feed("arxiv", "arxiv: multi-agent",     "https://export.arxiv.org/api/query?search_query=all:%22multi-agent%20system%22&sortBy=submittedDate&sortOrder=descending&max_results=100".into(), "knowledge", Parser::Rss),
+            feed("arxiv", "arxiv: RAG",             "https://export.arxiv.org/api/query?search_query=all:%22retrieval%20augmented%20generation%22&sortBy=submittedDate&sortOrder=descending&max_results=100".into(), "knowledge", Parser::Rss),
+            feed("arxiv", "arxiv: llm eval",        "https://export.arxiv.org/api/query?search_query=all:%22llm%20evaluation%22&sortBy=submittedDate&sortOrder=descending&max_results=100".into(), "knowledge", Parser::Rss),
+            // Hacker News Algolia — 最近故事 100 + 首页热榜 + AI 搜索
+            feed("hn-algolia", "hn: recent stories", "https://hn.algolia.com/api/v1/search_by_date?tags=story&hitsPerPage=100".into(), "social_content", Parser::HnJson),
+            feed("hn-algolia", "hn: front page",      "https://hn.algolia.com/api/v1/search?tags=front_page&hitsPerPage=100".into(), "trend", Parser::HnJson),
+            feed("hn-algolia", "hn: search AI",       "https://hn.algolia.com/api/v1/search_by_date?query=AI%20agent&tags=story&hitsPerPage=100".into(), "social_content", Parser::HnJson),
+            // dev.to 文章 API — 每 tag 100 篇
+            feed("devto-api", "devto: #ai",     "https://dev.to/api/articles?tag=ai&per_page=100".into(), "news", Parser::DevToJson),
+            feed("devto-api", "devto: #llm",    "https://dev.to/api/articles?tag=llm&per_page=100".into(), "news", Parser::DevToJson),
+            feed("devto-api", "devto: #agents", "https://dev.to/api/articles?tag=agents&per_page=100".into(), "news", Parser::DevToJson),
+            feed("devto-api", "devto: #opensource", "https://dev.to/api/articles?tag=opensource&per_page=100".into(), "news", Parser::DevToJson),
+            // Wikipedia 最近变更事件流 (500/次)
+            feed("wikipedia-rc", "wiki: recentchanges", "https://en.wikipedia.org/w/api.php?action=query&list=recentchanges&rcnamespace=0&rclimit=500&format=json".into(), "event", Parser::WikiRcJson),
+            // ===== 趋势榜 =====
+            feed("hotrank-hub", "github trending (ai agent)",
+                 "https://api.github.com/search/repositories?q=ai+agent+in:description&sort=stars&order=desc&per_page=30".into(),
+                 "trend", Parser::GithubTrending),
+            feed("hotrank-hub", "github trending (llm)",
+                 "https://api.github.com/search/repositories?q=llm+in:description&sort=stars&order=desc&per_page=30".into(),
+                 "trend", Parser::GithubTrending),
+            feed("hotrank-hub", "github trending (agent framework)",
+                 "https://api.github.com/search/repositories?q=agent+framework+in:name,description&sort=stars&order=desc&per_page=30".into(),
+                 "trend", Parser::GithubTrending),
+            // ===== RSS / 社区 =====
             feed("rsshub", "ithome", "https://www.ithome.com/rss/".into(), "news", Parser::Rss),
-            feed("rsshub", "dev.to #ai", "https://dev.to/feed/tag/ai".into(), "news", Parser::Rss),
-            feed("rsshub", "sspai", "https://sspai.com/feed".into(), "news", Parser::Rss),
-            // 趋势榜 (source: hotrank-hub, category rank) — GitHub 新星 repo = 趋势信号
-            feed("hotrank-hub", "github trending repos (ai agent)",
-                 "https://api.github.com/search/repositories?q=ai+agent+in:description&sort=stars&order=desc&per_page=15".into(),
-                 "trend", Parser::GithubTrending),
-            feed("hotrank-hub", "github trending repos (llm)",
-                 "https://api.github.com/search/repositories?q=llm+in:description&sort=stars&order=desc&per_page=15".into(),
-                 "trend", Parser::GithubTrending),
+            feed("sspai", "sspai", "https://sspai.com/feed".into(), "news", Parser::Rss),
+            feed("juejin", "juejin", "https://juejin.cn/rss".into(), "news", Parser::Rss),
+            feed("v2ex", "v2ex hot", "https://www.v2ex.com/feed/tab/hot.xml".into(), "social_content", Parser::Rss),
+            // YouTube 频道更新 (科技/AI 向频道)
+            feed("youtube-rss", "yt: 3Blue1Brown", "https://www.youtube.com/feeds/videos.xml?channel_id=UCYO_jab_esuFRV4b17AJtAw".into(), "social_content", Parser::Rss),
+            feed("youtube-rss", "yt: Fireship",          "https://www.youtube.com/feeds/videos.xml?channel_id=UCsBjURrPoezykLs9EqgamOA".into(), "social_content", Parser::Rss),
+            feed("youtube-rss", "yt: Yannic Kilcher",    "https://www.youtube.com/feeds/videos.xml?channel_id=UCZHmQk67mSJgfCCTn7xBfew".into(), "social_content", Parser::Rss),
         ];
         if let Some(base) = rsshub_base {
             feeds.push(feed(
@@ -84,16 +112,15 @@ impl CollectorConfig {
             ));
         }
         if let Some(base) = searx_base {
-            // 自托管 SearXNG (无公开实例的机器人检查问题)
             feeds.push(feed(
                 "searxng",
                 "searxng: AI agents 2026",
-                format!("{base}/search?q=AI+agents+2026&format=json&count=10"),
+                format!("{base}/search?q=AI+agents+2026&format=json&count=100"),
                 "knowledge",
                 Parser::SearxngJson,
             ));
             feeds.push(feed("searxng", "searxng: 多智能体 协作",
-                 format!("{base}/search?q=%E5%A4%9A%E6%99%BA%E8%83%BD%E4%BD%93+%E5%8D%8F%E4%BD%9C&format=json&count=10"), "knowledge", Parser::SearxngJson));
+                 format!("{base}/search?q=%E5%A4%9A%E6%99%BA%E8%83%BD%E4%BD%93+%E5%8D%8F%E4%BD%9C&format=json&count=100"), "knowledge", Parser::SearxngJson));
         }
         Self {
             interval_secs,
@@ -250,6 +277,92 @@ pub fn parse_searxng(body: &str, query: &str) -> Vec<(String, Value)> {
         .collect()
 }
 
+/// HN Algolia response -> (title, payload). kind hint comes from the feed.
+pub fn parse_hn(body: &str, kind: &str) -> Vec<(String, Value)> {
+    let Ok(v) = serde_json::from_str::<Value>(body) else {
+        return vec![];
+    };
+    let Some(hits) = v["hits"].as_array() else {
+        return vec![];
+    };
+    let now = chrono::Utc::now();
+    hits.iter()
+        .filter_map(|h| {
+            let title = h["title"].as_str()?.to_string();
+            let url = h["url"].as_str().unwrap_or("").to_string();
+            let points = h["points"].as_i64().unwrap_or(0);
+            let comments = h["num_comments"].as_i64().unwrap_or(0);
+            let created = h["created_at"].as_str().unwrap_or("");
+            let age_h = chrono::DateTime::parse_from_rfc3339(created)
+                .map(|t| (now - t.with_timezone(&chrono::Utc)).num_minutes() as f64 / 60.0)
+                .unwrap_or(24.0)
+                .max(0.1);
+            let payload = if kind == "trend" {
+                json!({"topic": title, "platforms": ["hackernews"], "volume": points,
+                       "velocity": (points as f64 / age_h * 10.0).round() / 10.0,
+                       "sentiment": 0.5, "window_hours": 24,
+                       "url": url, "comments": comments})
+            } else {
+                json!({"title": title, "url": url, "platform": "hackernews",
+                       "points": points, "comments": comments, "published_at": created})
+            };
+            Some((title, payload))
+        })
+        .collect()
+}
+
+/// dev.to articles API -> news payloads.
+pub fn parse_devto(body: &str) -> Vec<(String, Value)> {
+    let Ok(v) = serde_json::from_str::<Value>(body) else {
+        return vec![];
+    };
+    let Some(arr) = v.as_array() else {
+        return vec![];
+    };
+    arr.iter()
+        .filter_map(|a| {
+            let title = a["title"].as_str()?.to_string();
+            Some((
+                title.clone(),
+                json!({
+                    "title": title, "url": a["url"].as_str().unwrap_or(""),
+                    "summary": a["description"].as_str().unwrap_or(""),
+                    "tags": a["tag_list"].as_array().cloned().unwrap_or_default(),
+                    "published_at": a["published_at"].as_str(),
+                    "platform": "devto",
+                    "author": a["user"]["name"].as_str().unwrap_or(""),
+                    "reactions": a["public_reactions_count"].as_i64().unwrap_or(0),
+                }),
+            ))
+        })
+        .collect()
+}
+
+/// Wikipedia recentchanges -> event payloads.
+pub fn parse_wiki_rc(body: &str) -> Vec<(String, Value)> {
+    let Ok(v) = serde_json::from_str::<Value>(body) else {
+        return vec![];
+    };
+    let Some(rc) = v["query"]["recentchanges"].as_array() else {
+        return vec![];
+    };
+    rc.iter()
+        .filter_map(|r| {
+            let title = r["title"].as_str()?.to_string();
+            Some((
+                title.clone(),
+                json!({
+                    "title": title, "type": r["type"].as_str().unwrap_or(""),
+                    "timestamp": r["timestamp"].as_str(),
+                    "user": r["user"].as_str().unwrap_or(""),
+                    "platform": "wikipedia",
+                    "url": format!("https://en.wikipedia.org/wiki/{}", title.replace(' ', "_")),
+                }),
+            ))
+        })
+        .collect()
+}
+
 /// One collection run over all configured feeds. Returns (inserted, duplicates, failures).
 pub async fn collect_once(
     pool: &sqlx::PgPool,
@@ -263,17 +376,28 @@ pub async fn collect_once(
     let mut inserted = 0usize;
     let mut dups = 0usize;
     let mut failures = Vec::new();
-    for f in &cfg.feeds {
+    for (i, f) in cfg.feeds.iter().enumerate() {
+        if i > 0 {
+            tokio::time::sleep(Duration::from_millis(800)).await;
+        }
         match collect_feed(pool, &client, f).await {
             Ok((ins, dup)) => {
                 inserted += ins;
                 dups += dup;
-                mark_job(pool, &f.source_id, &f.label, "idle", None).await;
+                mark_job(
+                    pool,
+                    &f.source_id,
+                    &f.label,
+                    "idle",
+                    None,
+                    Some((ins + dup) as i64),
+                )
+                .await;
                 tracing::info!(source = %f.source_id, label = %f.label, inserted = ins, dups = dup, "intel feed collected");
             }
             Err(e) => {
                 failures.push(format!("{}: {e}", f.label));
-                mark_job(pool, &f.source_id, &f.label, "failed", Some(&e)).await;
+                mark_job(pool, &f.source_id, &f.label, "failed", Some(&e), None).await;
                 tracing::warn!(source = %f.source_id, label = %f.label, error = %e, "intel feed failed (recorded, not retried aggressively)");
             }
         }
@@ -324,6 +448,42 @@ async fn collect_feed(
                 (
                     dedup_key(&f.source_id, &f.kind, &url, &topic),
                     topic,
+                    payload,
+                )
+            })
+            .collect(),
+        Parser::HnJson => parse_hn(&body, &f.kind)
+            .into_iter()
+            .take(f.max_items)
+            .map(|(title, payload)| {
+                let url = payload["url"].as_str().unwrap_or("").to_string();
+                (
+                    dedup_key(&f.source_id, &f.kind, &url, &title),
+                    title,
+                    payload,
+                )
+            })
+            .collect(),
+        Parser::DevToJson => parse_devto(&body)
+            .into_iter()
+            .take(f.max_items)
+            .map(|(title, payload)| {
+                let url = payload["url"].as_str().unwrap_or("").to_string();
+                (
+                    dedup_key(&f.source_id, &f.kind, &url, &title),
+                    title,
+                    payload,
+                )
+            })
+            .collect(),
+        Parser::WikiRcJson => parse_wiki_rc(&body)
+            .into_iter()
+            .take(f.max_items)
+            .map(|(title, payload)| {
+                let url = payload["url"].as_str().unwrap_or("").to_string();
+                (
+                    dedup_key(&f.source_id, &f.kind, &url, &title),
+                    title,
                     payload,
                 )
             })
@@ -386,16 +546,20 @@ async fn mark_job(
     label: &str,
     status: &str,
     err: Option<&str>,
+    inserted: Option<i64>,
 ) {
     let _ = sqlx::query(
-        "INSERT INTO intel_collection_jobs (source_id, schedule, status, last_run_at, last_error)
-         VALUES ($1, $2, $3, now(), $4)
-         ON CONFLICT (source_id, schedule) DO UPDATE SET status = EXCLUDED.status, last_run_at = now(), last_error = EXCLUDED.last_error",
+        "INSERT INTO intel_collection_jobs (source_id, schedule, status, last_run_at, last_error, last_inserted)
+         VALUES ($1, $2, $3, now(), $4, $5)
+         ON CONFLICT (source_id, schedule) DO UPDATE SET
+           status = EXCLUDED.status, last_run_at = now(), last_error = EXCLUDED.last_error,
+           last_inserted = COALESCE(EXCLUDED.last_inserted, intel_collection_jobs.last_inserted)",
     )
     .bind(source_id)
     .bind(format!("feed:{label}"))
     .bind(status)
     .bind(err)
+    .bind(inserted)
     .execute(pool)
     .await;
 }
@@ -474,6 +638,33 @@ mod tests {
         let k = parse_searxng(body, "AI agents");
         assert_eq!(k.len(), 1);
         assert_eq!(k[0].1["query"], "AI agents");
+    }
+
+    #[test]
+    fn hn_parsed() {
+        let body = r#"{"hits":[{"title":"Show HN: agent","url":"https://x","points":321,"num_comments":88,"created_at":"2026-11-20T10:00:00Z"}]}"#;
+        let items = parse_hn(body, "social_content");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].1["points"], 321);
+        let t = parse_hn(body, "trend");
+        assert_eq!(t[0].1["topic"], "Show HN: agent");
+        assert!(t[0].1["velocity"].as_f64().unwrap() > 0.0);
+    }
+
+    #[test]
+    fn devto_parsed() {
+        let body = r#"[{"title":"t","url":"https://dev.to/a","description":"d","tag_list":["ai"],"published_at":"2026-11-20T00:00:00Z","user":{"name":"n"},"public_reactions_count":7}]"#;
+        let items = parse_devto(body);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].1["reactions"], 7);
+    }
+
+    #[test]
+    fn wiki_rc_parsed() {
+        let body = r#"{"query":{"recentchanges":[{"title":"AI agents","type":"edit","timestamp":"2026-11-20T10:00:00Z","user":"u"}]}}"#;
+        let items = parse_wiki_rc(body);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].1["platform"], "wikipedia");
     }
 
     #[test]

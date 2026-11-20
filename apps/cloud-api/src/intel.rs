@@ -34,13 +34,70 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/intel/jobs", get(list_jobs))
         .route("/intel/collect", post(collect_now))
+        .route("/intel/stats", get(stats))
+}
+
+/// GET /intel/stats — 数据池规模与采集概况 (WI dashboard §28).
+async fn stats(State(state): State<AppState>) -> Result<Json<Value>, axum::response::Response> {
+    let pool = state.pool().map_err(app_error_response)?;
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM intel_items")
+        .fetch_one(pool)
+        .await
+        .map_err(err)?;
+    let by_kind = sqlx::query(
+        "SELECT kind, COUNT(*)::int8 AS n FROM intel_items GROUP BY kind ORDER BY n DESC",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(err)?;
+    let by_source = sqlx::query(
+        "SELECT source_id, COUNT(*)::int8 AS n, MAX(collected_at) AS last_at FROM intel_items GROUP BY source_id ORDER BY n DESC",
+    )
+    .fetch_all(pool).await.map_err(err)?;
+    let opps: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM intel_opportunities")
+        .fetch_one(pool)
+        .await
+        .map_err(err)?;
+    let jobs: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(last_inserted), 0)::int8 FROM intel_collection_jobs",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(err)?;
+    let last_run: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT MAX(last_run_at) FROM intel_collection_jobs")
+            .fetch_one(pool)
+            .await
+            .map_err(err)?;
+    let kinds: Vec<Value> = by_kind
+        .iter()
+        .map(|r| json!({ "kind": r.get::<String, _>("kind"), "n": r.get::<i64, _>("n") }))
+        .collect();
+    let sources: Vec<Value> = by_source
+        .iter()
+        .map(|r| {
+            json!({
+                "source_id": r.get::<String, _>("source_id"),
+                "n": r.get::<i64, _>("n"),
+                "last_at": r.get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_at"),
+            })
+        })
+        .collect();
+    Ok(Json(json!({
+        "total_items": total,
+        "by_kind": kinds,
+        "by_source": sources,
+        "opportunities": opps,
+        "last_pass_inserted_total": jobs,
+        "last_run_at": last_run,
+    })))
 }
 
 /// GET /intel/jobs — collection job status (WI §9 scheduler view).
 async fn list_jobs(State(state): State<AppState>) -> Result<Json<Value>, axum::response::Response> {
     let pool = state.pool().map_err(app_error_response)?;
     let rows = sqlx::query(
-        "SELECT source_id, schedule, status, last_run_at, last_error FROM intel_collection_jobs ORDER BY source_id, schedule",
+        "SELECT source_id, schedule, status, last_run_at, last_error, last_inserted FROM intel_collection_jobs ORDER BY source_id, schedule",
     )
     .fetch_all(pool)
     .await
@@ -54,6 +111,7 @@ async fn list_jobs(State(state): State<AppState>) -> Result<Json<Value>, axum::r
                 "status": r.get::<String, _>("status"),
                 "last_run_at": r.get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_run_at"),
                 "last_error": r.get::<Option<String>, _>("last_error"),
+                "last_inserted": r.get::<Option<i64>, _>("last_inserted"),
             })
         })
         .collect();

@@ -253,6 +253,16 @@ export interface IntelJob {
   status: string;
   last_run_at: string | null;
   last_error: string | null;
+  last_inserted: number | null;
+}
+
+export interface IntelStats {
+  total_items: number;
+  by_kind: { kind: string; n: number }[];
+  by_source: { source_id: string; n: number; last_at: string | null }[];
+  opportunities: number;
+  last_pass_inserted_total: number;
+  last_run_at: string | null;
 }
 
 export interface CollectResult {
@@ -431,6 +441,7 @@ export const api = {
   listOpportunities: (limit = 50) =>
     req<{ items: OpportunityItem[] }>(`/intel/opportunities?limit=${limit}`),
   listIntelJobs: () => req<{ items: IntelJob[] }>("/intel/jobs"),
+  intelStats: () => req<IntelStats>("/intel/stats"),
   collectNow: () =>
     req<CollectResult>("/intel/collect", { method: "POST" }),
   refreshOpportunities: () =>

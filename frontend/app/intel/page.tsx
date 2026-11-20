@@ -8,6 +8,7 @@ import {
   type IntelItem,
   type IntelJob,
   type IntelProvider,
+  type IntelStats,
   type IntelSource,
   type OpportunityItem,
 } from "@/lib/api";
@@ -20,6 +21,7 @@ export default function IntelPage() {
   const [items, setItems] = useState<IntelItem[]>([]);
   const [opps, setOpps] = useState<OpportunityItem[]>([]);
   const [jobs, setJobs] = useState<IntelJob[]>([]);
+  const [stats, setStats] = useState<IntelStats | null>(null);
   const [collectResult, setCollectResult] = useState<CollectResult | null>(null);
   const [collecting, setCollecting] = useState(false);
   const [capability, setCapability] = useState("social_search");
@@ -31,18 +33,20 @@ export default function IntelPage() {
   const load = useCallback(async () => {
     if (!getToken()) return;
     try {
-      const [s, p, i, o, j] = await Promise.all([
+      const [s, p, i, o, j, st] = await Promise.all([
         api.listIntelSources(),
         api.listIntelProviders(),
         api.listIntelItems(undefined, 50),
         api.listOpportunities(30),
         api.listIntelJobs(),
+        api.intelStats(),
       ]);
       setSources(s.items);
       setProviders(p.items);
       setItems(i.items);
       setOpps(o.items);
       setJobs(j.items);
+      setStats(st);
     } catch (e) {
       setError(String(e));
     }
@@ -154,7 +158,7 @@ export default function IntelPage() {
                 <td>{j.source_id}</td>
                 <td className="muted">{j.schedule}</td>
                 <td style={{ color: j.status === "failed" ? "#ef4444" : undefined }}>{j.status}</td>
-                <td className="muted">{j.last_run_at ? j.last_run_at.slice(0, 19).replace("T", " ") : "-"}</td>
+                <td className="muted">{j.last_run_at ? j.last_run_at.slice(0, 19).replace("T", " ") : "-"}{j.last_inserted != null ? ` (+${j.last_inserted})` : ""}</td>
                 <td className="muted" style={{ color: "#ef4444" }}>{j.last_error ? j.last_error.slice(0, 50) : ""}</td>
               </tr>
             ))}

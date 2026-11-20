@@ -60,7 +60,7 @@ async fn architecture(State(_state): State<AppState>) -> Json<Value> {
                 node("device", "设备管理 sincy-device", "配对 · 会话",
                      "challenge-response: proof=sha256(sha256(secret)+nonce), secret 只存哈希; 长期 device token"),
                 node("collector", "情报采集器 intel_collector", "tokio 定时任务 · WI §9",
-                     "按注册表拉取只读公开源(RSS/榜单/搜索), 归一化 WI §11 模型, dedup_key 去重入 intel_items; 失败记 intel_collection_jobs 不强攻; 红线: 不绕认证/验证码/限流"),
+                     "21 条 feed: arXiv/HN Algolia/dev.to/Wikipedia/YouTube/GitHub 趋势/RSS, 每轮数千条, 归一化 WI §11 入 intel_items(dedup_key 去重); 失败记 jobs 不强攻; 红线: 只走公开只读 API, 礼貌间隔, 不绕认证/验证码/限流"),
                 node("ai", "AI sincy-ai", "LLM gateway · budget · analytics",
                      "mock 仅本地(SINCY_ALLOW_MOCK_ADAPTERS)/openai-compatible; 月度预算检查+熔断(FR-026); 成本落账; 指标回流内容版本(FR-016)"),
             ]
