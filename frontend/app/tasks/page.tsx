@@ -6,6 +6,8 @@ import { api, type PublishTaskResponse } from "@/lib/api";
 // 发布任务：FR-019 路由 + FR-020 配额 + 幂等键。结果含 route/status/fallback。
 export default function TasksPage() {
   const [agencyId, setAgencyId] = useState("");
+  const [brandId, setBrandId] = useState("");
+  const [packageId, setPackageId] = useState("");
   const [platform, setPlatform] = useState("youtube");
   const [action, setAction] = useState("publish_video");
   const [result, setResult] = useState<PublishTaskResponse | null>(null);
@@ -20,10 +22,12 @@ export default function TasksPage() {
       const key = `web-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
       const res = await api.publishTask({
         agency_id: agencyId,
+        brand_id: brandId,
         platform,
         action,
+        package_id: packageId,
+        package_version: 1,
         idempotency_key: key,
-        payload: { title: "demo", note: "from console" },
       });
       setResult(res);
       try {
@@ -43,6 +47,10 @@ export default function TasksPage() {
       <div className="panel">
         <label>Agency ID</label>
         <input value={agencyId} onChange={(e) => setAgencyId(e.target.value)} placeholder="uuid" size={40} />
+        <label>Brand ID</label>
+        <input value={brandId} onChange={(e) => setBrandId(e.target.value)} placeholder="uuid" size={40} />
+        <label>Package ID（已审批的发布包）</label>
+        <input value={packageId} onChange={(e) => setPackageId(e.target.value)} placeholder="uuid" size={40} />
         <label>平台</label>
         <input value={platform} onChange={(e) => setPlatform(e.target.value)} />
         <label>动作</label>
@@ -52,7 +60,7 @@ export default function TasksPage() {
           <option value="read_metrics">read_metrics</option>
         </select>
         <div style={{ marginTop: 12 }}>
-          <button onClick={onPublish} disabled={!agencyId}>
+          <button onClick={onPublish} disabled={!agencyId || !brandId || !packageId}>
             发布
           </button>
         </div>

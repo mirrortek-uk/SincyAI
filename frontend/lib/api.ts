@@ -73,11 +73,12 @@ export const api = {
     fetch(`${BASE}/metrics`).then((r) => r.text()) as Promise<string>,
   publishTask: (body: {
     agency_id: string;
-    brand_id?: string;
+    brand_id: string;
     platform: string;
     action: string;
+    package_id: string;
+    package_version: number;
     idempotency_key: string;
-    payload: unknown;
   }) => req<PublishTaskResponse>("/tasks/publish", { method: "POST", body: JSON.stringify(body) }),
   taskRoute: (id: string) => req<unknown>(`/tasks/${id}/route`),
   listKillSwitches: (agencyId?: string) =>

@@ -532,6 +532,16 @@ async fn create_kill_switch(
 ) -> Result<Json<Value>, Response> {
     let pool = state.pool().map_err(app_error_response)?;
     let id = Uuid::new_v4();
+    // scope=agency without explicit target means "this agency"
+    let target_id = match body.scope.as_str() {
+        "agency" => Some(body.target_id.or(body.agency_id).ok_or_else(|| {
+            app_error_response(AppError::non_retryable(
+                "bad_kill_switch",
+                "scope=agency requires agency_id or target_id",
+            ))
+        })?),
+        _ => body.target_id,
+    };
     sqlx::query(
         "INSERT INTO kill_switches (id, agency_id, scope, target_id, reason, created_by)
          VALUES ($1, $2, $3, $4, $5, 'api')",
@@ -539,7 +549,7 @@ async fn create_kill_switch(
     .bind(id)
     .bind(body.agency_id)
     .bind(&body.scope)
-    .bind(body.target_id)
+    .bind(target_id)
     .bind(&body.reason)
     .execute(pool)
     .await
