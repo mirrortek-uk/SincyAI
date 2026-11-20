@@ -132,11 +132,7 @@ impl LlmGateway for MockLlmGateway {
     }
 
     async fn generate(&self, req: &GenerationRequest) -> Result<GenerationResult, GatewayError> {
-        let text = format!(
-            "[mock:{}] {}",
-            req.model,
-            req.prompt.chars().take(200).collect::<String>()
-        );
+        let text = mock_draft(&req.prompt, req.max_tokens);
         Ok(GenerationResult {
             tokens_in: req.prompt.len() as u64 / 4,
             tokens_out: text.len() as u64 / 4,
@@ -146,6 +142,40 @@ impl LlmGateway for MockLlmGateway {
             raw: json!({"mock": true}),
         })
     }
+}
+
+/// Deterministic mock *draft*: instead of echoing the prompt, produce a short
+/// post-shaped text derived from the prompt's "about: <topic>" line, so local
+/// review flows (package -> approve -> publish) see realistic content.
+/// Always prefixed with [mock:...] so it can never be mistaken for a real LLM.
+fn mock_draft(prompt: &str, max_tokens: u32) -> String {
+    let topic = prompt
+        .lines()
+        .find_map(|l| {
+            l.split("about:")
+                .nth(1)
+                .and_then(|t| t.split_whitespace().next())
+                .map(|t| {
+                    t.trim_matches(|c| c == '.' || c == ',' || c == ';')
+                        .to_string()
+                })
+        })
+        .unwrap_or_else(|| "the topic at hand".to_string());
+    // platform limit for X posts is 280 chars INCLUDING the [mock:...] label
+    let prefix = "[mock:mock-1] ";
+    let limit = if max_tokens > 0 {
+        (max_tokens as usize * 3).min(280)
+    } else {
+        280
+    };
+    let body = format!(
+        "3 things I learned about {topic} this week:\n1) it compounds faster than expected;\n2) the boring parts (evals, guardrails) matter most;\n3) start with one narrow use case, not a grand agent. What would you add?"
+    );
+    let body: String = body
+        .chars()
+        .take(limit.saturating_sub(prefix.chars().count()))
+        .collect();
+    format!("{prefix}{body}")
 }
 
 #[cfg(test)]
@@ -166,5 +196,18 @@ mod tests {
             .expect("gen");
         assert!(r.mock);
         assert!(r.text.starts_with("[mock:mock-1]"));
+        assert!(r.text.contains("3 things I learned")); // post-shaped draft, not a prompt echo
+        // topic-aware draft
+        let r2 = gw
+            .generate(&GenerationRequest {
+                prompt: "Write ONE x post about: obra/superpowers. Evidence: []".into(),
+                model: "mock-1".into(),
+                max_tokens: 512,
+                content_item_id: None,
+            })
+            .await
+            .unwrap();
+        assert!(r2.text.contains("obra/superpowers"));
+        assert!(r2.text.chars().count() <= 280); // X post limit includes the mock label
     }
 }
