@@ -246,3 +246,56 @@ fn screen_identification_prefers_challenge() {
     let m = identify_screen(&both, &def.screens, def.challenge_screen());
     assert_eq!(m.screen_id, "challenge");
 }
+
+#[test]
+fn x_publish_post_adapter_validates_and_signs() {
+    // X 走设备路线 (PRD 5.3 / HID 设计书, 不付费 API):
+    // 签名 adapter 必须通过 schema 校验、可签名验签、且声明挑战界面。
+    let yaml = include_str!("../../../adapters/x.publish_post.yaml");
+    let def = AdapterDefinition::from_yaml(yaml).expect("x adapter must validate");
+    assert_eq!(def.adapter, "x.publish_post");
+    assert_eq!(def.app.package, "com.twitter.android");
+    assert!(def.challenge_screen().is_some());
+    let has_side_effect = def.flow.iter().any(|s| s.side_effect);
+    assert!(has_side_effect, "posting must be marked side_effect");
+    let has_verify = def.flow.iter().any(|s| s.verify);
+    assert!(has_verify, "flow must end in a verify step");
+    let canonical = serde_json::to_string(&def).expect("canonical json");
+    let key = b"sincy-platform-signing-key";
+    let sig = sign_definition(key, &canonical);
+    assert!(verify_definition(key, &canonical, &sig).is_ok());
+    let tampered = canonical.replace("com.twitter.android", "com.evil.app");
+    assert!(verify_definition(key, &tampered, &sig).is_err());
+    assert_eq!(definition_sha256(&canonical).len(), 64);
+}
+
+#[test]
+fn x_publish_post_flow_executes_on_scripted_screens() {
+    let yaml = include_str!("../../../adapters/x.publish_post.yaml");
+    let def = AdapterDefinition::from_yaml(yaml).unwrap();
+    let io = ScriptedIo {
+        screens: vec![
+            MockSnapshot::new(
+                vec!["com.twitter.android:id/bottom_bar".into()],
+                vec!["Home".into()],
+            ),
+            MockSnapshot::new(
+                vec!["com.twitter.android:id/tweet_text".into()],
+                vec!["What's happening?".into()],
+            ),
+            MockSnapshot::new(
+                vec!["com.twitter.android:id/tweet_text".into()],
+                vec!["What's happening?".into()],
+            ),
+            MockSnapshot::new(vec![], vec!["Your post was sent".into()]),
+            MockSnapshot::new(vec![], vec!["Your post was sent".into()]),
+        ],
+        performed: vec![],
+        fail_on_side_effect: false,
+    };
+    let mut io = io;
+    let mut interp = Interpreter::new(&def, "10.5.0");
+    let rt = interp.run(&mut io, 0);
+    assert_eq!(rt.status, Some(ExecStatus::Completed));
+    assert!(rt.side_effect_done, "Post tap is a side effect");
+}

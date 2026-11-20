@@ -19,6 +19,7 @@
 | ADR-013 | 屏幕感知控件树优先，OCR/视觉兜底 | 新增，已选 | sincy-adapter 解释器基于锚点（控件树）匹配；OCR/视觉层 WP-11 待真机 |
 | ADR-014 | 声明式、签名、版本绑定的 App Adapter | 新增，已选 | YAML schema + HMAC 签名 + VersionRange（语义化范围）；版本越界拒绝执行并报 ui_drift |
 | ADR-015 | 视觉模型端侧 vs 云端 | 新增，待决策 | sincy-ai 的 LlmGateway 抽象预留云端视觉；端侧待设备算力评估后决策 |
+| ADR-016 | X (Twitter) 发布不走付费 API，走设备自动化 | 新增，已选 | PRD 5.3 允许"按成本评估是否走设备"；HID 设备交互设计书规定平台 API 付费/不可用时由设备层（Android 无障碍 / Windows HID 输入）执行，不绕过平台安全、不许 mock 冒充真实。migration 0014 把 x/publish_post 的 device 路线置为 verified 优先级 10（签名 adapter x.publish_post），api 路线 unverified（paid_tier_required）兜底；X API v2 adapter 保留为付费回退 |
 
 ## 补充实施决策（实现过程中新增）
 

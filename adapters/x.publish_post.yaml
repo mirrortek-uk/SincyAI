@@ -1,0 +1,35 @@
+# X (Twitter) 设备自动化 App Adapter (TDD 9.3 结构)。
+# 路线: 不走付费 X API v2，走设备自动化 (PRD 5.3 "按成本评估是否走设备";
+# HID 设计书: 平台 API 付费/不可用时以设备层执行替代, 不绕过平台安全机制)。
+# 锚点为占位, 真机核验后替换 (与 xiaohongshu adapter 相同策略)。
+# 由 Sincy 签名发布; 设备只执行签名有效且 App 版本在范围内的版本。
+adapter: x.publish_post
+version: 1
+app:
+  package: com.twitter.android
+  version_range: ">=10.0 <11.0"
+screens:
+  home:
+    anchors:
+      - { id: "com.twitter.android:id/bottom_bar" }
+      - { text: "Home" }
+  composer:
+    anchors:
+      - { id: "com.twitter.android:id/tweet_text" }
+      - { text: "What's happening?" }
+  posted_confirm:
+    anchors:
+      - { text_any: ["Your post was sent", "Post sent", "已发布"] }
+  challenge:
+    anchors:
+      - { text_any: ["Verify you are human", "unusual activity", "安全验证", "人机验证"] }   # always -> WAITING_USER
+  update_dialog:
+    anchors:
+      - { text_any: ["Update now", "立即更新"] }
+flow:
+  - { expect: home, action: tap, target: { id: "com.twitter.android:id/composer_fab" } }
+  - { expect: composer, action: set_text, target: { id: "com.twitter.android:id/tweet_text" }, value: "package.text" }
+  - { expect: composer, action: tap, target: { text: "Post" }, side_effect: true }
+  - { expect: posted_confirm, action: back, verify: true }
+known_interrupts:
+  - { screen: update_dialog, action: tap, target: { text_any: ["Not now", "以后再说"] } }

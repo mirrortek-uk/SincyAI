@@ -350,12 +350,25 @@ async fn publish_task(
         None => (None, 0),
     };
     let cost: i64 = quota_cost_for(&body.platform, &body.action);
+    // device_ready is real: an active bound device for this agency must exist
+    // (X posting routes here per PRD 5.3 / HID design doc — no paid X API).
+    let device_ready: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM devices WHERE agency_id = $1 AND state = 'active')",
+    )
+    .bind(agency.as_uuid())
+    .fetch_one(pool)
+    .await
+    .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
     // route-time check is coarse (any headroom); the ledger reserve is authoritative
     let pre = Preconditions {
         api_ready: quota_avail > 0,
         api_block_reason: Some(format!("quota available {quota_avail} < cost {cost}")),
-        device_ready: false,
-        device_block_reason: Some("no device bound in this slice".into()),
+        device_ready,
+        device_block_reason: if device_ready {
+            None
+        } else {
+            Some("no active device bound for this agency".into())
+        },
         assisted_ready: true,
         assisted_block_reason: None,
     };
@@ -395,14 +408,21 @@ async fn publish_task(
     .execute(&mut *tx)
     .await
     .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
+    // Device-routed tasks are QUEUED so the gateway dispatches them to a
+    // connected agent over WSS; api/assisted execute inline (EXECUTING).
+    let task_state = match decision.reason.selected {
+        Route::Device => "QUEUED",
+        _ => "EXECUTING",
+    };
     sqlx::query(
         "INSERT INTO device_tasks (id, agency_id, brand_id, idempotency_key, state, route_id)
-         VALUES ($1, $2, $3, $4, 'EXECUTING', $5)",
+         VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(task_id)
     .bind(agency.as_uuid())
     .bind(body.brand_id)
     .bind(&body.idempotency_key)
+    .bind(task_state)
     .bind(Uuid::new_v4())
     .execute(&mut *tx)
     .await

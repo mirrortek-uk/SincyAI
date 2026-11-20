@@ -323,6 +323,53 @@ mod tests {
     }
 
     #[test]
+    fn x_publish_post_prefers_device_over_paid_api() {
+        // PRD 5.3 + HID design doc: X posting does not use the paid API;
+        // the device route (verified, priority 10) wins over the unverified
+        // api route; with no active device it degrades to assisted.
+        let xcap = |route: Route, status: CapabilityStatus, priority: i32| ChannelCapability {
+            platform: "x".into(),
+            action: "publish_post".into(),
+            route,
+            status,
+            constraints: json!({}),
+            priority,
+            verified_at: None,
+            evidence_ref: None,
+        };
+        let m = MemMatrix {
+            rows: vec![
+                xcap(Route::Api, CapabilityStatus::Unverified, 50),
+                xcap(Route::Device, CapabilityStatus::Verified, 10),
+                xcap(Route::Assisted, CapabilityStatus::Verified, 90),
+            ],
+        };
+        let r = Router::new(&m);
+        let d = r
+            .select(
+                "x",
+                "publish_post",
+                &RoutingOverrides::default(),
+                &all_ready(),
+            )
+            .expect("device route selected");
+        assert_eq!(d.reason.selected, Route::Device);
+        let no_device = Preconditions {
+            device_ready: false,
+            ..all_ready()
+        };
+        let d = r
+            .select(
+                "x",
+                "publish_post",
+                &RoutingOverrides::default(),
+                &no_device,
+            )
+            .expect("assisted fallback");
+        assert_eq!(d.reason.selected, Route::Assisted);
+    }
+
+    #[test]
     fn no_side_effect_failure_degrades_but_uncertain_does_not() {
         let remaining = [Route::Device, Route::Assisted];
         let no_side = crate::action::ExecOutcome::NoSideEffectFailure(
