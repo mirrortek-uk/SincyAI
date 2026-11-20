@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api, type KillSwitch } from "@/lib/api";
+import { api, getToken, type KillSwitch } from "@/lib/api";
 
 // 急停开关 (FR-025)：本租户 + 全局急停，1 分钟内生效，解除需审计动作。
 export default function KillSwitchesPage() {
@@ -11,6 +11,7 @@ export default function KillSwitchesPage() {
   const [error, setError] = useState<string | null>(null);
 
   async function load() {
+    if (!getToken()) return; // 未登录不发请求
     try {
       const r = await api.listKillSwitches();
       setItems(r.items);

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api, type Health, type Me, type VersionInfo } from "@/lib/api";
+import { api, getToken, type Health, type Me, type VersionInfo } from "@/lib/api";
 
 export default function OverviewPage() {
   const [health, setHealth] = useState<Health | null>(null);
@@ -10,6 +10,7 @@ export default function OverviewPage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (!getToken()) return; // 未登录: Nav 负责跳 /login, 这里不发请求避免 401 噪音
     Promise.all([api.health(), api.version(), api.me()])
       .then(([h, v, m]) => {
         setHealth(h);

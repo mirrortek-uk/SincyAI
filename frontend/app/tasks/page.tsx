@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { api, type PublishTaskResponse, type TaskItem } from "@/lib/api";
+import { api, getToken, type PublishTaskResponse, type TaskItem } from "@/lib/api";
 
 // 任务页: 发布新任务 (FR-019 路由 + FR-020 配额 + 幂等) + 任务列表。
 export default function TasksPage() {
@@ -15,6 +15,7 @@ export default function TasksPage() {
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
+    if (!getToken()) return; // 未登录不发请求
     try {
       const r = await api.listTasks();
       setTasks(r.items);

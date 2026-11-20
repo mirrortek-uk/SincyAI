@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api, type DeviceItem } from "@/lib/api";
+import { api, getToken, type DeviceItem } from "@/lib/api";
 
 // 设备页: 本租户注册的 Agent 设备及在线状态 (心跳 120s 内视为在线)。
 export default function DevicesPage() {
@@ -9,6 +9,7 @@ export default function DevicesPage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (!getToken()) return;
     api
       .listDevices()
       .then((r) => setItems(r.items))
