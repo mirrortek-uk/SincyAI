@@ -6,6 +6,24 @@ use sqlx::PgPool;
 pub struct AppState {
     pub pool: Option<PgPool>,
     pub env: String,
+    jwt_secret: Vec<u8>,
+}
+
+impl AppState {
+    pub fn new(pool: Option<PgPool>, env: String) -> Self {
+        let jwt_secret = std::env::var("SINCY_JWT_SECRET")
+            .unwrap_or_else(|_| "dev-only-not-for-production".to_string())
+            .into_bytes();
+        Self {
+            pool,
+            env,
+            jwt_secret,
+        }
+    }
+
+    pub fn jwt_secret(&self) -> &[u8] {
+        &self.jwt_secret
+    }
 }
 
 impl AppState {

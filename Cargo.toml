@@ -10,6 +10,7 @@ members = [
     "crates/sincy-platform",
     "crates/sincy-content",
     "crates/sincy-execution",
+    "crates/sincy-device",
     "apps/cloud-api",
     "apps/cloud-scheduler",
     "apps/agent-worker",

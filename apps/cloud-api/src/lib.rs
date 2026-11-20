@@ -1,6 +1,7 @@
 //! cloud-api library surface (so integration tests can drive the router).
 
 pub mod api;
+pub mod gateway;
 pub mod state;
 
 pub use api::routes;
@@ -10,10 +11,7 @@ pub use state::AppState;
 pub mod state_for_test {
     pub use crate::state::AppState;
     pub fn test_state(pool: Option<sqlx::PgPool>) -> AppState {
-        AppState {
-            pool,
-            env: "test".into(),
-        }
+        AppState::new(pool, "test".into())
     }
 }
 

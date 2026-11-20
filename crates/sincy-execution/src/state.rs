@@ -120,6 +120,7 @@ fn device_edges() -> &'static [(&'static str, &'static str)] {
         ("ADAPTER_CHECK", "EXECUTING_STEPS"),
         ("EXECUTING_STEPS", "VERIFYING"),
         ("VERIFYING", "COMPLETED"),
+        ("EXECUTING_STEPS", "COMPLETED"), // device verified the outcome itself
         ("EXECUTING_STEPS", "VERIFICATION_PENDING"),
         ("VERIFYING", "VERIFICATION_PENDING"),
         // human resolved a WAITING_USER challenge: resume the flow

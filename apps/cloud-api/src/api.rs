@@ -15,7 +15,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sincy_common::{AgencyId, AppError, ErrorKind, RequestId};
+use sincy_common::{AgencyId, AppError, RequestId};
 use sincy_execution::killswitch::{KillScope, is_paused};
 use sincy_platform::matrix::PgCapabilityMatrix;
 use sincy_platform::quota::QuotaLedger;
@@ -34,7 +34,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/version", get(version))
-        .route("/agent/connect", get(agent_connect_placeholder))
+        .route("/agent/connect", get(crate::gateway::agent_connect))
         .route("/agencies", post(create_agency))
         .route("/capabilities", get(list_capabilities))
         .route("/tasks/publish", post(publish_task))
@@ -54,19 +54,6 @@ async fn version() -> impl IntoResponse {
         "version": env!("CARGO_PKG_VERSION"),
         "protocol_schema": sincy_protocol::PROTOCOL_SCHEMA_VERSION,
     }))
-}
-
-/// WP-08 replaces this with the real WSS gateway (device auth, envelope
-/// validation, heartbeat).
-async fn agent_connect_placeholder() -> Response {
-    app_error_response(
-        AppError::new(
-            ErrorKind::NonRetryable,
-            "not_implemented",
-            "agent WSS gateway lands in WP-08",
-        )
-        .with_request_id(RequestId::new().to_string()),
-    )
 }
 
 pub async fn not_found() -> Response {
