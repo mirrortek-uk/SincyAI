@@ -69,6 +69,7 @@ pub fn routes() -> Router<AppState> {
         .route("/packages", get(list_packages).post(create_package))
         .route("/packages/{id}/approve", post(approve_package))
         .route("/metrics", get(crate::metrics::metrics_handler))
+        .merge(crate::architecture::routes())
         .merge(crate::intel::routes())
         .merge(crate::employees::routes())
         .layer(axum::middleware::from_fn(request_id_middleware))

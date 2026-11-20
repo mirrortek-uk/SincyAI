@@ -54,7 +54,7 @@ export default function IntelPage() {
       {error && <p style={{ color: "var(--danger)" }}>{error}</p>}
       {msg && <p className="muted">{msg}</p>}
 
-      <section className="card">
+      <section className="panel">
         <h2>Provider 路由测试</h2>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <select value={capability} onChange={(e) => setCapability(e.target.value)}>
@@ -92,7 +92,7 @@ export default function IntelPage() {
         {route && <p className="muted">路由结果: {route}</p>}
       </section>
 
-      <section className="card">
+      <section className="panel">
         <h2>机会 (opportunities)</h2>
         {opps.length === 0 && <p className="muted">暂无机会, 先点"刷新机会"。</p>}
         <table>
@@ -110,7 +110,7 @@ export default function IntelPage() {
         </table>
       </section>
 
-      <section className="card">
+      <section className="panel">
         <h2>信源注册表</h2>
         <table>
           <thead><tr><th>id</th><th>名称</th><th>类别</th><th>能力</th><th>平台</th><th>启用</th></tr></thead>
@@ -129,7 +129,7 @@ export default function IntelPage() {
         </table>
       </section>
 
-      <section className="card">
+      <section className="panel">
         <h2>Providers</h2>
         <table>
           <thead><tr><th>名称</th><th>信源</th><th>健康</th><th>成本</th><th>限流</th><th>操作</th></tr></thead>
@@ -162,7 +162,7 @@ export default function IntelPage() {
         </table>
       </section>
 
-      <section className="card">
+      <section className="panel">
         <h2>最近采集条目</h2>
         <table>
           <thead><tr><th>kind</th><th>信源</th><th>dedup_key</th><th>时间</th></tr></thead>

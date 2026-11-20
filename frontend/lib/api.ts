@@ -257,6 +257,44 @@ export interface OpportunityItem {
   created_at: string;
 }
 
+
+export interface ArchNode {
+  id: string;
+  title: string;
+  tech: string;
+  desc: string;
+}
+
+export interface ArchLayer {
+  id: string;
+  title: string;
+  nodes: ArchNode[];
+}
+
+export interface ArchEdge {
+  from: string;
+  to: string;
+  label: string;
+  kind: string;
+}
+
+export interface ArchFlow {
+  id: string;
+  title: string;
+  steps: string;
+}
+
+export interface Architecture {
+  title: string;
+  service: string;
+  version: string;
+  generated_at: string;
+  layers: ArchLayer[];
+  edges: ArchEdge[];
+  flows: ArchFlow[];
+  edge_kinds: Record<string, string>;
+}
+
 export const api = {
   health: () => req<Health>("/healthz"),
   version: () => req<VersionInfo>("/version"),
@@ -359,6 +397,7 @@ export const api = {
   getCycle: (id: string) => req<CycleDetail>(`/cycles/${id}`),
   listMemory: (id: string) => req<{ items: MemoryItem[] }>(`/employees/${id}/memory`),
   listInsights: (id: string) => req<{ items: InsightItem[] }>(`/employees/${id}/insights`),
+  getArchitecture: () => req<Architecture>("/architecture"),
   listIntelSources: () => req<{ items: IntelSource[] }>("/intel/sources"),
   listIntelProviders: () => req<{ items: IntelProvider[] }>("/intel/providers"),
   providerHealth: (id: string) =>

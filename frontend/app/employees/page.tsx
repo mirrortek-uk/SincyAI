@@ -94,7 +94,7 @@ export default function EmployeesPage() {
       </p>
       {error && <p style={{ color: "var(--danger)" }}>{error}</p>}
 
-      <section className="card">
+      <section className="panel">
         <h2>创建员工</h2>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <input placeholder="姓名 (如 Aria)" value={name} onChange={(e) => setName(e.target.value)} />
@@ -132,7 +132,7 @@ export default function EmployeesPage() {
         </div>
       </section>
 
-      <section className="card">
+      <section className="panel">
         <h2>员工列表</h2>
         {employees.length === 0 && <p className="muted">还没有数字员工。</p>}
         {employees.map((e) => (
@@ -180,7 +180,7 @@ export default function EmployeesPage() {
 
       {selected && (
         <>
-          <section className="card">
+          <section className="panel">
             <h2>运营周期</h2>
             {cycles.length === 0 && <p className="muted">还没有周期。</p>}
             {cycles.map((c) => (
@@ -209,7 +209,7 @@ export default function EmployeesPage() {
             )}
           </section>
 
-          <section className="card">
+          <section className="panel">
             <h2>记忆</h2>
             {memory.length === 0 && <p className="muted">暂无记忆。</p>}
             {memory.slice(0, 10).map((m) => (
@@ -217,7 +217,7 @@ export default function EmployeesPage() {
             ))}
           </section>
 
-          <section className="card">
+          <section className="panel">
             <h2>洞察</h2>
             {insights.length === 0 && <p className="muted">暂无洞察。</p>}
             {insights.slice(0, 10).map((i) => (

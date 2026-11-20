@@ -39,6 +39,7 @@ export function Nav() {
       <Link href="/ai">AI 生成</Link>
       <Link href="/kill-switches">急停开关</Link>
       <Link href="/metrics">指标</Link>
+      <Link href="/architecture">架构</Link>
       <span style={{ flex: 1 }} />
       {me && (
         <span className="muted">
