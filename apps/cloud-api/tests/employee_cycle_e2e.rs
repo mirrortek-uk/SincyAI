@@ -286,6 +286,46 @@ async fn employee_phase(pool: &sqlx::PgPool, port: &u16, token: &str, brand_id: 
     .await
     .unwrap();
 
+    // skills: catalog seeded by migration 0021 (9 domains / 77), auto-bound on create
+    let doms = auth(client.get(format!("{base}/skills/domains")))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(doms["domains"].as_array().unwrap().len(), 9);
+    assert_eq!(doms["total_skills"].as_i64().unwrap(), 77);
+    let bound = auth(client.get(format!("{base}/employees/{emp_id}/skills")))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(bound["items"].as_array().unwrap().len(), 77);
+    // register a new version of an existing skill -> version bumps (old archived in skill_versions)
+    let v2 = auth(client.post(format!("{base}/skills")).json(&json!({
+        "domain": "content", "name": "social_post_generation", "description": "v2 contract"
+    })))
+    .send()
+    .await
+    .unwrap()
+    .json::<serde_json::Value>()
+    .await
+    .unwrap();
+    assert_eq!(v2["version"].as_i64().unwrap(), 2);
+    // disable one binding
+    let sid = bound["items"][0]["id"].as_str().unwrap().to_string();
+    auth(
+        client
+            .post(format!("{base}/employees/{emp_id}/skills"))
+            .json(&json!({"skill_id": sid, "enabled": false})),
+    )
+    .send()
+    .await
+    .unwrap();
+
     // illegal transition: stop from READY is rejected (409-ish non_retryable)
     let bad = auth(client.post(format!("{base}/employees/{emp_id}/stop")))
         .send()

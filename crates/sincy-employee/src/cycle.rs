@@ -15,6 +15,7 @@ use uuid::Uuid;
 use crate::agents::AgentKind;
 use crate::domain::{Employee, Identity, Mission, Strategy};
 use crate::memory::{MemoryItem, MemoryType};
+use crate::skills::{Skill, pick_content_skill, skills_for_agent};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -226,12 +227,15 @@ pub fn weighted_len(s: &str) -> usize {
 }
 
 /// Run one operating cycle for an employee. Idempotent per (cycle, step) key.
+#[allow(clippy::too_many_arguments)] // 领域编排入口, 参数为完整上下文
 pub async fn run_cycle(
     deps: &CycleDeps,
     employee: &Employee,
     identity: &Identity,
     mission: &Mission,
     strategy: &Strategy,
+    // 员工绑定且启用的 skills; 各 agent 按域挑选 (DE: agent 动态调用 skill)
+    skills: &[Skill],
     trigger: &str,
     idem_key: &str,
 ) -> Result<CycleOutcome, String> {
@@ -267,13 +271,17 @@ pub async fn run_cycle(
 
     // --- Understand: query World Intelligence through the adapter
     let opps = deps.intel.opportunities(&ctx, 10).await?;
+    let research_skills: Vec<&str> = skills_for_agent(skills, &AgentKind::ResearchStrategy)
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect();
     step(
         &deps.store,
         cycle_id,
         AgentKind::ResearchStrategy,
         CycleStep::Understand,
         idem_key,
-        json!({"opportunities": opps.len()}),
+        json!({"opportunities": opps.len(), "skills": research_skills}),
     )
     .await?;
 
@@ -317,13 +325,19 @@ pub async fn run_cycle(
     )
     .await?;
 
-    // --- Plan: angle + channel from strategy
+    // --- Plan: angle + channel from strategy (+ strategy-domain skills)
+    let strategy_skills: Vec<&str> = skills_for_agent(skills, &AgentKind::ResearchStrategy)
+        .iter()
+        .filter(|s| s.domain == "strategy")
+        .map(|s| s.name.as_str())
+        .collect();
     let plan = json!({
         "topic": opp.topic,
         "angle": "explanation",
         "channel": employee.channel,
         "format": strategy.formats.first().cloned().unwrap_or_else(|| "text".into()),
         "evidence": opp.evidence,
+        "skills": strategy_skills,
     });
     step(
         &deps.store,
@@ -353,6 +367,15 @@ pub async fn run_cycle(
         evidence = opp.evidence,
         recent = ctx.recent_topics,
     );
+    // Content agent 按渠道挑选内容生产 skill, 把 skill 的契约写进 prompt
+    let content_skill = pick_content_skill(skills, &employee.channel);
+    let prompt = match content_skill {
+        Some(s) => format!(
+            "{prompt}\nSkill: {} v{} — {}. Follow this skill's input/output contract.",
+            s.name, s.version, s.description
+        ),
+        None => prompt,
+    };
     let draft = deps.llm.generate(&prompt, 512).await?;
     step(
         &deps.store,
@@ -360,14 +383,21 @@ pub async fn run_cycle(
         AgentKind::Content,
         CycleStep::Create,
         idem_key,
-        json!({"draft_len": draft.chars().count()}),
+        json!({
+            "draft_len": draft.chars().count(),
+            "skill": content_skill.map(|s| json!({"name": s.name, "version": s.version, "tools": s.tools})),
+        }),
     )
     .await?;
 
     // --- Review: critic gate (length, duplication, boundaries)
     let limit = platform_text_limit(&employee.channel);
     let draft_weight = weighted_len(&draft);
-    let mut verdict = json!({"pass": true, "checks": {}});
+    let quality_skills: Vec<&str> = skills_for_agent(skills, &AgentKind::CriticCompliance)
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect();
+    let mut verdict = json!({"pass": true, "checks": {}, "skills": quality_skills});
     if draft_weight > limit {
         verdict["pass"] = json!(false);
         verdict["checks"]["length"] =
@@ -493,13 +523,17 @@ pub async fn run_cycle(
         )
         .await
         .ok();
+    let learning_skills: Vec<&str> = skills_for_agent(skills, &AgentKind::AnalyticsLearning)
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect();
     step(
         &deps.store,
         cycle_id,
         AgentKind::AnalyticsLearning,
         CycleStep::Learn,
         idem_key,
-        json!({"memory_id": mem.id}),
+        json!({"memory_id": mem.id, "skills": learning_skills}),
     )
     .await?;
 

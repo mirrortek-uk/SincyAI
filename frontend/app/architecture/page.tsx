@@ -3,6 +3,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, getToken, type ArchEdge, type Architecture } from "@/lib/api";
 
+// 运营周期 10 步的中文名 (与后端 cycle_steps 顺序一致, 供动画高亮)
+const STEP_ZH: Record<string, string> = {
+  observe: "感知", understand: "理解", decide: "决策", plan: "计划", create: "创作",
+  review: "审核", execute: "执行", measure: "衡量", learn: "学习", adapt: "适应",
+};
+
 // 架构图页: 从后端 GET /api/v1/architecture 取结构化模型,
 // 在 console 内用 SVG 渲染分层架构图 + 边标注 + 关键数据流。
 
@@ -201,6 +207,106 @@ export default function ArchitecturePage() {
           </span>
         ))}
       </div>
+
+      {/* 数字员工: 6 核心 Agent × 10 步运营周期 (runtime 高亮已跑/当前步骤, data-* 供后续动画) */}
+      {arch.agents && arch.cycle_steps && (
+        <section className="panel" style={{ marginTop: 16 }}>
+          <h2>数字员工 · {arch.agents.length} 核心 Agent × {arch.cycle_steps.length} 步运营周期</h2>
+          {arch.runtime && (
+            <p className="muted" style={{ marginTop: 0 }}>
+              最近周期 <code data-runtime="cycle">{arch.runtime.cycle_id.slice(0, 8)}</code> · 员工{" "}
+              <strong>{arch.runtime.employee_name}</strong> · {arch.runtime.state} · {arch.runtime.trigger} ·{" "}
+              {arch.runtime.created_at.slice(0, 19).replace("T", " ")}
+            </p>
+          )}
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", margin: "8px 0" }}>
+            {arch.cycle_steps.map((s, i) => {
+              const rt = arch.runtime?.steps.find((x) => x.step === s);
+              const agent = arch.agents.find((a) => a.steps.includes(s));
+              const done = !!rt;
+              return (
+                <span key={s} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                  <span
+                    data-step={s}
+                    data-agent={agent?.id ?? ""}
+                    data-state={rt ? rt.state : "idle"}
+                    title={rt ? `${agent?.name_zh ?? ""} · agent=${rt.agent} · state=${rt.state}` : `${agent?.name_zh ?? ""} · 未运行`}
+                    style={{
+                      padding: "4px 10px",
+                      borderRadius: 999,
+                      border: `1px solid ${done ? "var(--accent)" : "var(--border)"}`,
+                      background: done ? "rgba(76,141,255,0.15)" : "transparent",
+                      fontSize: 12.5,
+                      fontWeight: done ? 700 : 400,
+                    }}
+                  >
+                    {i + 1}. {STEP_ZH[s] ?? s}
+                    <span className="muted" style={{ fontSize: 10.5 }}> · {agent?.name_zh ?? "—"}</span>
+                  </span>
+                  {i < arch.cycle_steps.length - 1 && <span className="muted">→</span>}
+                </span>
+              );
+            })}
+          </div>
+          {arch.runtime && arch.runtime.steps.length > 0 && (
+            <details style={{ marginTop: 6 }}>
+              <summary className="muted">本周期各步骤实际调用的 agent / skills</summary>
+              <table style={{ marginTop: 6 }}>
+                <thead><tr><th>步骤</th><th>agent</th><th>state</th><th>skills</th></tr></thead>
+                <tbody>
+                  {arch.runtime.steps.map((st, i) => (
+                    <tr key={i}>
+                      <td data-step={st.step}>{st.step}</td>
+                      <td data-agent={st.agent}>{st.agent}</td>
+                      <td>{st.state}</td>
+                      <td className="muted" style={{ fontSize: 11 }}>
+                        {Array.isArray(st.skills) ? (st.skills as string[]).join(", ") : st.skill ? JSON.stringify(st.skill) : "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </details>
+          )}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 10, marginTop: 12 }}>
+            {arch.agents.map((a) => (
+              <div key={a.id} data-agent={a.id} style={{ border: "1px solid var(--border)", borderRadius: 8, padding: 10 }}>
+                <strong>{a.name_zh}</strong> <span className="muted" style={{ fontSize: 11 }}>({a.id})</span>
+                <p className="muted" style={{ margin: "4px 0", fontSize: 12 }}>{a.role}</p>
+                <p className="muted" style={{ margin: 0, fontSize: 11 }}>
+                  步骤: {a.steps.map((s) => STEP_ZH[s] ?? s).join(" → ") || "协调"}
+                  {a.domains.length > 0 && <> · skill 域: {a.domains.join(", ")}</>}
+                </p>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {/* Skill 生态: 9 域 */}
+      {arch.skill_domains && (
+        <section className="panel" style={{ marginTop: 16 }}>
+          <h2>Skill 生态 · {arch.skill_domains.total_skills} 个 skills / {arch.skill_domains.domains.length} 域</h2>
+          <p className="muted" style={{ marginTop: 0 }}>
+            Agent 是角色/决策主体, Skill 是可复用、可版本化的能力模块 (skills / skill_versions / employee_skill_bindings,
+            初始 catalog 见迁移 0021, 可经 <code>POST /api/v1/skills</code> 动态注册新版本)
+          </p>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 10 }}>
+            {arch.skill_domains.domains.map((d) => (
+              <div key={d.id} data-skill-domain={d.id} style={{ border: "1px solid var(--border)", borderRadius: 8, padding: 10 }}>
+                <strong>{d.title_zh ?? d.id}</strong>{" "}
+                <span className="muted" style={{ fontSize: 11 }}>({d.id}) · {d.count} 个</span>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 6 }}>
+                  {d.skills.slice(0, 14).map((s) => (
+                    <code key={s} data-skill={s} style={{ fontSize: 10.5, padding: "1px 6px", border: "1px solid var(--border)", borderRadius: 999 }}>{s}</code>
+                  ))}
+                  {d.skills.length > 14 && <span className="muted" style={{ fontSize: 10.5 }}>+{d.skills.length - 14}</span>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       {/* 关键数据流 */}
       <section className="panel" style={{ marginTop: 16 }}>

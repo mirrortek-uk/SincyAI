@@ -4,6 +4,7 @@
 
 use axum::{Json, Router, extract::State, routing::get};
 use serde_json::{Value, json};
+use sqlx::Row;
 
 use crate::state::AppState;
 
@@ -19,7 +20,50 @@ fn edge(from: &str, to: &str, label: &str, kind: &str) -> Value {
     json!({ "from": from, "to": to, "label": label, "kind": kind })
 }
 
-async fn architecture(State(_state): State<AppState>) -> Json<Value> {
+/// 6 个核心 Agent (DE guide V1.1 §"Six initial agents") — 稳定 id 供架构图/动画渲染。
+fn agents_model() -> Value {
+    json!([
+        { "id": "executive", "name": "Executive Agent", "name_zh": "执行主管",
+          "role": "理解目标、协调其他 Agent、任务决策、最终结果",
+          "steps": ["observe", "decide", "execute", "adapt"], "domains": [] },
+        { "id": "research_strategy", "name": "Research & Strategy Agent", "name_zh": "研究与战略",
+          "role": "市场研究、趋势分析、受众分析、内容战略",
+          "steps": ["understand", "plan"], "domains": ["research", "strategy"] },
+        { "id": "creative", "name": "Creative Agent", "name_zh": "创意 Agent",
+          "role": "内容创意、选题、角度、Hook、创意方向",
+          "steps": ["plan"], "domains": ["creative"] },
+        { "id": "content", "name": "Content Agent", "name_zh": "内容生产",
+          "role": "文案、图片、视频、脚本等内容生成",
+          "steps": ["create"], "domains": ["content"] },
+        { "id": "critic_compliance", "name": "Critic & Compliance Agent", "name_zh": "审核与合规",
+          "role": "内容质量、事实核查、原创性、品牌一致性、合规审查",
+          "steps": ["review", "execute"], "domains": ["quality_compliance", "publishing"] },
+        { "id": "analytics_learning", "name": "Analytics & Learning Agent", "name_zh": "数据分析与学习",
+          "role": "分析发布表现、提取经验、实验、优化策略",
+          "steps": ["measure", "learn"], "domains": ["analytics", "learning", "memory"] },
+    ])
+}
+
+/// 运营周期 10 步的稳定顺序 (动画按此顺序高亮)。
+fn cycle_steps_model() -> Value {
+    json!([
+        "observe",
+        "understand",
+        "decide",
+        "plan",
+        "create",
+        "review",
+        "execute",
+        "measure",
+        "learn",
+        "adapt"
+    ])
+}
+
+async fn architecture(
+    State(state): State<AppState>,
+    axum::extract::Extension(auth): axum::extract::Extension<crate::auth::AuthCtx>,
+) -> Json<Value> {
     let layers = json!([
         {
             "id": "client",
@@ -49,8 +93,8 @@ async fn architecture(State(_state): State<AppState>) -> Json<Value> {
             "id": "domain",
             "title": "业务域 crates",
             "nodes": [
-                node("de", "数字员工 sincy-employee", "lifecycle · cycle · agents · memory",
-                     "状态机 CREATED→READY→RUNNING→PAUSED→STOPPED; 10 步运营周期(可恢复, 步级幂等); 版本化身份/使命/策略; 结构化记忆+洞察"),
+                node("de", "数字员工 sincy-employee", "lifecycle · cycle · agents(6) · skills · memory",
+                     "状态机 CREATED→READY→RUNNING→PAUSED→STOPPED; 10 步运营周期(可恢复, 步级幂等, 每步记录调用的 agent+skills); 6 核心 agent 按域动态调用 skill; 版本化身份/使命/策略/skill; 结构化记忆+洞察"),
                 node("wi", "世界情报 sincy-intel", "registry · router · opportunity · adapter",
                      "信源/Provider 注册表; 路由打分 健康.45+可靠.30+限流.15+成本.10 + 降级链; ingest 按 dedup_key 去重; 机会引擎; DE 适配器(只给建议不改策略)"),
                 node("pub", "发布管线 routing/execution/platform/content", "publish_core",
@@ -69,8 +113,8 @@ async fn architecture(State(_state): State<AppState>) -> Json<Value> {
             "id": "data",
             "title": "数据层",
             "nodes": [
-                node("db", "PostgreSQL", "migrations 0001–0017 · sqlx",
-                     "agencies/members/clients/brands · publishing_packages · device_tasks/task_events/execution_routes · devices/sessions · kill_switches · quota · channel_capabilities/app_adapter_versions · digital_employees/cycles/tasks/memory/insights · intelligence_sources/providers/items/opportunities; RLS 租户隔离"),
+                node("db", "PostgreSQL", "migrations 0001–0021 · sqlx",
+                     "agencies/members/clients/brands · publishing_packages · device_tasks/task_events/execution_routes · devices/sessions · kill_switches · quota · channel_capabilities/app_adapter_versions · digital_employees/cycles/tasks/memory/insights · skills/skill_versions/employee_skill_bindings · intelligence_sources/providers/items/opportunities; RLS 租户隔离"),
                 node("vault", "Vault (密钥)", "vault:// 引用",
                      "平台/情报源的 API key 只存引用, 不落库明文"),
             ]
@@ -205,6 +249,87 @@ async fn architecture(State(_state): State<AppState>) -> Json<Value> {
         },
     ]);
 
+    // skill 域统计 (9 域 + 数量 + 名称样例) — 实时查库
+    let skill_domains = match state.pool() {
+        Ok(pool) => {
+            let rows = sqlx::query(
+                "SELECT domain, count(*)::int8 AS count, array_agg(name ORDER BY name) AS names \
+                 FROM skills WHERE status = 'active' GROUP BY domain ORDER BY domain",
+            )
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
+            let mut items: Vec<Value> = rows
+                .iter()
+                .map(|r| {
+                    json!({
+                        "id": r.get::<String, _>("domain"),
+                        "count": r.get::<i64, _>("count"),
+                        "skills": r.get::<Vec<String>, _>("names"),
+                    })
+                })
+                .collect();
+            let total: i64 = items.iter().map(|d| d["count"].as_i64().unwrap_or(0)).sum();
+            // 保证 9 个域都出现 (即使还没有 seed)
+            for d in sincy_employee::skills::SkillDomain::ALL {
+                if !items.iter().any(|i| i["id"] == d.as_str()) {
+                    items.push(json!({ "id": d.as_str(), "title_zh": d.title_zh(), "count": 0, "skills": [] }));
+                } else if let Some(i) = items.iter_mut().find(|i| i["id"] == d.as_str()) {
+                    i["title_zh"] = json!(d.title_zh());
+                }
+            }
+            json!({ "domains": items, "total_skills": total })
+        }
+        Err(_) => json!({ "domains": [], "total_skills": 0 }),
+    };
+
+    // runtime: 本租户最近一个运营周期及其 step 落痕 (架构图动画高亮用)
+    let runtime = match state.pool() {
+        Ok(pool) => {
+            let cyc = sqlx::query(
+                "SELECT c.id, c.employee_id, e.name AS employee_name, c.state, c.trigger, c.created_at \
+                 FROM operating_cycles c JOIN digital_employees e ON e.id = c.employee_id \
+                 WHERE e.agency_id = $1 ORDER BY c.created_at DESC LIMIT 1",
+            )
+            .bind(auth.agency_id.as_uuid())
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
+            match cyc {
+                Some(r) => {
+                    let cycle_id: uuid::Uuid = r.get("id");
+                    let steps = sqlx::query(
+                        "SELECT agent, step, state, output, created_at FROM cycle_tasks \
+                         WHERE cycle_id = $1 ORDER BY created_at",
+                    )
+                    .bind(cycle_id)
+                    .fetch_all(pool)
+                    .await
+                    .unwrap_or_default();
+                    json!({
+                        "cycle_id": cycle_id,
+                        "employee_id": r.get::<uuid::Uuid, _>("employee_id"),
+                        "employee_name": r.get::<String, _>("employee_name"),
+                        "state": r.get::<String, _>("state"),
+                        "trigger": r.get::<String, _>("trigger"),
+                        "created_at": r.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
+                        "steps": steps.iter().map(|s| json!({
+                            "agent": s.get::<String, _>("agent"),
+                            "step": s.get::<String, _>("step"),
+                            "state": s.get::<String, _>("state"),
+                            "skills": s.get::<Option<Value>, _>("output").and_then(|o| o.get("skills").cloned()),
+                            "skill": s.get::<Option<Value>, _>("output").and_then(|o| o.get("skill").cloned()),
+                            "created_at": s.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
+                        })).collect::<Vec<_>>(),
+                    })
+                }
+                None => json!(null),
+            }
+        }
+        Err(_) => json!(null),
+    };
+
     Json(json!({
         "title": "Sincy 系统架构 (as-built)",
         "service": "cloud-api",
@@ -213,6 +338,10 @@ async fn architecture(State(_state): State<AppState>) -> Json<Value> {
         "layers": layers,
         "edges": edges,
         "flows": flows,
+        "agents": agents_model(),
+        "cycle_steps": cycle_steps_model(),
+        "skill_domains": skill_domains,
+        "runtime": runtime,
         "edge_kinds": {
             "http": "HTTP REST (JWT)",
             "ws": "WebSocket",

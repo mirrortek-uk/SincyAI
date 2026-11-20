@@ -12,6 +12,7 @@ import {
   type EmployeeItem,
   type InsightItem,
   type MemoryItem,
+  type SkillItem,
 } from "@/lib/api";
 
 // 数字员工页 (DE guide): 创建员工 -> 启动 -> 手动触发运营周期 ->
@@ -25,6 +26,7 @@ export default function EmployeesPage() {
   const [cycleDetail, setCycleDetail] = useState<CycleDetail | null>(null);
   const [memory, setMemory] = useState<MemoryItem[]>([]);
   const [insights, setInsights] = useState<InsightItem[]>([]);
+  const [skills, setSkills] = useState<SkillItem[]>([]);
   const [name, setName] = useState("");
   const [brandId, setBrandId] = useState("");
   const [language, setLanguage] = useState("zh-CN");
@@ -49,14 +51,16 @@ export default function EmployeesPage() {
   const loadDetail = useCallback(async (id: string) => {
     if (!id || !getToken()) return;
     try {
-      const [c, m, i] = await Promise.all([
+      const [c, m, i, sk] = await Promise.all([
         api.listCycles(id),
         api.listMemory(id),
         api.listInsights(id),
+        api.listEmployeeSkills(id),
       ]);
       setCycles(c.items);
       setMemory(m.items);
       setInsights(i.items);
+      setSkills(sk.items);
       setCycleDetail(null);
     } catch (e) {
       setError(String(e));
@@ -246,6 +250,45 @@ export default function EmployeesPage() {
             {insights.length === 0 && <p className="muted">暂无洞察。</p>}
             {insights.slice(0, 10).map((i) => (
               <p key={i.id} className="muted">{i.content}</p>
+            ))}
+          </section>
+
+          <section className="panel">
+            <h2>绑定的 Skills ({skills.filter((s) => s.enabled !== false).length}/{skills.length})</h2>
+            <p className="muted" style={{ marginTop: 0 }}>
+              创建员工时自动绑定全部 active skills; 每个周期由各 agent 按域动态调用, 停用后该 skill 不再被调用。
+            </p>
+            {Object.entries(
+              skills.reduce<Record<string, SkillItem[]>>((acc, s) => {
+                (acc[s.domain] ??= []).push(s);
+                return acc;
+              }, {}),
+            ).map(([domain, list]) => (
+              <div key={domain} style={{ marginBottom: 8 }}>
+                <strong style={{ fontSize: 13 }}>{domain}</strong>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 4 }}>
+                  {list.map((s) => (
+                    <button
+                      key={s.id}
+                      data-skill={s.name}
+                      disabled={busy}
+                      title={`${s.title} v${s.version} — ${s.description}${s.tools?.length ? `\ntools: ${s.tools.join(", ")}` : ""}`}
+                      onClick={() => act(() => api.bindSkill(selected, { skill_id: s.id, enabled: s.enabled === false }))}
+                      style={{
+                        fontSize: 11.5,
+                        padding: "3px 10px",
+                        borderRadius: 999,
+                        border: "1px solid var(--border)",
+                        background: s.enabled === false ? "transparent" : "rgba(76,141,255,0.12)",
+                        opacity: s.enabled === false ? 0.45 : 1,
+                        cursor: "pointer",
+                      }}
+                    >
+                      {s.name} v{s.version}{s.enabled === false ? " (已停用)" : ""}
+                    </button>
+                  ))}
+                </div>
+              </div>
             ))}
           </section>
         </>

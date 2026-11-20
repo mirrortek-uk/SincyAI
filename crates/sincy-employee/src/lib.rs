@@ -10,9 +10,11 @@ pub mod cycle;
 pub mod domain;
 pub mod lifecycle;
 pub mod memory;
+pub mod skills;
 
 pub use agents::{AgentKind, AgentRequest, AgentResult};
 pub use cycle::{CycleDeps, CycleOutcome, CycleStep, CycleStore, run_cycle};
 pub use domain::{Employee, EmployeeStatus, Goal, Identity, Mission, Strategy, StrategyStatus};
 pub use lifecycle::{LifecycleError, transition};
 pub use memory::{MemoryItem, MemoryType};
+pub use skills::{Skill, SkillDomain, agent_skill_domains, pick_content_skill, skills_for_agent};

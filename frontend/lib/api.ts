@@ -325,6 +325,41 @@ export interface ArchFlow {
   steps: string;
 }
 
+export interface ArchAgent {
+  id: string;
+  name: string;
+  name_zh: string;
+  role: string;
+  steps: string[];
+  domains: string[];
+}
+
+export interface ArchSkillDomain {
+  id: string;
+  title_zh?: string;
+  count: number;
+  skills: string[];
+}
+
+export interface ArchRuntimeStep {
+  agent: string;
+  step: string;
+  state: string;
+  skills?: unknown;
+  skill?: unknown;
+  created_at: string;
+}
+
+export interface ArchRuntime {
+  cycle_id: string;
+  employee_id: string;
+  employee_name: string;
+  state: string;
+  trigger: string;
+  created_at: string;
+  steps: ArchRuntimeStep[];
+}
+
 export interface Architecture {
   title: string;
   service: string;
@@ -333,7 +368,24 @@ export interface Architecture {
   layers: ArchLayer[];
   edges: ArchEdge[];
   flows: ArchFlow[];
+  agents: ArchAgent[];
+  cycle_steps: string[];
+  skill_domains: { domains: ArchSkillDomain[]; total_skills: number };
+  runtime: ArchRuntime | null;
   edge_kinds: Record<string, string>;
+}
+
+export interface SkillItem {
+  id: string;
+  domain: string;
+  name: string;
+  version: number;
+  title: string;
+  description: string;
+  tools: string[];
+  status: string;
+  enabled?: boolean;
+  bound_at?: string;
 }
 
 export const api = {
@@ -444,6 +496,16 @@ export const api = {
   listMemory: (id: string) => req<{ items: MemoryItem[] }>(`/employees/${id}/memory`),
   listInsights: (id: string) => req<{ items: InsightItem[] }>(`/employees/${id}/insights`),
   getArchitecture: () => req<Architecture>("/architecture"),
+  listSkills: (q?: { domain?: string; q?: string }) =>
+    req<{ items: SkillItem[] }>("/skills" + (q && (q.domain || q.q) ? `?${new URLSearchParams({ ...(q.domain ? { domain: q.domain } : {}), ...(q.q ? { q: q.q } : {}) })}` : "")),
+  listSkillDomains: () => req<{ domains: ArchSkillDomain[]; total_skills: number }>("/skills/domains"),
+  registerSkill: (body: { domain: string; name: string; title?: string; description?: string; tools?: string[] }) =>
+    req<{ id: string; name: string; domain: string; version: number }>("/skills", { method: "POST", body: JSON.stringify(body) }),
+  listEmployeeSkills: (id: string) => req<{ items: SkillItem[] }>(`/employees/${id}/skills`),
+  bindSkill: (id: string, body: { skill_id?: string; name?: string; enabled?: boolean }) =>
+    req<{ employee_id: string; skill_id: string; enabled: boolean }>(`/employees/${id}/skills`, { method: "POST", body: JSON.stringify(body) }),
+  unbindSkill: (id: string, skillId: string) =>
+    req<{ unbound: boolean }>(`/employees/${id}/skills/${skillId}`, { method: "DELETE" }),
   listIntelSources: () => req<{ items: IntelSource[] }>("/intel/sources"),
   listIntelProviders: () => req<{ items: IntelProvider[] }>("/intel/providers"),
   providerHealth: (id: string) =>

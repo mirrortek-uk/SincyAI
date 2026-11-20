@@ -223,6 +223,8 @@ async fn create_employee(
     }));
     sqlx::query("INSERT INTO employee_strategies (employee_id, version, strategy, status) VALUES ($1, 1, $2, 'ACTIVE')")
         .bind(id).bind(&strategy).execute(pool).await.map_err(err)?;
+    // 绑定全部 active skills (可在 /employees/{id}/skills 里逐个停用)
+    crate::skills::bind_all_active_skills(pool, id).await?;
     Ok(Json(json!({ "id": id, "status": "READY" })))
 }
 
@@ -618,9 +620,12 @@ async fn start_cycle(
         }),
     };
     let trigger = body.trigger.unwrap_or_else(|| "manual".into());
-    let outcome = run_cycle(&deps, &emp, &identity, &mission, &strategy, &trigger, &idem)
-        .await
-        .map_err(|e| app_error_response(sincy_common::AppError::retryable("cycle", e)))?;
+    let skills = crate::skills::load_bound_skills(pool, id).await?;
+    let outcome = run_cycle(
+        &deps, &emp, &identity, &mission, &strategy, &skills, &trigger, &idem,
+    )
+    .await
+    .map_err(|e| app_error_response(sincy_common::AppError::retryable("cycle", e)))?;
     Ok(Json(json!({
         "cycle_id": outcome.cycle_id,
         "state": outcome.state,

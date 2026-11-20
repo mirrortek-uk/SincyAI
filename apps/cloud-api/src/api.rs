@@ -73,6 +73,7 @@ pub fn routes() -> Router<AppState> {
         .merge(crate::architecture::routes())
         .merge(crate::intel::routes())
         .merge(crate::employees::routes())
+        .merge(crate::skills::routes())
         .layer(axum::middleware::from_fn(request_id_middleware))
         .layer(axum::middleware::from_fn(crate::auth::auth_middleware))
         .layer(cors_layer())

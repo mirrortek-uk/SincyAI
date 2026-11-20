@@ -223,6 +223,7 @@ async fn cycle_with_approval_gate_parks_package() {
         &identity(),
         &mission(),
         &strategy(),
+        &[],
         "manual",
         "c1",
     )
@@ -248,6 +249,7 @@ async fn cycle_auto_publish_goes_to_device_route() {
         &identity(),
         &mission(),
         &strategy(),
+        &[],
         "scheduled",
         "c2",
     )
@@ -284,6 +286,7 @@ async fn cycle_without_opportunity_is_noop_success() {
         &identity(),
         &mission(),
         &strategy(),
+        &[],
         "scheduled",
         "c3",
     )
@@ -314,6 +317,7 @@ async fn critic_rejects_overlong_draft() {
         &identity(),
         &mission(),
         &strategy(),
+        &[],
         "manual",
         "c4",
     )
