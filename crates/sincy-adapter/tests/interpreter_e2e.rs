@@ -1,0 +1,248 @@
+//! WP-13 acceptance: 示例 adapter 在模拟屏幕流上完整执行并留下证据;
+//! 挑战界面必然停住转人工; App 版本越界阻断且零副作用; side_effect 后
+//! 失败进入 VERIFICATION_PENDING; 签名篡改被拒; schema 校验生效.
+
+use sincy_adapter::interpreter::{
+    ExecStatus, Interpreter, MockSnapshot, PlatformIo, ScreenSnapshot, identify_screen,
+};
+use sincy_adapter::schema::{AdapterDefinition, FlowStep};
+use sincy_adapter::sign::{definition_sha256, sign_definition, verify_definition};
+use sincy_adapter::version_range::VersionRange;
+use std::collections::HashMap;
+
+fn sample_def() -> AdapterDefinition {
+    let yaml = include_str!("../../../adapters/xiaohongshu.publish_video.yaml");
+    AdapterDefinition::from_yaml(yaml).expect("sample adapter must validate")
+}
+
+/// A scripted platform: each snapshot() pops the next screen; perform() records actions.
+struct ScriptedIo {
+    screens: Vec<MockSnapshot>,
+    performed: Vec<String>,
+    fail_on_side_effect: bool,
+}
+
+impl PlatformIo for ScriptedIo {
+    fn snapshot(&mut self) -> Box<dyn ScreenSnapshot> {
+        let s = if self.screens.is_empty() {
+            MockSnapshot::new(vec![], vec![])
+        } else {
+            self.screens.remove(0)
+        };
+        Box::new(s)
+    }
+    fn perform(&mut self, step: &FlowStep) -> Result<(), String> {
+        self.performed.push(format!("{:?}", step.action));
+        if step.side_effect && self.fail_on_side_effect {
+            return Err("post-publish network drop".into());
+        }
+        Ok(())
+    }
+}
+
+fn home() -> MockSnapshot {
+    MockSnapshot::new(
+        vec![
+            "com.xingin.xhs:id/home_tab".into(),
+            "com.xingin.xhs:id/plus_button".into(),
+        ],
+        vec!["首页".into()],
+    )
+}
+fn picker() -> MockSnapshot {
+    MockSnapshot::new(vec![], vec!["选择视频".into()])
+}
+fn composer() -> MockSnapshot {
+    MockSnapshot::new(
+        vec![
+            "com.xingin.xhs:id/title".into(),
+            "com.xingin.xhs:id/body".into(),
+        ],
+        vec!["发布笔记".into(), "发布".into()],
+    )
+}
+fn confirm() -> MockSnapshot {
+    MockSnapshot::new(vec![], vec!["发布成功".into(), "完成".into()])
+}
+fn challenge() -> MockSnapshot {
+    MockSnapshot::new(vec![], vec!["安全检测".into()])
+}
+fn unknown() -> MockSnapshot {
+    MockSnapshot::new(vec!["zzz".into()], vec!["???".into()])
+}
+
+#[test]
+fn happy_path_completes_with_evidence_and_side_effect_marked() {
+    let def = sample_def();
+    // flow: home, picker, composer(x2), composer(publish), confirm(verify)
+    let io_screens = vec![
+        home(),
+        picker(),
+        composer(),
+        composer(),
+        composer(),
+        confirm(),
+        confirm(),
+    ];
+    let mut io = ScriptedIo {
+        screens: io_screens,
+        performed: vec![],
+        fail_on_side_effect: false,
+    };
+    let mut interp = Interpreter::new(&def, "8.15.0");
+    let rt = interp.run(&mut io, 1);
+    assert_eq!(rt.status, Some(ExecStatus::Completed));
+    assert!(rt.side_effect_done, "publish tap is a side effect");
+    assert!(
+        io.performed.iter().any(|a| a.contains("Tap")),
+        "tap actions performed"
+    );
+    // every step left evidence
+    let steps = rt
+        .events
+        .iter()
+        .filter(|e| matches!(e, sincy_adapter::interpreter::ExecEvent::Step(_)))
+        .count();
+    assert_eq!(steps, def.flow.len());
+}
+
+#[test]
+fn challenge_screen_parks_task_for_human() {
+    let def = sample_def();
+    // home ok, then challenge appears instead of picker
+    let mut io = ScriptedIo {
+        screens: vec![home(), challenge()],
+        performed: vec![],
+        fail_on_side_effect: false,
+    };
+    let mut interp = Interpreter::new(&def, "8.15.0");
+    let rt = interp.run(&mut io, 1);
+    assert!(matches!(rt.status, Some(ExecStatus::WaitingUser(_))));
+    assert!(!rt.side_effect_done, "no side effect before challenge");
+    assert!(rt.events.iter().any(|e| matches!(
+        e,
+        sincy_adapter::interpreter::ExecEvent::ChallengeDetected { .. }
+    )));
+}
+
+#[test]
+fn unknown_screens_exhaust_safe_recovery_then_drift_blocks() {
+    let def = sample_def();
+    // home ok, then 5 unknown screens (recovery budget is 3)
+    let mut screens = vec![home()];
+    screens.extend((0..5).map(|_| unknown()));
+    let mut io = ScriptedIo {
+        screens,
+        performed: vec![],
+        fail_on_side_effect: false,
+    };
+    let mut interp = Interpreter::new(&def, "8.15.0");
+    let rt = interp.run(&mut io, 1);
+    // anchors fully mismatch after safe recoveries exhausted => UI drift, blocked
+    assert!(
+        matches!(rt.status, Some(ExecStatus::UiDrift(_))),
+        "got {:?}",
+        rt.status
+    );
+    // step 0 performed its normal (non-side-effect) tap; all recovery actions were Back only
+    assert!(
+        io.performed[1..].iter().all(|a| a.contains("Back")),
+        "{:?}",
+        io.performed
+    );
+    assert!(!rt.side_effect_done);
+}
+
+#[test]
+fn app_version_out_of_range_blocks_with_zero_side_effects() {
+    let def = sample_def();
+    let mut io = ScriptedIo {
+        screens: vec![home()],
+        performed: vec![],
+        fail_on_side_effect: false,
+    };
+    let mut interp = Interpreter::new(&def, "9.0.0"); // out of >=8.10 <8.20
+    let rt = interp.run(&mut io, 1);
+    assert!(matches!(rt.status, Some(ExecStatus::UiDrift(_))));
+    assert!(
+        io.performed.is_empty(),
+        "version mismatch must not tap anything"
+    );
+    assert!(!rt.side_effect_done);
+}
+
+#[test]
+fn side_effect_step_failure_is_verification_pending() {
+    let def = sample_def();
+    let io_screens = vec![home(), picker(), composer(), composer(), composer()];
+    let mut io = ScriptedIo {
+        screens: io_screens,
+        performed: vec![],
+        fail_on_side_effect: true,
+    };
+    let mut interp = Interpreter::new(&def, "8.15.0");
+    let rt = interp.run(&mut io, 1);
+    assert!(matches!(
+        rt.status,
+        Some(ExecStatus::VerificationPending(_))
+    ));
+    assert!(
+        rt.side_effect_done,
+        "side effect boundary crossed: no auto retry/degrade"
+    );
+}
+
+#[test]
+fn sample_adapter_signature_roundtrip_and_tamper_rejected() {
+    let yaml = include_str!("../../../adapters/xiaohongshu.publish_video.yaml");
+    let def = AdapterDefinition::from_yaml(yaml).expect("valid");
+    let canonical = serde_json::to_string(&def).expect("canonical json");
+    let key = b"sincy-platform-signing-key";
+    let sig = sign_definition(key, &canonical);
+    assert!(verify_definition(key, &canonical, &sig).is_ok());
+    let tampered = canonical.replace("发布笔记", "篡改");
+    assert!(verify_definition(key, &tampered, &sig).is_err());
+    assert_eq!(definition_sha256(&canonical).len(), 64);
+}
+
+#[test]
+fn schema_rejects_adapter_without_challenge_screen() {
+    let bad = r#"
+adapter: demo.no_challenge
+version: 1
+app: { package: com.demo, version_range: ">=1.0" }
+screens:
+  home: { anchors: [ { text: "首页" } ] }
+flow:
+  - { expect: home, action: back }
+"#;
+    assert!(AdapterDefinition::from_yaml(bad).is_err());
+}
+
+#[test]
+fn version_range_gates_execution() {
+    let def = sample_def();
+    let range = VersionRange::parse(&def.app.version_range).unwrap();
+    assert!(range.contains("8.10").unwrap());
+    assert!(!range.contains("8.20").unwrap());
+    let m = identify_screen(
+        &MockSnapshot::new(vec![], vec!["验证".into()]),
+        &def.screens,
+        def.challenge_screen(),
+    );
+    assert_eq!(m.screen_id, "challenge");
+}
+
+#[test]
+fn screen_identification_prefers_challenge() {
+    let def = sample_def();
+    let mut screens: HashMap<String, sincy_adapter::schema::ScreenDef> = def.screens.clone();
+    let _ = &mut screens;
+    // a screen that matches both home and challenge anchors must resolve to challenge
+    let both = MockSnapshot::new(
+        vec!["com.xingin.xhs:id/home_tab".into()],
+        vec!["首页".into(), "安全检测".into()],
+    );
+    let m = identify_screen(&both, &def.screens, def.challenge_screen());
+    assert_eq!(m.screen_id, "challenge");
+}

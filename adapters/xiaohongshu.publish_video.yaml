@@ -1,0 +1,36 @@
+# 示例 App Adapter（TDD 9.3 结构；锚点为占位，真机核验后替换）
+# 由 Sincy 签名发布；设备只执行签名有效且 App 版本在范围内的版本。
+adapter: xiaohongshu.publish_video
+version: 3
+app:
+  package: com.xingin.xhs
+  version_range: ">=8.10 <8.20"
+screens:
+  home:
+    anchors:
+      - { id: "com.xingin.xhs:id/home_tab" }
+      - { text: "首页" }
+  picker:
+    anchors:
+      - { text: "选择视频" }
+  composer:
+    anchors:
+      - { text: "发布笔记" }
+  published_confirm:
+    anchors:
+      - { text: "发布成功" }
+  challenge:
+    anchors:
+      - { text_any: ["验证", "安全检测", "异常"] }   # always -> WAITING_USER
+  update_dialog:
+    anchors:
+      - { text: "发现新版本" }
+flow:
+  - { expect: home, action: tap, target: { id: "com.xingin.xhs:id/plus_button" } }
+  - { expect: picker, action: pick_media, value: "package.media[0]" }
+  - { expect: composer, action: set_text, target: { id: "com.xingin.xhs:id/title" }, value: "package.title" }
+  - { expect: composer, action: set_text, target: { id: "com.xingin.xhs:id/body" }, value: "package.body" }
+  - { expect: composer, action: tap, target: { text: "发布" }, side_effect: true }
+  - { expect: published_confirm, action: tap, target: { text: "完成" }, verify: true }
+known_interrupts:
+  - { screen: update_dialog, action: tap, target: { text: "以后再说" } }

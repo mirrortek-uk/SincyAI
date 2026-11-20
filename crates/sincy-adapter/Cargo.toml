@@ -1,0 +1,18 @@
+[package]
+name = "sincy-adapter"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Declarative App Adapter: schema, signing, version ranges, interpreter loop, UI drift (FR-021/022, TDD 9, WP-13)"
+
+[dependencies]
+sincy-common = { path = "../sincy-common" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = "0.9"
+chrono = { workspace = true }
+uuid = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+thiserror = { workspace = true }
+regex = { workspace = true }

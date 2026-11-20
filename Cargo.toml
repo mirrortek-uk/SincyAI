@@ -11,6 +11,7 @@ members = [
     "crates/sincy-content",
     "crates/sincy-execution",
     "crates/sincy-device",
+    "crates/sincy-adapter",
     "apps/cloud-api",
     "apps/cloud-scheduler",
     "apps/agent-worker",
