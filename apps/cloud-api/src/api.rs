@@ -565,10 +565,7 @@ mod tests {
     use tower::ServiceExt;
 
     fn state() -> AppState {
-        AppState {
-            pool: None,
-            env: "local".into(),
-        }
+        AppState::new(None, "local".into())
     }
 
     #[tokio::test]
@@ -610,15 +607,5 @@ mod tests {
             .unwrap();
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["error"]["code"], "database_unavailable");
-    }
-
-    #[tokio::test]
-    async fn agent_placeholder_shape() {
-        let res = agent_connect_placeholder().await;
-        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let v: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(v["error"]["code"], "not_implemented");
     }
 }

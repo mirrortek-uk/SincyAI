@@ -100,10 +100,10 @@ async fn handle_socket(socket: WebSocket, state: AppState, device_id: Uuid, agen
                     .bind(task_id)
                     .execute(&dispatch_pool)
                     .await;
-                if let Ok(text) = env.to_json() {
-                    if tx_dispatch.send(Message::Text(text.into())).await.is_err() {
-                        return;
-                    }
+                if let Ok(text) = env.to_json()
+                    && tx_dispatch.send(Message::Text(text.into())).await.is_err()
+                {
+                    return;
                 }
             }
         }
