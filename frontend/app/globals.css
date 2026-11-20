@@ -1,0 +1,101 @@
+:root {
+  --bg: #0f1115;
+  --panel: #171a21;
+  --border: #262b36;
+  --text: #e6e9ef;
+  --muted: #9aa3b2;
+  --accent: #4f8cff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+.topnav {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  padding: 12px 20px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.topnav a {
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.topnav a:hover {
+  color: var(--text);
+}
+
+.brand {
+  font-weight: 700;
+  margin-right: 12px;
+}
+
+.content {
+  padding: 20px;
+  max-width: 1100px;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+pre {
+  overflow: auto;
+  background: #0b0d11;
+  padding: 12px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+input,
+select,
+button {
+  font: inherit;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: #0b0d11;
+  color: var(--text);
+}
+
+button {
+  background: var(--accent);
+  border: none;
+  cursor: pointer;
+}
+
+button.danger {
+  background: #b3402f;
+}
+
+label {
+  display: block;
+  color: var(--muted);
+  font-size: 13px;
+  margin: 8px 0 4px;
+}
+
+.row {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.muted {
+  color: var(--muted);
+}

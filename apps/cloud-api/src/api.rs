@@ -39,7 +39,10 @@ pub fn routes() -> Router<AppState> {
         .route("/capabilities", get(list_capabilities))
         .route("/tasks/publish", post(publish_task))
         .route("/tasks/{id}/route", get(get_task_route))
-        .route("/kill-switches", post(create_kill_switch))
+        .route(
+            "/kill-switches",
+            get(list_kill_switches).post(create_kill_switch),
+        )
         .route("/kill-switches/{id}", delete(remove_kill_switch))
         .route("/metrics", get(crate::metrics::metrics_handler))
         .layer(axum::middleware::from_fn(request_id_middleware))
@@ -485,6 +488,42 @@ struct CreateKillSwitchBody {
     scope: String,
     target_id: Option<Uuid>,
     reason: String,
+}
+
+async fn list_kill_switches(
+    State(state): State<AppState>,
+    Query(q): Query<ListKillSwitchQuery>,
+) -> Result<Json<Value>, Response> {
+    let pool = state.pool().map_err(app_error_response)?;
+    let rows = sqlx::query(
+        "SELECT id, agency_id, scope, target_id, reason, active, created_at FROM kill_switches
+         WHERE ($1::uuid IS NULL OR agency_id IS NULL OR agency_id = $1)
+         ORDER BY created_at DESC LIMIT 200",
+    )
+    .bind(q.agency_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
+    let items: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            json!({
+                "id": r.get::<Uuid, _>("id"),
+                "agency_id": r.get::<Option<Uuid>, _>("agency_id"),
+                "scope": r.get::<String, _>("scope"),
+                "target_id": r.get::<Option<Uuid>, _>("target_id"),
+                "reason": r.get::<String, _>("reason"),
+                "active": r.get::<bool, _>("active"),
+                "created_at": r.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "items": items })))
+}
+
+#[derive(Debug, Deserialize)]
+struct ListKillSwitchQuery {
+    agency_id: Option<Uuid>,
 }
 
 async fn create_kill_switch(
