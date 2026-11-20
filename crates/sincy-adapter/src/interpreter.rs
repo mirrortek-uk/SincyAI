@@ -122,19 +122,17 @@ pub fn identify_screen(
     challenge: Option<&str>,
 ) -> ScreenMatch {
     // challenge screen wins first (safety)
-    if let Some(ch) = challenge {
-        if let Some(def) = screens.get(ch) {
-            if def
-                .anchors
-                .iter()
-                .all(|a| crate::drift::anchor_matches(a, snap))
-            {
-                return ScreenMatch {
-                    screen_id: ch.to_string(),
-                    match_rate: anchor_match_rate(&def.anchors, snap),
-                };
-            }
-        }
+    if let Some(ch) = challenge
+        && let Some(def) = screens.get(ch)
+        && def
+            .anchors
+            .iter()
+            .all(|a| crate::drift::anchor_matches(a, snap))
+    {
+        return ScreenMatch {
+            screen_id: ch.to_string(),
+            match_rate: anchor_match_rate(&def.anchors, snap),
+        };
     }
     let mut best: Option<ScreenMatch> = None;
     for (name, def) in screens {

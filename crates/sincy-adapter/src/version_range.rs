@@ -1,7 +1,6 @@
 //! Target App version range matching (FR-022): adapter declares e.g.
 //! ">=8.10 <8.20"; devices outside the range refuse to execute (UI drift guard).
 
-use regex::Regex;
 use std::cmp::Ordering;
 
 #[derive(Debug, thiserror::Error)]
@@ -41,16 +40,8 @@ fn cmp_version(a: &[u32], b: &[u32]) -> Ordering {
 
 impl VersionRange {
     pub fn parse(raw: &str) -> Result<Self, VersionRangeError> {
-        let re = Regex::new(r"^(>=|>|<=|<)?\s*([0-9]+(\.[0-9]+)*)$")
-            .map_err(|e| VersionRangeError::Invalid(e.to_string()))?;
         let mut lower = None;
         let mut upper = None;
-        for part in raw.split_whitespace().collect::<Vec<_>>().chunks(2) {
-            // grammar: sequence of "op version" tokens separated by spaces,
-            // e.g. ">=8.10 <8.20" parses as two tokens
-            let _ = part;
-        }
-        // simpler: scan tokens pairwise
         let tokens: Vec<&str> = raw.split_whitespace().collect();
         let mut i = 0;
         while i < tokens.len() {

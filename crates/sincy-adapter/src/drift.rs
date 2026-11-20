@@ -36,20 +36,20 @@ pub fn anchor_match_rate(
 }
 
 pub fn anchor_matches(a: &Anchor, snapshot: &dyn crate::interpreter::ScreenSnapshot) -> bool {
-    if let Some(id) = &a.id {
-        if !snapshot.has_node_with_id(id) {
-            return false;
-        }
+    if let Some(id) = &a.id
+        && !snapshot.has_node_with_id(id)
+    {
+        return false;
     }
-    if let Some(text) = &a.text {
-        if !snapshot.has_text(text) {
-            return false;
-        }
+    if let Some(text) = &a.text
+        && !snapshot.has_text(text)
+    {
+        return false;
     }
-    if let Some(any) = &a.text_any {
-        if !any.iter().any(|t| snapshot.has_text(t)) {
-            return false;
-        }
+    if let Some(any) = &a.text_any
+        && !any.iter().any(|t| snapshot.has_text(t))
+    {
+        return false;
     }
     true
 }
@@ -90,7 +90,7 @@ mod tests {
 
     #[test]
     fn drift_judgements() {
-        assert!(judge(0.9, 0, true).drifted == false);
+        assert!(!judge(0.9, 0, true).drifted);
         assert_eq!(
             judge(0.9, 0, false).reason,
             Some(DriftReason::VersionOutOfRange)
