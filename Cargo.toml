@@ -13,6 +13,7 @@ members = [
     "crates/sincy-device",
     "crates/sincy-adapter",
     "crates/sincy-transfer",
+    "crates/sincy-ai",
     "apps/cloud-api",
     "apps/cloud-scheduler",
     "apps/agent-worker",
@@ -44,7 +45,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # data layer
-sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono", "json", "migrate"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono", "json", "migrate", "rust_decimal"] }
 redis = { version = "0.32", features = ["tokio-comp", "connection-manager"] }
 
 # time / ids

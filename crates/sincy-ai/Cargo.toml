@@ -1,0 +1,20 @@
+[package]
+name = "sincy-ai"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "AI gateway abstraction + model cost budget circuit breaker + analytics feedback (FR-016/026, WP-14)"
+
+[dependencies]
+sincy-common = { path = "../sincy-common" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+rust_decimal = { version = "1", features = ["db-postgres", "serde"] }
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio = { workspace = true }
