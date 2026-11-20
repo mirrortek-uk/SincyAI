@@ -11,6 +11,10 @@ sincy-config = { path = "../../crates/sincy-config" }
 sincy-protocol = { path = "../../crates/sincy-protocol" }
 sincy-database = { path = "../../crates/sincy-database" }
 sincy-security = { path = "../../crates/sincy-security" }
+sincy-routing = { path = "../../crates/sincy-routing" }
+sincy-platform = { path = "../../crates/sincy-platform" }
+sincy-content = { path = "../../crates/sincy-content" }
+sincy-execution = { path = "../../crates/sincy-execution" }
 tokio = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }
@@ -21,3 +25,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+sqlx = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

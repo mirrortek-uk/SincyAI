@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::ai_label::AiLabel;
-use crate::package::{MediaAsset, PublishingPackage};
+use crate::package::PublishingPackage;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QualityIssue {
@@ -97,25 +97,25 @@ impl QualityGate {
         }
 
         // CTA
-        if let Some(cta) = &self.brand_rules.required_cta {
-            if !pkg.text().contains(cta.as_str()) {
-                issues.push(QualityIssue {
-                    code: "missing_cta",
-                    message: format!("缺少必需 CTA: {cta}"),
-                    severity: Severity::Block,
-                });
-            }
+        if let Some(cta) = &self.brand_rules.required_cta
+            && !pkg.text().contains(cta.as_str())
+        {
+            issues.push(QualityIssue {
+                code: "missing_cta",
+                message: format!("缺少必需 CTA: {cta}"),
+                severity: Severity::Block,
+            });
         }
 
         // text length
-        if let Some(max) = self.brand_rules.max_text_len {
-            if pkg.text().chars().count() > max {
-                issues.push(QualityIssue {
-                    code: "text_too_long",
-                    message: format!("文案超长: {} > {max}", pkg.text().chars().count()),
-                    severity: Severity::Block,
-                });
-            }
+        if let Some(max) = self.brand_rules.max_text_len
+            && pkg.text().chars().count() > max
+        {
+            issues.push(QualityIssue {
+                code: "text_too_long",
+                message: format!("文案超长: {} > {max}", pkg.text().chars().count()),
+                severity: Severity::Block,
+            });
         }
 
         // media spec per platform (FR-007 渠道规格)
@@ -162,7 +162,7 @@ impl QualityGate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::package::PackageEditor;
+    use crate::package::{MediaAsset, PackageEditor};
     use serde_json::json;
     use uuid::Uuid;
 

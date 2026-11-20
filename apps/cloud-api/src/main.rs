@@ -1,12 +1,11 @@
-//! cloud-api entrypoint (WP-01 slice).
+//! cloud-api entrypoint.
 //!
 //! Serves /api/v1 REST (TDD 12.1) with unified JSON errors, request_id and
-//! structured tracing. The Agent WSS gateway (/api/v1/agent/connect) is
-//! added in WP-08; routes are declared here so the surface is stable.
-
-mod api;
+//! structured tracing. Runs migrations on startup when a database is
+//! configured. The Agent WSS gateway (/api/v1/agent/connect) lands in WP-08.
 
 use axum::Router;
+use cloud_api::AppState;
 use std::net::SocketAddr;
 
 #[tokio::main]
@@ -22,9 +21,32 @@ async fn main() {
 
     sincy_tracing_init(&cfg.log.filter, cfg.log.json);
 
+    // database is optional in local mode (healthz/version still work)
+    let pool = if cfg.database.url.is_empty() {
+        tracing::warn!("SINCY_DATABASE_URL not set: running without database");
+        None
+    } else {
+        match sincy_database::connect(&cfg.database.url, cfg.database.max_connections).await {
+            Ok(db) => {
+                tracing::info!("database connected, migrations applied");
+                Some(db.pool().clone())
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "database connect/migrate failed");
+                std::process::exit(3);
+            }
+        }
+    };
+
+    let state = AppState {
+        pool,
+        env: cfg.env.clone(),
+    };
+
     let app = Router::new()
-        .nest("/api/v1", api::routes())
-        .fallback(api::not_found);
+        .nest("/api/v1", cloud_api::routes())
+        .with_state(state)
+        .fallback(cloud_api::api::not_found);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], cfg.http.port));
     tracing::info!(%addr, env = %cfg.env, "cloud-api listening");

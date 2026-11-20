@@ -4,7 +4,6 @@
 //! synchronous read used on every task dispatch path.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::sync::Mutex;
 use uuid::Uuid;
 
