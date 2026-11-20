@@ -16,3 +16,16 @@ redis_url = "redis://127.0.0.1:6379"
 [log]
 filter = "info,sincy=debug,cloud_api=debug"
 json = false
+
+# 本地开发专用: 允许 mock 渠道 adapter / mock LLM (生产环境 config 校验会拒绝)
+[security]
+jwt_secret = "dev-only-not-for-production"
+jwt_ttl_minutes = 60
+allow_mock_adapters = true
+# monthly_budget_usd = 10.0   # FR-026 月预算熔断
+
+[ai]
+llm_provider = "mock"            # 生产环境: "openai-compatible"
+# llm_base_url = "https://api.openai.com/v1"
+# llm_api_key 来自 SINCY_LLM_API_KEY 环境变量, 不写进文件
+# llm_model = "gpt-4o-mini"

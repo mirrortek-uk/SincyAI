@@ -17,6 +17,7 @@ async fn setup() -> Option<(
     cloud_api::state_for_test::AppState,
     Uuid,
     Uuid,
+    String,
 )> {
     let url = std::env::var(TEST_URL_ENV).ok()?;
     let pool = PgPoolOptions::new()
@@ -78,14 +79,40 @@ async fn setup() -> Option<(
     .await
     .expect("pool");
 
+    let member_id = Uuid::new_v4();
+    let hash = sincy_security::password::hash_password("test-password-123").expect("hash");
+    sqlx::query(
+        "INSERT INTO agency_members (id, agency_id, email, role, password_hash) VALUES ($1, $2, 'e2e@test.local', 'owner', $3)",
+    )
+    .bind(member_id)
+    .bind(agency_id)
+    .bind(&hash)
+    .execute(&pool)
+    .await
+    .expect("member");
+
     let state = cloud_api::state_for_test::test_state(Some(pool.clone()));
-    Some((pool, state, agency_id, brand_id))
+    let token = state
+        .jwt()
+        .issue(
+            &member_id.to_string(),
+            &agency_id.to_string(),
+            vec!["owner".into()],
+        )
+        .expect("token");
+    Some((pool, state, agency_id, brand_id, token))
 }
 
 async fn call(
     state: &cloud_api::state_for_test::AppState,
+    token: &str,
     req: Request<Body>,
 ) -> (StatusCode, Value) {
+    let mut req = req;
+    req.headers_mut().insert(
+        axum::http::header::AUTHORIZATION,
+        axum::http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+    );
     let app = cloud_api::routes_for_test().with_state(state.clone());
     let res = app.oneshot(req).await.expect("oneshot");
     let status = res.status();
@@ -98,7 +125,7 @@ async fn call(
 
 #[tokio::test]
 async fn publish_flow_e2e() {
-    let Some((pool, state, agency_id, brand_id)) = setup().await else {
+    let Some((pool, state, agency_id, brand_id, token)) = setup().await else {
         eprintln!("skip: {TEST_URL_ENV} not set");
         return;
     };
@@ -106,6 +133,7 @@ async fn publish_flow_e2e() {
     // capabilities visible
     let (st, v) = call(
         &state,
+        &token,
         Request::builder()
             .uri("/capabilities?platform=youtube")
             .body(Body::empty())
@@ -125,6 +153,7 @@ async fn publish_flow_e2e() {
     let idem = format!("idem-{}", Uuid::new_v4());
     let (st, v) = call(
         &state,
+        &token,
         Request::builder()
             .method("POST")
             .uri("/tasks/publish")
@@ -151,6 +180,7 @@ async fn publish_flow_e2e() {
     // route audit
     let (st, v) = call(
         &state,
+        &token,
         Request::builder()
             .uri(format!("/tasks/{task_id}/route"))
             .body(Body::empty())
@@ -163,6 +193,7 @@ async fn publish_flow_e2e() {
     // idempotent replay: same key must NOT re-execute
     let (st, v) = call(
         &state,
+        &token,
         Request::builder()
             .method("POST")
             .uri("/tasks/publish")
@@ -192,6 +223,7 @@ async fn publish_flow_e2e() {
     // quota exhaustion: pool has 2000, cost 1600 -> after one publish 400 left
     let (st, v) = call(
         &state,
+        &token,
         Request::builder()
             .method("POST")
             .uri("/tasks/publish")
@@ -213,7 +245,7 @@ async fn publish_flow_e2e() {
     assert_eq!(v["fallback"], "Degrade(Assisted)");
 
     // kill switch blocks new tasks (FR-025)
-    let (st, _v) = call(&state, Request::builder()
+    let (st, _v) = call(&state, &token, Request::builder()
         .method("POST").uri("/kill-switches")
         .header("content-type", "application/json")
         .body(Body::from(json!({
@@ -222,6 +254,7 @@ async fn publish_flow_e2e() {
     assert_eq!(st, StatusCode::OK);
     let (st, v) = call(
         &state,
+        &token,
         Request::builder()
             .method("POST")
             .uri("/tasks/publish")

@@ -1,6 +1,7 @@
 //! cloud-api library surface (so integration tests can drive the router).
 
 pub mod api;
+pub mod auth;
 pub mod gateway;
 pub mod metrics;
 pub mod state;
@@ -12,7 +13,10 @@ pub use state::AppState;
 pub mod state_for_test {
     pub use crate::state::AppState;
     pub fn test_state(pool: Option<sqlx::PgPool>) -> AppState {
-        AppState::new(pool, "test".into())
+        let mut st = AppState::new(pool, "test".into());
+        // tests run against mock adapters by explicit flag (never in prod)
+        st.allow_mock_adapters = true;
+        st
     }
 }
 

@@ -9,7 +9,9 @@ use std::path::Path;
 
 pub mod model;
 
-pub use model::{AppConfig, DatabaseConfig, HttpConfig, LogConfig, WorkerConfig};
+pub use model::{
+    AiConfig, AppConfig, DatabaseConfig, HttpConfig, LogConfig, SecurityConfig, WorkerConfig,
+};
 
 /// Load configuration for the given environment name (local|dev|staging|production).
 pub fn load(env: &str) -> Result<AppConfig, AppError> {

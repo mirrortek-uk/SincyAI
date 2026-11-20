@@ -10,4 +10,6 @@ pub mod gateway;
 
 pub use analytics::{Analytics, MetricImport};
 pub use budget::{BudgetChecker, BudgetError, CostRecord};
-pub use gateway::{GenerationRequest, GenerationResult, LlmGateway, MockLlmGateway};
+pub use gateway::{
+    GenerationRequest, GenerationResult, LlmGateway, MockLlmGateway, OpenAiCompatibleGateway,
+};

@@ -38,7 +38,7 @@ async fn main() {
         }
     };
 
-    let state = AppState::new(pool, cfg.env.clone());
+    let state = AppState::from_config(pool, &cfg);
 
     let app = Router::new()
         .nest("/api/v1", cloud_api::routes())

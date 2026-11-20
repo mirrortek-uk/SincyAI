@@ -3,9 +3,8 @@
 import { useEffect, useState } from "react";
 import { api, type KillSwitch } from "@/lib/api";
 
-// 急停开关 (FR-025)：作用域 global/agency/brand/client，1 分钟内生效。
+// 急停开关 (FR-025)：本租户 + 全局急停，1 分钟内生效，解除需审计动作。
 export default function KillSwitchesPage() {
-  const [agencyId, setAgencyId] = useState("");
   const [items, setItems] = useState<KillSwitch[]>([]);
   const [scope, setScope] = useState("agency");
   const [reason, setReason] = useState("");
@@ -13,7 +12,7 @@ export default function KillSwitchesPage() {
 
   async function load() {
     try {
-      const r = await api.listKillSwitches(agencyId || undefined);
+      const r = await api.listKillSwitches();
       setItems(r.items);
       setError(null);
     } catch (e) {
@@ -23,16 +22,11 @@ export default function KillSwitchesPage() {
 
   useEffect(() => {
     load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agencyId]);
+  }, []);
 
   async function create() {
     try {
-      await api.createKillSwitch({
-        agency_id: agencyId || undefined,
-        scope,
-        reason: reason || "manual",
-      });
+      await api.createKillSwitch({ scope, reason: reason || "manual" });
       setReason("");
       await load();
     } catch (e) {
@@ -53,20 +47,18 @@ export default function KillSwitchesPage() {
     <div>
       <h1>急停开关</h1>
       <div className="panel">
-        <label>Agency ID（可选，过滤）</label>
-        <input value={agencyId} onChange={(e) => setAgencyId(e.target.value)} placeholder="uuid" size={40} />
-        <div className="row" style={{ marginTop: 8 }}>
+        <div className="row">
           <select value={scope} onChange={(e) => setScope(e.target.value)}>
-            <option value="global">global</option>
-            <option value="agency">agency</option>
+            <option value="agency">agency（本机构）</option>
             <option value="brand">brand</option>
             <option value="client">client</option>
+            <option value="global">global（全局,慎用）</option>
           </select>
           <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="原因" size={30} />
           <button onClick={create}>启用急停</button>
         </div>
       </div>
-      {error && <p className="muted">错误: {error}</p>}
+      {error && <p style={{ color: "#e06c5a" }}>错误: {error}</p>}
       <div className="panel">
         <table cellPadding={8}>
           <thead>
@@ -84,7 +76,7 @@ export default function KillSwitchesPage() {
                 <td>{k.scope}</td>
                 <td>{k.active ? "ACTIVE" : "off"}</td>
                 <td>{k.reason}</td>
-                <td className="muted">{k.created_at}</td>
+                <td className="muted">{new Date(k.created_at).toLocaleString()}</td>
                 <td>
                   {k.active && (
                     <button className="danger" onClick={() => deactivate(k.id)}>
@@ -94,6 +86,13 @@ export default function KillSwitchesPage() {
                 </td>
               </tr>
             ))}
+            {items.length === 0 && (
+              <tr>
+                <td colSpan={5} className="muted">
+                  当前无生效急停
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>

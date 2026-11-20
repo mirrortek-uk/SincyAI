@@ -54,7 +54,23 @@ cargo run -p cloud-api          # http://127.0.0.1:8080/api/v1/healthz
 密钥只允许以 `vault://` / `kms://` 引用形式存在，禁止提交真实凭证（见 `.gitignore`）。
 
 环境变量：`SINCY_ENV`、`SINCY_HTTP_PORT`、`SINCY_DATABASE_URL`、`SINCY_NATS_URL`、
-`SINCY_REDIS_URL`、`SINCY_LOG_FILTER`、`SINCY_LOG_JSON`。
+`SINCY_REDIS_URL`、`SINCY_LOG_FILTER`、`SINCY_LOG_JSON`、`SINCY_JWT_SECRET`、`SINCY_JWT_TTL_MINUTES`、
+`SINCY_ALLOW_MOCK_ADAPTERS`（仅 local 可开，生产环境 config 校验拒绝）、`SINCY_MONTHLY_BUDGET_USD`、
+`SINCY_LLM_PROVIDER`（`mock` | `openai-compatible`）、`SINCY_LLM_BASE_URL`、`SINCY_LLM_API_KEY`、
+`SINCY_LLM_MODEL`、`SINCY_OBJECT_STORE_ROOT`、`SINCY_YOUTUBE_ACCESS_TOKEN`（本地 dev 兜底）。
+
+## 认证与控制台（正式产品路径）
+
+- 注册机构：`POST /api/v1/agencies {"name","owner_email","owner_password"}` → 机构 + owner 成员（Argon2id 哈希）+ JWT
+- 登录：`POST /api/v1/auth/login {"email","password"}` → 短期 JWT（默认 60 分钟）
+- 受保护路由一律校验 `Authorization: Bearer <jwt>`，**agency_id 只从令牌推导**，不信任客户端传参（防越权）
+- 控制台：`frontend/` 下 `npm run dev` → http://localhost:3000 （未登录自动跳 /login；
+  页面：总览 / 任务 / 设备 / AI 生成 / 急停开关 / 指标）
+- 生产环境发布走**真实 YouTube Data API v3 adapter**（resumable upload，配额 1600/call，
+  媒体从对象存储取）；mock adapter 仅在 `SINCY_ALLOW_MOCK_ADAPTERS=true`（local）可用，
+  `sincy-config` 在非 local 环境拒绝该配置。账号 OAuth token 只存 `vault://` 引用。
+- AI 生成：`POST /api/v1/ai/generate` 受月预算熔断（FR-026）保护，成本落账 `model_cost_records`
+- 指标导入：`POST /api/v1/analytics/metrics`（source 必须标注 api|device|manual）
 
 ## 工程规则（指导书 3.2）
 

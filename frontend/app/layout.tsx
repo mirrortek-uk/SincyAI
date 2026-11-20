@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import "./globals.css";
+import { Nav } from "@/components/Nav";
 
 export const metadata: Metadata = {
   title: "Sincy Console",
@@ -15,13 +16,7 @@ export default function RootLayout({
   return (
     <html lang="zh-CN">
       <body>
-        <nav className="topnav">
-          <span className="brand">Sincy Console</span>
-          <Link href="/">总览</Link>
-          <Link href="/tasks">发布任务</Link>
-          <Link href="/kill-switches">急停开关</Link>
-          <Link href="/metrics">指标</Link>
-        </nav>
+        <Nav />
         <main className="content">{children}</main>
       </body>
     </html>

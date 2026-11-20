@@ -43,6 +43,88 @@ pub enum GatewayError {
 /// Deterministic mock gateway. NEVER used in production paths (see DoD).
 pub struct MockLlmGateway;
 
+/// Real provider: any OpenAI-compatible /chat/completions endpoint
+/// (OpenAI, Azure OpenAI, vLLM, LiteLLM...). API key never logged.
+pub struct OpenAiCompatibleGateway {
+    pub base_url: String,
+    pub api_key: String,
+    pub default_model: String,
+    http: reqwest::Client,
+}
+
+impl OpenAiCompatibleGateway {
+    pub fn new(
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        default_model: impl Into<String>,
+    ) -> Self {
+        Self {
+            base_url: base_url.into().trim_end_matches('/').to_string(),
+            api_key: api_key.into(),
+            default_model: default_model.into(),
+            http: reqwest::Client::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmGateway for OpenAiCompatibleGateway {
+    fn provider(&self) -> &str {
+        "openai-compatible"
+    }
+
+    async fn generate(&self, req: &GenerationRequest) -> Result<GenerationResult, GatewayError> {
+        if self.api_key.is_empty() {
+            return Err(GatewayError::Provider(
+                "SINCY_LLM_API_KEY not set for openai-compatible provider".into(),
+            ));
+        }
+        let model = if req.model.is_empty() {
+            self.default_model.clone()
+        } else {
+            req.model.clone()
+        };
+        let body = json!({
+            "model": model,
+            "messages": [{"role": "user", "content": req.prompt}],
+            "max_tokens": req.max_tokens,
+        });
+        let resp = self
+            .http
+            .post(format!("{}/chat/completions", self.base_url))
+            .bearer_auth(&self.api_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| GatewayError::Provider(format!("network: {e}")))?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(GatewayError::Provider(format!(
+                "provider returned {status}: {}",
+                &text[..text.len().min(300)]
+            )));
+        }
+        let v: Value = resp
+            .json()
+            .await
+            .map_err(|e| GatewayError::Provider(format!("bad json: {e}")))?;
+        let text = v["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        let usage = &v["usage"];
+        Ok(GenerationResult {
+            text,
+            model: v["model"].as_str().unwrap_or(&model).to_string(),
+            tokens_in: usage["prompt_tokens"].as_u64().unwrap_or(0),
+            tokens_out: usage["completion_tokens"].as_u64().unwrap_or(0),
+            mock: false,
+            raw: v,
+        })
+    }
+}
+
 #[async_trait]
 impl LlmGateway for MockLlmGateway {
     fn provider(&self) -> &str {

@@ -16,7 +16,11 @@ sincy-platform = { path = "../../crates/sincy-platform" }
 sincy-content = { path = "../../crates/sincy-content" }
 sincy-execution = { path = "../../crates/sincy-execution" }
 sincy-device = { path = "../../crates/sincy-device" }
+sincy-transfer = { path = "../../crates/sincy-transfer" }
+sincy-ai = { path = "../../crates/sincy-ai" }
+rust_decimal = { version = "1", features = ["db-postgres", "serde"] }
 futures-util = "0.3"
+async-trait = "0.1"
 tokio = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }

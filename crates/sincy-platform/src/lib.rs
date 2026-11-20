@@ -16,4 +16,6 @@ pub mod youtube_mock;
 
 pub use matrix::PgCapabilityMatrix;
 pub use quota::{QuotaError, QuotaLedger, Reservation};
+pub mod youtube;
+pub use youtube::{MediaBlob, QUOTA_COST_VIDEOS_INSERT, YouTubeAdapter, resolve_vault_ref};
 pub use youtube_mock::MockYouTubeAdapter;
