@@ -269,6 +269,44 @@ export interface IntelJob {
   last_run_at: string | null;
   last_error: string | null;
   last_inserted: number | null;
+  last_fetched?: number | null;
+  last_new?: number | null;
+}
+
+export interface IntelSourceHealth {
+  source_id: string;
+  name: string;
+  category: string;
+  enabled: boolean;
+  health: "healthy" | "degraded" | "failed" | "not_configured" | "disabled";
+  jobs: number;
+  jobs_ran: number;
+  items_total: number;
+  last_new: number | null;
+  last_error: string | null;
+}
+
+export interface IntelHealth {
+  generated_at: string;
+  summary: Record<string, number>;
+  sources: IntelSourceHealth[];
+}
+
+export interface IntelTrend {
+  topic: string;
+  total_24h: number;
+  last_6h: number;
+  velocity_per_h: number;
+  growth_pct: number;
+  platforms: number;
+  sources: string[];
+  samples: string[];
+}
+
+export interface IntelTrends {
+  generated_at: string;
+  window_hours: number;
+  trends: IntelTrend[];
 }
 
 export interface IntelStats {
@@ -310,6 +348,7 @@ export interface ArchLayer {
   id: string;
   title: string;
   nodes: ArchNode[];
+  planned?: boolean;
 }
 
 export interface ArchEdge {
@@ -524,6 +563,8 @@ export const api = {
     req<{ items: OpportunityItem[] }>(`/intel/opportunities?limit=${limit}`),
   listIntelJobs: () => req<{ items: IntelJob[] }>("/intel/jobs"),
   intelStats: () => req<IntelStats>("/intel/stats"),
+  intelHealth: () => req<IntelHealth>("/intel/health"),
+  intelTrends: () => req<IntelTrends>("/intel/trends"),
   collectNow: () =>
     req<CollectResult>("/intel/collect", { method: "POST" }),
   refreshOpportunities: () =>

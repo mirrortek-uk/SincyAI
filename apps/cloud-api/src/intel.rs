@@ -35,6 +35,169 @@ pub fn routes() -> Router<AppState> {
         .route("/intel/jobs", get(list_jobs))
         .route("/intel/collect", post(collect_now))
         .route("/intel/stats", get(stats))
+        .route("/intel/health", get(health_audit))
+        .route("/intel/trends", get(trends))
+}
+
+/// GET /intel/health — Source Health Audit (WI §28): 每个注册信源的健康状态
+/// healthy / degraded / failed / not_configured / disabled,
+/// 由 job 运行记录 + 入库量计算, 不只看"是否注册"。
+async fn health_audit(
+    State(state): State<AppState>,
+) -> Result<Json<Value>, axum::response::Response> {
+    let pool = state.pool().map_err(app_error_response)?;
+    let sources =
+        sqlx::query("SELECT id, name, category, enabled FROM intelligence_sources ORDER BY id")
+            .fetch_all(pool)
+            .await
+            .map_err(err)?;
+    let jobs = sqlx::query(
+        "SELECT source_id, schedule, status, last_run_at, last_error, last_fetched, last_new, last_inserted
+         FROM intel_collection_jobs ORDER BY source_id, schedule",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(err)?;
+    let item_counts =
+        sqlx::query("SELECT source_id, COUNT(*)::int8 AS n FROM intel_items GROUP BY source_id")
+            .fetch_all(pool)
+            .await
+            .map_err(err)?;
+
+    let mut out: Vec<Value> = Vec::new();
+    let mut summary = std::collections::BTreeMap::from([
+        ("healthy", 0i64),
+        ("degraded", 0i64),
+        ("failed", 0i64),
+        ("not_configured", 0i64),
+        ("disabled", 0i64),
+    ]);
+    for s in &sources {
+        let sid: String = s.get("id");
+        let enabled: bool = s.get("enabled");
+        let sjobs: Vec<&sqlx::postgres::PgRow> = jobs
+            .iter()
+            .filter(|j| j.get::<String, _>("source_id") == sid)
+            .collect();
+        let items_n: i64 = item_counts
+            .iter()
+            .find(|r| r.get::<String, _>("source_id") == sid)
+            .map(|r| r.get::<i64, _>("n"))
+            .unwrap_or(0);
+
+        let status = if !enabled {
+            "disabled"
+        } else if sjobs.is_empty() {
+            "not_configured"
+        } else if sjobs
+            .iter()
+            .all(|j| j.get::<String, _>("status") == "paused")
+        {
+            // 已注册 + 有 job 但全部暂停 = 等待配置 (自托管实例/密钥/出口 IP)
+            "not_configured"
+        } else {
+            let ran: Vec<&&sqlx::postgres::PgRow> = sjobs
+                .iter()
+                .filter(|j| {
+                    j.get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_run_at")
+                        .is_some()
+                })
+                .collect();
+            if ran.is_empty() {
+                "not_configured"
+            } else {
+                let any_new: bool = ran
+                    .iter()
+                    .any(|j| j.get::<Option<i32>, _>("last_new").unwrap_or(0) > 0);
+                let any_failed = ran.iter().any(|j| {
+                    j.get::<String, _>("status") == "failed"
+                        || j.get::<Option<String>, _>("last_error").is_some()
+                });
+                let all_failed = ran.iter().all(|j| j.get::<String, _>("status") == "failed");
+                if all_failed {
+                    "failed"
+                } else if any_new {
+                    if any_failed { "degraded" } else { "healthy" }
+                } else {
+                    // 跑了但 0 新入库 (全去重) — 数据在流但近期无新内容
+                    "degraded"
+                }
+            }
+        };
+        *summary.entry(status).or_insert(0) += 1;
+        out.push(json!({
+            "source_id": sid,
+            "name": s.get::<String, _>("name"),
+            "category": s.get::<String, _>("category"),
+            "enabled": enabled,
+            "health": status,
+            "jobs": sjobs.len(),
+            "jobs_ran": sjobs.iter().filter(|j| j.get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_run_at").is_some()).count(),
+            "items_total": items_n,
+            "last_new": sjobs.iter().map(|j| j.get::<Option<i32>, _>("last_new").unwrap_or(0) as i64).max(),
+            "last_error": sjobs.iter().find_map(|j| j.get::<Option<String>, _>("last_error")),
+        }));
+    }
+    Ok(Json(json!({
+        "generated_at": chrono::Utc::now(),
+        "summary": summary,
+        "sources": out,
+    })))
+}
+
+/// GET /intel/trends — Trend Intelligence (WI §11 Trend + §19):
+/// 按 topic 聚合最近 24h 情报, 计算 6h 速度 / 相对前 18h 的增长率 / 跨平台分布。
+async fn trends(State(state): State<AppState>) -> Result<Json<Value>, axum::response::Response> {
+    let pool = state.pool().map_err(app_error_response)?;
+    let rows = sqlx::query(
+        r#"WITH t AS (
+             SELECT coalesce(payload->>'topic', payload->>'title') AS topic,
+                    source_id, collected_at, payload->>'url' AS url
+             FROM intel_items
+             WHERE collected_at > now() - interval '24 hours'
+               AND coalesce(payload->>'topic', payload->>'title') IS NOT NULL
+           )
+           SELECT topic,
+                  count(*)::int8 AS total,
+                  count(*) FILTER (WHERE collected_at > now() - interval '6 hours')::int8 AS h6,
+                  count(*) FILTER (WHERE collected_at <= now() - interval '6 hours')::int8 AS h18,
+                  count(DISTINCT source_id)::int8 AS platforms,
+                  array_agg(DISTINCT source_id) AS sources,
+                  (array_agg(topic || '|' || coalesce(url,'') ORDER BY collected_at DESC))[1:3] AS samples
+           FROM t
+           WHERE length(topic) > 2
+           GROUP BY topic
+           HAVING count(*) >= 3
+           ORDER BY h6 DESC, total DESC
+           LIMIT 30"#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(err)?;
+    let items: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            let h6 = r.get::<i64, _>("h6");
+            let h18 = r.get::<i64, _>("h18");
+            // growth: 最近6小时速率 vs 前18小时速率
+            let rate_recent = h6 as f64 / 6.0;
+            let rate_prev = (h18 as f64 / 18.0).max(0.05);
+            let growth_pct = ((rate_recent / rate_prev) - 1.0) * 100.0;
+            json!({
+                "topic": r.get::<String, _>("topic"),
+                "total_24h": r.get::<i64, _>("total"),
+                "last_6h": h6,
+                "velocity_per_h": (h6 as f64 / 6.0 * 10.0).round() / 10.0,
+                "growth_pct": (growth_pct * 10.0).round() / 10.0,
+                "platforms": r.get::<i64, _>("platforms"),
+                "sources": r.get::<Vec<String>, _>("sources"),
+                "samples": r.get::<Vec<String>, _>("samples"),
+            })
+        })
+        .collect();
+    Ok(Json(
+        json!({ "generated_at": chrono::Utc::now(), "window_hours": 24, "trends": items }),
+    ))
 }
 
 /// GET /intel/stats — 数据池规模与采集概况 (WI dashboard §28).
@@ -97,7 +260,7 @@ async fn stats(State(state): State<AppState>) -> Result<Json<Value>, axum::respo
 async fn list_jobs(State(state): State<AppState>) -> Result<Json<Value>, axum::response::Response> {
     let pool = state.pool().map_err(app_error_response)?;
     let rows = sqlx::query(
-        "SELECT source_id, schedule, status, last_run_at, last_error, last_inserted FROM intel_collection_jobs ORDER BY source_id, schedule",
+        "SELECT source_id, schedule, status, last_run_at, last_error, last_inserted, last_fetched, last_new FROM intel_collection_jobs ORDER BY source_id, schedule",
     )
     .fetch_all(pool)
     .await
@@ -112,6 +275,8 @@ async fn list_jobs(State(state): State<AppState>) -> Result<Json<Value>, axum::r
                 "last_run_at": r.get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_run_at"),
                 "last_error": r.get::<Option<String>, _>("last_error"),
                 "last_inserted": r.get::<Option<i32>, _>("last_inserted").map(|v| v as i64),
+                "last_fetched": r.get::<Option<i32>, _>("last_fetched").map(|v| v as i64),
+                "last_new": r.get::<Option<i32>, _>("last_new").map(|v| v as i64),
             })
         })
         .collect();

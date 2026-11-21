@@ -126,6 +126,25 @@ export default function ArchitecturePage() {
             </text>
           ))}
 
+          {/* planned 层虚线框 */}
+          {arch.layers.map((layer, li) => {
+            const h = Math.max(...arch.layers.map((l) => l.nodes.length)) * (NODE_H + NODE_GAP) + 10;
+            return layer.planned ? (
+              <rect
+                key={"pl-" + layer.id}
+                x={PAD + li * (LAYER_W + LAYER_GAP) - 8}
+                y={HEADER_H - 26}
+                width={LAYER_W + 16}
+                height={h}
+                rx={12}
+                fill="none"
+                stroke="var(--border)"
+                strokeDasharray="6 4"
+                opacity={0.7}
+              />
+            ) : null;
+          })}
+
           {/* 边 */}
           {arch.edges.map((e, i) => {
             const c = KIND_COLOR[e.kind] ?? "#888";

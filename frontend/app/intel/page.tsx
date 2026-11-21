@@ -5,11 +5,13 @@ import {
   api,
   getToken,
   type CollectResult,
+  type IntelHealth,
   type IntelItem,
   type IntelJob,
   type IntelProvider,
   type IntelStats,
   type IntelSource,
+  type IntelTrend,
   type OpportunityItem,
 } from "@/lib/api";
 
@@ -22,6 +24,8 @@ export default function IntelPage() {
   const [opps, setOpps] = useState<OpportunityItem[]>([]);
   const [jobs, setJobs] = useState<IntelJob[]>([]);
   const [stats, setStats] = useState<IntelStats | null>(null);
+  const [health, setHealth] = useState<IntelHealth | null>(null);
+  const [trends, setTrends] = useState<IntelTrend[]>([]);
   const [collectResult, setCollectResult] = useState<CollectResult | null>(null);
   const [collecting, setCollecting] = useState(false);
   const [capability, setCapability] = useState("social_search");
@@ -33,13 +37,15 @@ export default function IntelPage() {
   const load = useCallback(async () => {
     if (!getToken()) return;
     try {
-      const [s, p, i, o, j, st] = await Promise.all([
+      const [s, p, i, o, j, st, h, tr] = await Promise.all([
         api.listIntelSources(),
         api.listIntelProviders(),
         api.listIntelItems(undefined, 50),
         api.listOpportunities(30),
         api.listIntelJobs(),
         api.intelStats(),
+        api.intelHealth(),
+        api.intelTrends(),
       ]);
       setSources(s.items);
       setProviders(p.items);
@@ -47,6 +53,8 @@ export default function IntelPage() {
       setOpps(o.items);
       setJobs(j.items);
       setStats(st);
+      setHealth(h);
+      setTrends(tr.trends);
     } catch (e) {
       setError(String(e));
     }
@@ -130,6 +138,62 @@ export default function IntelPage() {
       </section>
 
       <section className="panel">
+        <h2>信源健康审计 (Source Health Audit)</h2>
+        {health && (
+          <>
+            <p>
+              {Object.entries(health.summary).map(([k, v]) => (
+                <span key={k} style={{ marginRight: 12 }}>
+                  <b style={{ color: k === "healthy" ? "#22c55e" : k === "failed" ? "#ef4444" : k === "degraded" ? "#f59e0b" : "var(--muted)" }}>
+                    {k}: {v}
+                  </b>
+                </span>
+              ))}
+            </p>
+            <table>
+              <thead><tr><th>信源</th><th>健康状态</th><th>jobs</th><th>已运行</th><th>累计入库</th><th>上轮新增</th><th>最近错误</th></tr></thead>
+              <tbody>
+                {health.sources.map((s) => (
+                  <tr key={s.source_id}>
+                    <td>{s.source_id}<span className="muted"> · {s.name}</span></td>
+                    <td style={{ color: s.health === "healthy" ? "#22c55e" : s.health === "failed" ? "#ef4444" : s.health === "degraded" ? "#f59e0b" : "var(--muted)" }}>{s.health}</td>
+                    <td>{s.jobs}</td>
+                    <td>{s.jobs_ran}</td>
+                    <td>{s.items_total}</td>
+                    <td>{s.last_new ?? "-"}</td>
+                    <td className="muted" style={{ color: "#ef4444" }}>{s.last_error ? s.last_error.slice(0, 60) : ""}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </>
+        )}
+      </section>
+
+      <section className="panel">
+        <h2>趋势情报 (Trend Intelligence · 最近 24h)</h2>
+        {trends.length === 0 && <p className="muted">暂无足够数据 (同一主题需 ≥3 条)。</p>}
+        <table>
+          <thead><tr><th>主题</th><th>24h 总量</th><th>近 6h</th><th>速度/h</th><th>增长率</th><th>跨平台</th><th>来源</th></tr></thead>
+          <tbody>
+            {trends.slice(0, 15).map((t) => (
+              <tr key={t.topic}>
+                <td title={t.samples.join("\n")}>{t.topic.slice(0, 60)}</td>
+                <td>{t.total_24h}</td>
+                <td>{t.last_6h}</td>
+                <td>{t.velocity_per_h}</td>
+                <td style={{ color: t.growth_pct > 50 ? "#22c55e" : t.growth_pct < 0 ? "#ef4444" : undefined }}>
+                  {t.growth_pct > 0 ? "+" : ""}{t.growth_pct}%
+                </td>
+                <td>{t.platforms}</td>
+                <td className="muted">{t.sources.slice(0, 4).join(", ")}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </section>
+
+      <section className="panel">
         <h2>机会 (opportunities)</h2>
         {opps.length === 0 && <p className="muted">暂无机会, 先点"刷新机会"。</p>}
         <table>
@@ -151,17 +215,21 @@ export default function IntelPage() {
         <h2>采集任务 (后台定时跑, 可手动触发)</h2>
         {jobs.length === 0 && <p className="muted">暂无任务记录。</p>}
         <table>
-          <thead><tr><th>信源</th><th>计划</th><th>状态</th><th>最近运行</th><th>最近错误</th></tr></thead>
+          <thead><tr><th>信源</th><th>健康</th><th>计划</th><th>状态</th><th>最近运行 (抓到/新增)</th><th>最近错误</th></tr></thead>
           <tbody>
-            {jobs.map((j, i) => (
+            {jobs.map((j, i) => {
+              const h = health?.sources.find((s) => s.source_id === j.source_id);
+              return (
               <tr key={i}>
                 <td>{j.source_id}</td>
+                <td className="muted" style={{ color: h && h.health !== "healthy" && h.health !== "disabled" ? "#f59e0b" : undefined }}>{h?.health ?? "-"}</td>
                 <td className="muted">{j.schedule}</td>
                 <td style={{ color: j.status === "failed" ? "#ef4444" : undefined }}>{j.status}</td>
-                <td className="muted">{j.last_run_at ? j.last_run_at.slice(0, 19).replace("T", " ") : "-"}{j.last_inserted != null ? ` (+${j.last_inserted})` : ""}</td>
+                <td className="muted">{j.last_run_at ? j.last_run_at.slice(0, 19).replace("T", " ") : "-"}{j.last_fetched != null ? ` (${j.last_fetched}/${j.last_new ?? 0})` : j.last_inserted != null ? ` (+${j.last_inserted})` : ""}</td>
                 <td className="muted" style={{ color: "#ef4444" }}>{j.last_error ? j.last_error.slice(0, 50) : ""}</td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </section>

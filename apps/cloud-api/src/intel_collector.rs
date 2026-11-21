@@ -25,12 +25,14 @@ pub struct FeedConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Parser {
-    Rss, // RSS 2.0 + Atom (arxiv uses Atom <entry>, handled by the same parser)
+    Rss, // RSS 2.0 + Atom (arxiv/Google News/Product Hunt use Atom <entry>)
     SearxngJson,
     GithubTrending,
     HnJson,     // HN Algolia: hits -> social_content/trend
     DevToJson,  // dev.to articles API
     WikiRcJson, // Wikipedia recentchanges
+    BiliRank,   // bilibili ranking v2 API: data.list -> trend
+    GdeltJson,  // GDELT DOC 2.0 artlist -> news/event
 }
 
 #[derive(Debug, Clone)]
@@ -101,15 +103,77 @@ impl CollectorConfig {
             feed("youtube-rss", "yt: 3Blue1Brown", "https://www.youtube.com/feeds/videos.xml?channel_id=UCYO_jab_esuFRV4b17AJtAw".into(), "social_content", Parser::Rss),
             feed("youtube-rss", "yt: Fireship",          "https://www.youtube.com/feeds/videos.xml?channel_id=UCsBjURrPoezykLs9EqgamOA".into(), "social_content", Parser::Rss),
             feed("youtube-rss", "yt: Yannic Kilcher",    "https://www.youtube.com/feeds/videos.xml?channel_id=UCZHmQk67mSJgfCCTn7xBfew".into(), "social_content", Parser::Rss),
+            // ===== P0 新闻/产品/热榜 (免费公开, 无需 key) =====
+            // Google News RSS 搜索 — 英文 3 条 + 中文 2 条
+            feed("google-news", "gnews: AI agent (en)",
+                 "https://news.google.com/rss/search?q=AI+agent&hl=en-US&gl=US&ceid=US:en".into(), "news", Parser::Rss),
+            feed("google-news", "gnews: large language model (en)",
+                 "https://news.google.com/rss/search?q=large+language+model&hl=en-US&gl=US&ceid=US:en".into(), "news", Parser::Rss),
+            feed("google-news", "gnews: AI startup funding (en)",
+                 "https://news.google.com/rss/search?q=AI+startup+funding&hl=en-US&gl=US&ceid=US:en".into(), "news", Parser::Rss),
+            feed("google-news", "gnews: AI 智能体 (zh)",
+                 "https://news.google.com/rss/search?q=AI%20%E6%99%BA%E8%83%BD%E4%BD%93&hl=zh-CN&gl=CN&ceid=CN:zh-Hans".into(), "news", Parser::Rss),
+            feed("google-news", "gnews: 大模型 (zh)",
+                 "https://news.google.com/rss/search?q=%E5%A4%A7%E6%A8%A1%E5%9E%8B&hl=zh-CN&gl=CN&ceid=CN:zh-Hans".into(), "news", Parser::Rss),
+            // Product Hunt Atom feed — 科技分类 + 最新
+            feed("producthunt", "ph: tech",
+                 "https://www.producthunt.com/feed?category=tech".into(), "trend", Parser::Rss),
+            feed("producthunt", "ph: latest",
+                 "https://www.producthunt.com/feed".into(), "trend", Parser::Rss),
+            // B站排行榜 API — 全站 + 科技区 (rid=36)
+            feed("bilibili", "bili: rank all",
+                 "https://api.bilibili.com/x/web-interface/ranking/v2?rid=0&type=all".into(), "trend", Parser::BiliRank),
+            feed("bilibili", "bili: rank tech",
+                 "https://api.bilibili.com/x/web-interface/ranking/v2?rid=36&type=all".into(), "trend", Parser::BiliRank),
         ];
-        if let Some(base) = rsshub_base {
+        // GDELT 免费但对共享 IP 限流 (1 req/5s) — 仅在显式开启时加入 (专用出口 IP)
+        if std::env::var("SINCY_INTEL_GDELT").as_deref() == Ok("1") {
             feeds.push(feed(
-                "rsshub",
-                "rsshub: 36kr 快讯",
-                format!("{base}/36kr/newsflash"),
+                "gdelt",
+                "gdelt: ai agent",
+                "https://api.gdeltproject.org/api/v2/doc/doc?query=%22ai%20agent%22&mode=artlist&maxrecords=100&format=json&sort=DateDesc".into(),
                 "news",
-                Parser::Rss,
+                Parser::GdeltJson,
             ));
+        }
+        if let Some(base) = rsshub_base {
+            // 自托管 RSSHub 扩展 (Phase 3 中文热榜 + Reddit) — 公共实例 rsshub.app
+            // 已限制访问, 只走自托管 base, 红线不变
+            // (source_id, label, route, kind) — label 与 0022 种子的 schedule 对齐
+            let rsshub_feeds: Vec<(&str, &str, &str, &str)> = vec![
+                ("rsshub", "rsshub: 36kr 快讯", "36kr/newsflash", "news"),
+                ("zhihu-hot", "zhihu hot", "zhihu/hot", "trend"),
+                ("douyin-hot", "douyin hot", "douyin/hot", "trend"),
+                ("weibo-hot", "weibo hot", "weibo/hot", "trend"),
+                ("baidu-hot", "baidu hot", "baidu/hot", "trend"),
+                (
+                    "reddit",
+                    "reddit: r/MachineLearning",
+                    "reddit/r/MachineLearning/hot",
+                    "social_content",
+                ),
+                (
+                    "reddit",
+                    "reddit: r/artificial",
+                    "reddit/r/artificial/hot",
+                    "social_content",
+                ),
+                (
+                    "reddit",
+                    "reddit: r/LocalLLaMA",
+                    "reddit/r/LocalLLaMA/hot",
+                    "social_content",
+                ),
+            ];
+            for (source, label, route, kind) in rsshub_feeds {
+                feeds.push(feed(
+                    source,
+                    label,
+                    format!("{base}/{route}"),
+                    kind,
+                    Parser::Rss,
+                ));
+            }
         }
         if let Some(base) = searx_base {
             feeds.push(feed(
@@ -252,6 +316,70 @@ pub fn parse_github_trending(body: &str) -> Vec<(String, Value)> {
     out
 }
 
+/// bilibili ranking v2 API -> trend payloads (topic, play volume, pts velocity).
+pub fn parse_bili_rank(body: &str) -> Vec<(String, Value)> {
+    let Ok(v) = serde_json::from_str::<Value>(body) else {
+        return vec![];
+    };
+    if v["code"].as_i64() != Some(0) {
+        return vec![];
+    }
+    let Some(list) = v["data"]["list"].as_array() else {
+        return vec![];
+    };
+    list.iter()
+        .filter_map(|it| {
+            let title = it["title"].as_str()?.to_string();
+            let bvid = it["bvid"].as_str().unwrap_or("");
+            if title.is_empty() || bvid.is_empty() {
+                return None;
+            }
+            let play = it["play"].as_i64().unwrap_or(0);
+            let pts = it["pts"].as_i64().unwrap_or(0);
+            Some((
+                title.clone(),
+                json!({
+                    "topic": title,
+                    "platforms": ["bilibili"],
+                    "volume": play,
+                    "velocity": pts,          // 综合得分 = 热度动量
+                    "sentiment": 0.5,
+                    "window_hours": 24,
+                    "url": format!("https://www.bilibili.com/video/{bvid}"),
+                    "author": it["owner"]["name"].as_str().unwrap_or(""),
+                    "danmaku": it["danmaku"].as_i64().unwrap_or(0),
+                }),
+            ))
+        })
+        .collect()
+}
+
+/// GDELT DOC 2.0 artlist -> news payloads (global event intelligence).
+pub fn parse_gdelt(body: &str) -> Vec<(String, Value)> {
+    let Ok(v) = serde_json::from_str::<Value>(body) else {
+        return vec![];
+    };
+    let Some(arts) = v["articles"].as_array() else {
+        return vec![];
+    };
+    arts.iter()
+        .filter_map(|a| {
+            let title = a["title"].as_str()?.to_string();
+            let url = a["url"].as_str().unwrap_or("").to_string();
+            Some((
+                title.clone(),
+                json!({
+                    "title": title, "url": url, "platform": "gdelt",
+                    "domain": a["domain"].as_str().unwrap_or(""),
+                    "source_country": a["sourcecountry"].as_str().unwrap_or(""),
+                    "language": a["language"].as_str().unwrap_or(""),
+                    "published_at": a["seendate"].as_str(),
+                }),
+            ))
+        })
+        .collect()
+}
+
 /// Normalize SearXNG JSON results into knowledge payloads.
 pub fn parse_searxng(body: &str, query: &str) -> Vec<(String, Value)> {
     let Ok(v) = serde_json::from_str::<Value>(body) else {
@@ -391,13 +519,14 @@ pub async fn collect_once(
                     "idle",
                     None,
                     Some((ins + dup) as i32),
+                    Some(ins as i32),
                 )
                 .await;
                 tracing::info!(source = %f.source_id, label = %f.label, inserted = ins, dups = dup, "intel feed collected");
             }
             Err(e) => {
                 failures.push(format!("{}: {e}", f.label));
-                mark_job(pool, &f.source_id, &f.label, "failed", Some(&e), None).await;
+                mark_job(pool, &f.source_id, &f.label, "failed", Some(&e), None, None).await;
                 tracing::warn!(source = %f.source_id, label = %f.label, error = %e, "intel feed failed (recorded, not retried aggressively)");
             }
         }
@@ -488,6 +617,30 @@ async fn collect_feed(
                 )
             })
             .collect(),
+        Parser::BiliRank => parse_bili_rank(&body)
+            .into_iter()
+            .take(f.max_items)
+            .map(|(topic, payload)| {
+                let url = payload["url"].as_str().unwrap_or("").to_string();
+                (
+                    dedup_key(&f.source_id, &f.kind, &url, &topic),
+                    topic,
+                    payload,
+                )
+            })
+            .collect(),
+        Parser::GdeltJson => parse_gdelt(&body)
+            .into_iter()
+            .take(f.max_items)
+            .map(|(title, payload)| {
+                let url = payload["url"].as_str().unwrap_or("").to_string();
+                (
+                    dedup_key(&f.source_id, &f.kind, &url, &title),
+                    title,
+                    payload,
+                )
+            })
+            .collect(),
         Parser::SearxngJson => {
             let q = f
                 .url
@@ -546,20 +699,25 @@ async fn mark_job(
     label: &str,
     status: &str,
     err: Option<&str>,
-    inserted: Option<i32>,
+    fetched: Option<i32>,
+    new: Option<i32>,
 ) {
     let _ = sqlx::query(
-        "INSERT INTO intel_collection_jobs (source_id, schedule, status, last_run_at, last_error, last_inserted)
-         VALUES ($1, $2, $3, now(), $4, $5)
+        "INSERT INTO intel_collection_jobs (source_id, schedule, status, last_run_at, last_error, last_inserted, last_fetched, last_new)
+         VALUES ($1, $2, $3, now(), $4, $5, $6, $7)
          ON CONFLICT (source_id, schedule) DO UPDATE SET
            status = EXCLUDED.status, last_run_at = now(), last_error = EXCLUDED.last_error,
-           last_inserted = COALESCE(EXCLUDED.last_inserted, intel_collection_jobs.last_inserted)",
+           last_inserted = COALESCE(EXCLUDED.last_inserted, intel_collection_jobs.last_inserted),
+           last_fetched = COALESCE(EXCLUDED.last_fetched, intel_collection_jobs.last_fetched),
+           last_new = COALESCE(EXCLUDED.last_new, intel_collection_jobs.last_new)",
     )
     .bind(source_id)
     .bind(format!("feed:{label}"))
     .bind(status)
     .bind(err)
-    .bind(inserted)
+    .bind(fetched)
+    .bind(fetched)
+    .bind(new)
     .execute(pool)
     .await;
 }
@@ -665,6 +823,31 @@ mod tests {
         let items = parse_wiki_rc(body);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].1["platform"], "wikipedia");
+    }
+
+    #[test]
+    fn bili_rank_parsed() {
+        let body = r#"{"code":0,"data":{"list":[
+            {"bvid":"BV1xx","title":"AI Agent 实战","play":123456,"pts":98765,"danmaku":321,"owner":{"name":"up主"}},
+            {"bvid":"","title":"bad row","play":1,"pts":1,"owner":{"name":""}}
+        ]}}"#;
+        let t = parse_bili_rank(body);
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].0, "AI Agent 实战");
+        assert_eq!(t[0].1["volume"], 123456);
+        assert_eq!(t[0].1["velocity"], 98765);
+        assert!(t[0].1["url"].as_str().unwrap().contains("BV1xx"));
+        // non-zero code => empty
+        assert!(parse_bili_rank(r#"{"code":-404,"message":"啥都木有"}"#).is_empty());
+    }
+
+    #[test]
+    fn gdelt_parsed() {
+        let body = r#"{"articles":[{"title":"AI summit announced","url":"https://news.example/a","seendate":"20261121T103000Z","domain":"news.example","sourcecountry":"United States","language":"English"}]}"#;
+        let items = parse_gdelt(body);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].1["platform"], "gdelt");
+        assert_eq!(items[0].1["source_country"], "United States");
     }
 
     #[test]
