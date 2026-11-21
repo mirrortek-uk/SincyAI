@@ -16,6 +16,6 @@ thiserror = { workspace = true }
 rust_decimal = { version = "1", features = ["db-postgres", "serde"] }
 async-trait = "0.1"
 reqwest = { workspace = true }
+tokio = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true }

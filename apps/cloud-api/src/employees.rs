@@ -954,34 +954,16 @@ struct PgLlmPort {
 #[async_trait]
 impl LlmPort for PgLlmPort {
     async fn generate(&self, prompt: &str, max_tokens: u32) -> Result<String, String> {
-        use sincy_ai::LlmGateway;
-        // same provider policy as /ai/generate: mock only when explicitly allowed
-        let provider = std::env::var("SINCY_LLM_PROVIDER").unwrap_or_else(|_| "mock".into());
+        // same provider policy as /ai/generate (mock only when explicitly allowed)
+        let gw = sincy_ai::gateway_from_env(self.allow_mock)?;
         let req = sincy_ai::GenerationRequest {
             prompt: prompt.to_string(),
             model: std::env::var("SINCY_LLM_MODEL").unwrap_or_else(|_| "mock-1".into()),
             max_tokens,
             content_item_id: None,
         };
-        if provider == "mock" {
-            if !self.allow_mock {
-                return Err("mock LLM disabled outside local".into());
-            }
-            let r = sincy_ai::MockLlmGateway
-                .generate(&req)
-                .await
-                .map_err(|e| e.to_string())?;
-            Ok(r.text)
-        } else {
-            let gw = sincy_ai::OpenAiCompatibleGateway::new(
-                std::env::var("SINCY_LLM_BASE_URL")
-                    .unwrap_or_else(|_| "https://api.openai.com/v1".into()),
-                std::env::var("SINCY_LLM_API_KEY").unwrap_or_default(),
-                std::env::var("SINCY_LLM_MODEL").unwrap_or_else(|_| "gpt-4o-mini".into()),
-            );
-            let r = gw.generate(&req).await.map_err(|e| e.to_string())?;
-            Ok(r.text)
-        }
+        let r = gw.generate(&req).await.map_err(|e| e.to_string())?;
+        Ok(r.text)
     }
 }
 

@@ -15,10 +15,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sincy_ai::{
-    Analytics, BudgetChecker, CostRecord, GenerationRequest, LlmGateway, MetricImport,
-    MockLlmGateway, OpenAiCompatibleGateway,
-};
+use sincy_ai::{Analytics, BudgetChecker, CostRecord, GenerationRequest, MetricImport};
 use sincy_common::{AgencyId, AppError, RequestId};
 use sincy_device::DeviceManager;
 use sincy_execution::killswitch::{KillScope, is_paused};
@@ -1225,7 +1222,6 @@ async fn ai_generate(
             e.to_string(),
         )));
     }
-    let provider = std::env::var("SINCY_LLM_PROVIDER").unwrap_or_else(|_| "mock".into());
     let req = GenerationRequest {
         prompt: body.prompt,
         model: body.model.unwrap_or_else(|| {
@@ -1234,24 +1230,12 @@ async fn ai_generate(
         max_tokens,
         content_item_id: body.content_item_id.map(|u| u.to_string()),
     };
-    let result = if provider == "mock" {
-        if !state.allow_mock_adapters {
-            return Err(app_error_response(AppError::non_retryable(
-                "mock_disabled",
-                "mock LLM provider is disabled; set SINCY_LLM_PROVIDER=openai-compatible",
-            )));
-        }
-        MockLlmGateway.generate(&req).await
-    } else {
-        let gw = OpenAiCompatibleGateway::new(
-            std::env::var("SINCY_LLM_BASE_URL")
-                .unwrap_or_else(|_| "https://api.openai.com/v1".into()),
-            std::env::var("SINCY_LLM_API_KEY").unwrap_or_default(),
-            std::env::var("SINCY_LLM_MODEL").unwrap_or_else(|_| "gpt-4o-mini".into()),
-        );
-        gw.generate(&req).await
-    }
-    .map_err(|e| app_error_response(AppError::retryable("llm_failed", e.to_string())))?;
+    let gw = sincy_ai::gateway_from_env(state.allow_mock_adapters)
+        .map_err(|e| app_error_response(AppError::non_retryable("llm_provider", e)))?;
+    let result = gw
+        .generate(&req)
+        .await
+        .map_err(|e| app_error_response(AppError::retryable("llm_failed", e.to_string())))?;
     // 成本落账 (FR-026)
     let _ = checker
         .record_cost(
@@ -1262,7 +1246,7 @@ async fn ai_generate(
                 provider: if result.mock {
                     "mock"
                 } else {
-                    "openai-compatible"
+                    result.provider.as_str()
                 },
                 model: &result.model,
                 kind: "llm",

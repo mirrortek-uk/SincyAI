@@ -23,6 +23,8 @@ pub struct GenerationResult {
     pub tokens_out: u64,
     /// true when produced by MockLlmGateway
     pub mock: bool,
+    /// which provider produced this ("mock" / "openai-compatible" / "manual-file")
+    pub provider: String,
     pub raw: Value,
 }
 
@@ -120,8 +122,110 @@ impl LlmGateway for OpenAiCompatibleGateway {
             tokens_in: usage["prompt_tokens"].as_u64().unwrap_or(0),
             tokens_out: usage["completion_tokens"].as_u64().unwrap_or(0),
             mock: false,
+            provider: "openai-compatible".into(),
             raw: v,
         })
+    }
+}
+
+/// Manual file-based gateway: 把 prompt 写成请求文件, 等人/agent 写回响应文件。
+/// 用于本地把"Vibe 会话"临时接入为 LLM (内容选择/判断/起草), 不需要任何 API key。
+///
+/// - 目录: `SINCY_LLM_MANUAL_DIR` (默认系统 temp 下的 sincy-llm)
+/// - 每次调用写入 `req-<id>.json` {id, prompt, max_tokens, model, created_at}
+/// - 读取 `res-<id>.txt` 的内容作为生成结果 (UTF-8, 会 trim)
+/// - 超时: `SINCY_LLM_MANUAL_TIMEOUT_SECS` (默认 900s), 超时返回 Provider 错误
+pub struct ManualFileGateway {
+    pub dir: std::path::PathBuf,
+    pub timeout_secs: u64,
+}
+
+impl ManualFileGateway {
+    pub fn from_env() -> Self {
+        let dir = std::env::var("SINCY_LLM_MANUAL_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("sincy-llm"));
+        let timeout_secs = std::env::var("SINCY_LLM_MANUAL_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(900);
+        Self { dir, timeout_secs }
+    }
+}
+
+#[async_trait]
+impl LlmGateway for ManualFileGateway {
+    fn provider(&self) -> &str {
+        "manual-file"
+    }
+
+    async fn generate(&self, req: &GenerationRequest) -> Result<GenerationResult, GatewayError> {
+        std::fs::create_dir_all(&self.dir).map_err(|e| {
+            GatewayError::Provider(format!("manual dir {}: {e}", self.dir.display()))
+        })?;
+        let id = uuid::Uuid::new_v4().to_string();
+        let req_path = self.dir.join(format!("req-{id}.json"));
+        let res_path = self.dir.join(format!("res-{id}.txt"));
+        let payload = json!({
+            "id": id,
+            "provider": "manual-file",
+            "model": req.model,
+            "max_tokens": req.max_tokens,
+            "content_item_id": req.content_item_id,
+            "created_at": chrono::Utc::now(),
+            "prompt": req.prompt,
+            "respond_to": res_path.file_name().unwrap().to_string_lossy(),
+        });
+        std::fs::write(&req_path, serde_json::to_string_pretty(&payload).unwrap())
+            .map_err(|e| GatewayError::Provider(format!("write {}: {e}", req_path.display())))?;
+
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(self.timeout_secs);
+        loop {
+            if let Ok(text) = std::fs::read_to_string(&res_path) {
+                let text = text.trim().to_string();
+                if !text.is_empty() {
+                    // 用完即清理, 保持目录干净
+                    let _ = std::fs::remove_file(&req_path);
+                    let _ = std::fs::remove_file(&res_path);
+                    return Ok(GenerationResult {
+                        tokens_in: req.prompt.len() as u64 / 4,
+                        tokens_out: text.len() as u64 / 4,
+                        text,
+                        model: format!("manual-file/{}", req.model),
+                        mock: false,
+                        provider: "manual-file".into(),
+                        raw: json!({"request_file": req_path.file_name().unwrap().to_string_lossy()}),
+                    });
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(GatewayError::Provider(format!(
+                    "manual-file timeout after {}s; request left at {}",
+                    self.timeout_secs,
+                    req_path.display()
+                )));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    }
+}
+
+/// 按环境变量装配 gateway: SINCY_LLM_PROVIDER = mock | openai-compatible | manual-file
+/// (mock 仅在 allow_mock=true 时可用, 防止生产误用)。
+pub fn gateway_from_env(allow_mock: bool) -> Result<Box<dyn LlmGateway>, String> {
+    let provider = std::env::var("SINCY_LLM_PROVIDER").unwrap_or_else(|_| "mock".into());
+    match provider.as_str() {
+        "mock" if allow_mock => Ok(Box::new(MockLlmGateway)),
+        "mock" => Err("mock LLM provider is disabled; set SINCY_LLM_PROVIDER".into()),
+        "openai-compatible" => Ok(Box::new(OpenAiCompatibleGateway::new(
+            std::env::var("SINCY_LLM_BASE_URL")
+                .unwrap_or_else(|_| "https://api.openai.com/v1".into()),
+            std::env::var("SINCY_LLM_API_KEY").unwrap_or_default(),
+            std::env::var("SINCY_LLM_MODEL").unwrap_or_else(|_| "gpt-4o-mini".into()),
+        ))),
+        "manual-file" => Ok(Box::new(ManualFileGateway::from_env())),
+        other => Err(format!("unknown SINCY_LLM_PROVIDER: {other}")),
     }
 }
 
@@ -139,6 +243,7 @@ impl LlmGateway for MockLlmGateway {
             text,
             model: req.model.clone(),
             mock: true,
+            provider: "mock".into(),
             raw: json!({"mock": true}),
         })
     }
@@ -296,5 +401,74 @@ mod tests {
         assert!(r3.text.contains("addyosmani/agent-skills"));
         assert!(r3.text.contains("本周聊聊"));
         assert!(weighted_len(&r3.text) <= 280);
+    }
+
+    #[tokio::test]
+    async fn manual_file_gateway_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("sincy-llm-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir2 = dir.clone();
+        // 模拟"人/agent 看到请求文件后写回响应"
+        let writer = tokio::spawn(async move {
+            loop {
+                if let Ok(rd) = std::fs::read_dir(&dir2) {
+                    for e in rd.flatten() {
+                        if e.file_name().to_string_lossy().starts_with("req-") {
+                            let j: Value =
+                                serde_json::from_str(&std::fs::read_to_string(e.path()).unwrap())
+                                    .unwrap();
+                            let id = j["id"].as_str().unwrap().to_string();
+                            std::fs::write(
+                                dir2.join(format!("res-{id}.txt")),
+                                "你好，这是手写回复",
+                            )
+                            .unwrap();
+                            return;
+                        }
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        });
+        let gw = ManualFileGateway {
+            dir: dir.clone(),
+            timeout_secs: 10,
+        };
+        let r = gw
+            .generate(&GenerationRequest {
+                prompt: "hi".into(),
+                model: "vibe".into(),
+                max_tokens: 100,
+                content_item_id: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(r.text, "你好，这是手写回复");
+        assert_eq!(r.provider, "manual-file");
+        assert!(!r.mock);
+        writer.await.unwrap();
+        // 请求/响应文件被消费清理
+        assert!(std::fs::read_dir(&dir).unwrap().count() == 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn manual_file_gateway_times_out() {
+        let dir = std::env::temp_dir().join(format!("sincy-llm-test-to-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let gw = ManualFileGateway {
+            dir: dir.clone(),
+            timeout_secs: 1,
+        };
+        let r = gw
+            .generate(&GenerationRequest {
+                prompt: "hi".into(),
+                model: "vibe".into(),
+                max_tokens: 10,
+                content_item_id: None,
+            })
+            .await;
+        assert!(r.is_err());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

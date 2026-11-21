@@ -106,7 +106,7 @@ async fn architecture(
                 node("collector", "情报采集器 intel_collector", "tokio 定时任务 · WI §9",
                      "21 条 feed: arXiv/HN Algolia/dev.to/Wikipedia/YouTube/GitHub 趋势/RSS, 每轮数千条, 归一化 WI §11 入 intel_items(dedup_key 去重); 失败记 jobs 不强攻; 红线: 只走公开只读 API, 礼貌间隔, 不绕认证/验证码/限流"),
                 node("ai", "AI sincy-ai", "LLM gateway · budget · analytics",
-                     "mock 仅本地(SINCY_ALLOW_MOCK_ADAPTERS)/openai-compatible; 月度预算检查+熔断(FR-026); 成本落账; 指标回流内容版本(FR-016)"),
+                     "SINCY_LLM_PROVIDER: mock(仅本地) / openai-compatible(任意兼容端点, 含 Mistral api.mistral.ai/v1) / manual-file(本地把 Vibe 会话接入为 LLM: prompt 写文件等回写); 月度预算检查+熔断(FR-026); 成本落账; 指标回流内容版本(FR-016)"),
             ]
         },
         {

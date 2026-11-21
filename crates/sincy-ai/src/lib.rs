@@ -11,5 +11,6 @@ pub mod gateway;
 pub use analytics::{Analytics, MetricImport};
 pub use budget::{BudgetChecker, BudgetError, CostRecord};
 pub use gateway::{
-    GenerationRequest, GenerationResult, LlmGateway, MockLlmGateway, OpenAiCompatibleGateway,
+    GenerationRequest, GenerationResult, LlmGateway, ManualFileGateway, MockLlmGateway,
+    OpenAiCompatibleGateway, gateway_from_env,
 };
