@@ -17,8 +17,20 @@ package com.sincy.agent.adapter
  */
 object AdapterRuntime {
 
+    /** true when the Rust core (libsincy_agent_core.so) is packaged and loaded. */
+    val nativeLoaded: Boolean
+
     init {
-        System.loadLibrary("sincy_agent_core")
+        var loaded = false
+        try {
+            System.loadLibrary("sincy_agent_core")
+            loaded = true
+        } catch (e: UnsatisfiedLinkError) {
+            // skeleton build without the cdylib: Kotlin shell (pairing/WSS/
+            // accessibility) still works, adapter execution reports unavailable
+            android.util.Log.w("AdapterRuntime", "native core not packaged: ${e.message}")
+        }
+        nativeLoaded = loaded
     }
 
     /**

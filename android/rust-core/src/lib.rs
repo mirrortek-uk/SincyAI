@@ -125,10 +125,11 @@ mod tests {
 #[cfg(target_os = "android")]
 mod jni {
     use super::*;
-    use jni::objects::{JClass, JString};
-    use jni::sys::jstring;
-    use jni::JNIEnv;
-    use sincy_adapter::interpreter::{FlowStep, ScreenSnapshot};
+    use ::jni::objects::{JClass, JString};
+    use ::jni::sys::jstring;
+    use ::jni::JNIEnv;
+    use sincy_adapter::interpreter::ScreenSnapshot;
+    use sincy_adapter::schema::FlowStep;
     use std::sync::Mutex;
 
     /// Bridge implemented on the Kotlin side (perception/NodeTreeBridge):
