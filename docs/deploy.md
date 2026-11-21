@@ -89,7 +89,8 @@ cargo run -p cloud-api
 
 - **APK 签名**: `android/key.properties` → `android/keys/sincy-release.jks`（均已 gitignore，密码在 `/d/tmp/apk-keystore-pass.txt`)。上架/分发请换成你们自己的 keystore，并在 `android/app/build.gradle.kts` 保持同一套 signingConfig
 - **Adapter 签名密钥**: release 版 Rust core 编译期内嵌 `keys/adapter_signing_key.bin`（已 gitignore，32 字节随机)。已用它重签 `x.publish_post` 并写入 sincy_prod 的 `app_adapter_versions`（本地只保留生产库 sincy_prod，demo 库已删除）。新增 adapter 一律用 `cargo run -p sincy-agent --example sign_adapter -- adapters/xxx.yaml @keys/adapter_signing_key.bin` 签名（example 支持 `@文件` 读二进制 key)
-- **网络安全**: release 默认禁明文，只放行 `127.0.0.1` / `10.0.2.2` / `localhost`（`res/xml/network_security_config.xml`)。本地配对用 `adb reverse tcp:18081 tcp:18081`（手机 127.0.0.1:18081 → 电脑 18081，reverse 监听在手机上，不占电脑端口）+ app 里填 `http://127.0.0.1:18081`。勿用 forward 同端口，forward 是 电脑→手机 方向且会占住电脑本机端口；生产云端必须 HTTPS/WSS
+- **配对方式（一次性配对码，手机上不需要账号密码）**: 控制台「设备」页点「生成配对码」→ 得到 8 位码（有效期默认 10 分钟，一次性）→ 手机 app 打开后只填「服务地址 + 配对码」点 Pair → 走公开端点 `POST /api/v1/devices/pair` 拿到设备 token。码错误/过期/已用过都会 400 `pairing_failed`。生成码走 `POST /api/v1/devices/pairing-codes`（需要登录 JWT)。APK 顶部会显示版本号（`versionName = 0.1.0-<yyyyMMdd-HHmmss>`，每次构建自动打时间戳)，包里不再内嵌任何账号密码
+- **网络安全**: release 默认禁明文，只放行 `127.0.0.1` / `10.0.2.2` / `localhost`（`res/xml/network_security_config.xml`)。本地配对用 `adb reverse tcp:18081 tcp:18081`（手机 127.0.0.1:18081 → 电脑 18081，reverse 监听在手机上，不占电脑端口）+ app 里服务地址默认 `http://127.0.0.1:18081`（构建期 `-PsincyAgentDefaultServer` 注入)。勿用 forward 同端口，forward 是 电脑→手机 方向且会占住电脑本机端口；生产云端必须 HTTPS/WSS
 - **混淆**: `proguard-rules.pro` 保住 `com.sincy.agent.**` 与 native 方法（JNI 按名字查找）
 
 注意：release APK 内嵌的是生产 adapter 密钥，对 demo/prod 库验签通过；老 debug APK 用 dev key，对这两个库会验签失败（属预期，debug 包只配 sincy_test 验证用）。

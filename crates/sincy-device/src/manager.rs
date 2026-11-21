@@ -23,6 +23,8 @@ pub enum DeviceError {
     InvalidToken(String),
     #[error("database error: {0}")]
     Db(#[from] sqlx::Error),
+    #[error("pairing code invalid / expired / already used")]
+    BadPairingCode,
 }
 
 fn hash_secret(secret: &[u8]) -> String {
@@ -52,6 +54,16 @@ pub struct DeviceRecord {
 pub struct SessionToken {
     pub token: String,
     pub device_id: Uuid,
+}
+
+/// 一次性配对码: 8 位, 去掉易混淆字符 (0/O/1/I/l), 大写字母+数字。
+const CODE_ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+
+fn gen_code() -> String {
+    let b: [u8; 8] = rand::random();
+    b.iter()
+        .map(|x| CODE_ALPHABET[(*x as usize) % CODE_ALPHABET.len()] as char)
+        .collect()
 }
 
 pub struct DeviceManager<'a> {
@@ -168,6 +180,104 @@ impl<'a> DeviceManager<'a> {
                 vec!["device".into()],
             )
             .map_err(|e| DeviceError::InvalidToken(e.to_string()))?;
+        Ok(SessionToken { token, device_id })
+    }
+
+    /// 控制台(已登录)生成一次性配对码: 10 分钟有效, 一次性。
+    pub async fn create_pairing_code(
+        &self,
+        agency_id: AgencyId,
+        created_by: Uuid,
+        ttl: Duration,
+    ) -> Result<String, DeviceError> {
+        for _ in 0..5 {
+            let code = gen_code();
+            let r = sqlx::query(
+                "INSERT INTO device_pairing_codes (code, agency_id, created_by, expires_at)
+                 VALUES ($1, $2, $3, now() + $4::interval)",
+            )
+            .bind(&code)
+            .bind(agency_id.as_uuid())
+            .bind(created_by)
+            .bind(format!("{} seconds", ttl.num_seconds()))
+            .execute(self.pool)
+            .await;
+            if r.is_ok() {
+                return Ok(code);
+            }
+        }
+        Err(DeviceError::Db(sqlx::Error::RowNotFound))
+    }
+
+    /// 手机凭配对码直接完成配对 (公开端点, 不需要账号密码):
+    /// 校验码 -> 创建 active 设备 + 签发 device token, 码标记已使用。
+    pub async fn pair_with_code(
+        &self,
+        code: &str,
+        platform: &str,
+        name: Option<&str>,
+    ) -> Result<SessionToken, DeviceError> {
+        let code = code.trim().to_uppercase();
+        if code.len() != 8 {
+            return Err(DeviceError::BadPairingCode);
+        }
+        let row = sqlx::query(
+            "SELECT agency_id, created_by, expires_at, used_at FROM device_pairing_codes WHERE code = $1",
+        )
+        .bind(&code)
+        .fetch_optional(self.pool)
+        .await?
+        .ok_or(DeviceError::BadPairingCode)?;
+        if row
+            .get::<Option<chrono::DateTime<Utc>>, _>("used_at")
+            .is_some()
+            || row.get::<chrono::DateTime<Utc>, _>("expires_at") < Utc::now()
+        {
+            return Err(DeviceError::BadPairingCode);
+        }
+        let agency_id = AgencyId::from_uuid(row.get("agency_id"));
+        // 创建设备 (active) + 会话 token
+        let device_id = Uuid::new_v4();
+        let secret_bytes: [u8; 32] = rand::random();
+        let device_secret =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, secret_bytes);
+        sqlx::query(
+            "INSERT INTO devices (id, agency_id, platform, name, secret_hash, state)
+             VALUES ($1, $2, $3, $4, $5, 'active')",
+        )
+        .bind(device_id)
+        .bind(agency_id.as_uuid())
+        .bind(platform)
+        .bind(name)
+        .bind(hash_secret(device_secret.as_bytes()))
+        .execute(self.pool)
+        .await?;
+        let token = self
+            .jwt
+            .issue(
+                &device_id.to_string(),
+                &agency_id.to_string(),
+                vec!["device".into()],
+            )
+            .map_err(|e| DeviceError::InvalidToken(e.to_string()))?;
+        let token_hash = hash_secret(token.as_bytes());
+        sqlx::query(
+            "INSERT INTO device_sessions (id, agency_id, device_id, token_hash, state)
+             VALUES ($1, $2, $3, $4, 'active')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(agency_id.as_uuid())
+        .bind(device_id)
+        .bind(token_hash)
+        .execute(self.pool)
+        .await?;
+        sqlx::query(
+            "UPDATE device_pairing_codes SET used_at = now(), device_id = $2 WHERE code = $1",
+        )
+        .bind(&code)
+        .bind(device_id)
+        .execute(self.pool)
+        .await?;
         Ok(SessionToken { token, device_id })
     }
 

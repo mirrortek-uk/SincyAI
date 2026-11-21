@@ -50,6 +50,8 @@ pub fn routes() -> Router<AppState> {
         .route("/tasks/{id}/route", get(get_task_route))
         .route("/devices", get(list_devices))
         .route("/devices/register/start", post(start_device_registration))
+        .route("/devices/pairing-codes", post(create_pairing_code))
+        .route("/devices/pair", post(pair_with_code))
         .route(
             "/devices/register/complete",
             post(complete_device_registration),
@@ -1092,6 +1094,64 @@ struct RegisterCompleteBody {
     device_id: Uuid,
     nonce: String,
     proof: String,
+}
+
+/// POST /devices/pairing-codes (JWT) — 控制台生成一次性配对码, 给手机 app 输入。
+#[derive(Debug, Deserialize)]
+struct PairingCodeBody {
+    ttl_minutes: Option<i64>,
+}
+
+async fn create_pairing_code(
+    State(state): State<AppState>,
+    axum::extract::Extension(auth): axum::extract::Extension<crate::auth::AuthCtx>,
+    Json(body): Json<PairingCodeBody>,
+) -> Result<Json<Value>, Response> {
+    let pool = state.pool().map_err(app_error_response)?;
+    let mgr = DeviceManager::new(pool, state.jwt_secret());
+    let ttl = chrono::Duration::minutes(body.ttl_minutes.unwrap_or(10).clamp(1, 60));
+    let code = mgr
+        .create_pairing_code(auth.agency_id, auth.member_id, ttl)
+        .await
+        .map_err(|e| {
+            app_error_response(AppError::non_retryable(
+                "pairing_code_failed",
+                e.to_string(),
+            ))
+        })?;
+    Ok(Json(json!({
+        "code": code,
+        "expires_at": chrono::Utc::now() + ttl,
+    })))
+}
+
+/// POST /devices/pair (公开) — 手机只凭配对码完成配对, 不需要账号密码。
+#[derive(Debug, Deserialize)]
+struct PairBody {
+    code: String,
+    platform: Option<String>,
+    name: Option<String>,
+}
+
+async fn pair_with_code(
+    State(state): State<AppState>,
+    Json(body): Json<PairBody>,
+) -> Result<Json<Value>, Response> {
+    let pool = state.pool().map_err(app_error_response)?;
+    let mgr = DeviceManager::new(pool, state.jwt_secret());
+    let sess = mgr
+        .pair_with_code(
+            &body.code,
+            body.platform.as_deref().unwrap_or("android"),
+            body.name.as_deref(),
+        )
+        .await
+        .map_err(|e| {
+            app_error_response(AppError::non_retryable("pairing_failed", e.to_string()))
+        })?;
+    Ok(Json(
+        json!({ "device_id": sess.device_id, "token": sess.token }),
+    ))
 }
 
 async fn complete_device_registration(

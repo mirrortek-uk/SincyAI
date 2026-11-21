@@ -53,6 +53,8 @@ fn is_public(path: &str, method: &axum::http::Method) -> bool {
         || path.ends_with("/metrics")  // Prometheus scrape, network-isolated
         || (method == axum::http::Method::POST && path.ends_with("/agencies"))
         || (method == axum::http::Method::POST && path.ends_with("/devices/register/complete"))
+        // 配对码端点公开: 码本身就是占有凭证 (一次性、10 分钟有效)
+        || (method == axum::http::Method::POST && path.ends_with("/devices/pair"))
 }
 
 /// Verify `Authorization: Bearer <jwt>` and inject AuthCtx into extensions.

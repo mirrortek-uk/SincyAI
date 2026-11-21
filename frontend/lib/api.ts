@@ -444,6 +444,11 @@ export const api = {
   me: () => req<Me>("/agencies/me"),
   listTasks: () => req<{ items: TaskItem[] }>("/tasks"),
   listDevices: () => req<{ items: DeviceItem[] }>("/devices"),
+  createPairingCode: (ttlMinutes?: number) =>
+    req<{ code: string; expires_at: string }>("/devices/pairing-codes", {
+      method: "POST",
+      body: JSON.stringify(ttlMinutes != null ? { ttl_minutes: ttlMinutes } : {}),
+    }),
   publishTask: (body: {
     brand_id: string;
     platform: string;

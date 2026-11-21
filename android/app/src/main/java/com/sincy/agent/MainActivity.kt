@@ -43,29 +43,31 @@ class MainActivity : AppCompatActivity() {
             orientation = android.widget.LinearLayout.VERTICAL
             setPadding(48, 48, 48, 48)
         }
+        val version = android.widget.TextView(this).apply {
+            text = "Sincy Agent v${BuildConfig.VERSION_NAME}"
+            textSize = 12f
+        }
         val server = EditText(this).apply {
             hint = "Cloud URL"
             setText(BuildConfig.DEFAULT_SERVER)
         }
-        val email = EditText(this).apply { hint = "Account email"; setText(BuildConfig.DEFAULT_EMAIL) }
-        val password = EditText(this).apply {
-            hint = "Account password"
-            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
-            setText(BuildConfig.DEFAULT_PASSWORD)
+        val code = EditText(this).apply {
+            hint = "配对码 (控制台生成的 8 位码)"
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
         }
         val pair = Button(this).apply { text = "Pair this device" }
         val openA11y = Button(this).apply { text = "Enable accessibility service" }
         val start = Button(this).apply { text = "Start agent" }
-        root.addView(server); root.addView(email); root.addView(password)
+        root.addView(version); root.addView(server); root.addView(code)
         root.addView(pair); root.addView(openA11y); root.addView(start)
         setContentView(root)
 
         pair.setOnClickListener {
             lifecycleScope.launch {
                 try {
-                    val token = pairDevice(server.text.toString().ifBlank { "http://10.0.2.2:18080" }, email.text.toString(), password.text.toString())
+                    val token = pairWithCode(server.text.toString(), code.text.toString())
                     prefs().edit { putString("device_token", token) }
-                    Toast.makeText(this@MainActivity, "Device paired", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this@MainActivity, "Device paired ✔ v${BuildConfig.VERSION_NAME}", Toast.LENGTH_LONG).show()
                 } catch (e: Exception) {
                     Toast.makeText(this@MainActivity, "Pairing failed: ${e.message}", Toast.LENGTH_LONG).show()
                 }
@@ -90,48 +92,36 @@ class MainActivity : AppCompatActivity() {
         EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
     )
 
-    private suspend fun pairDevice(baseUrl: String, email: String, password: String): String = withContext(Dispatchers.IO) {
+    /** 只凭配对码配对: POST /devices/pair (公开端点), 不需要账号密码。 */
+    private suspend fun pairWithCode(baseUrl: String, code: String): String = withContext(Dispatchers.IO) {
         val base = baseUrl.trim().ifBlank { "http://127.0.0.1:18081" }
-        fun httpCall(url: String, body: String, token: String? = null): okhttp3.Response {
-            val rb = Request.Builder().url(url).post(body.toRequestBody("application/json".toMediaType()))
-            if (token != null) rb.addHeader("Authorization", "Bearer $token")
+        fun httpCall(url: String, body: String): okhttp3.Response {
             return try {
-                http.newCall(rb.build()).execute()
+                http.newCall(Request.Builder().url(url).post(body.toRequestBody("application/json".toMediaType())).build()).execute()
             } catch (e: java.net.UnknownHostException) {
-                throw IllegalStateException("DNS 解析失败: $url — 检查填写的地址是否正确")
+                throw IllegalStateException("DNS 解析失败: $url — 检查填写的地址")
             } catch (e: java.net.ConnectException) {
-                throw IllegalStateException("连接被拒绝: $url — 电脑上服务没在跑? 本地生产库先跑 bash /d/tmp/start-cloud-api-prod.sh; 手机到电脑要先 adb reverse tcp:18081 tcp:18081")
+                throw IllegalStateException("连接被拒绝: $url — 电脑上服务没在跑? 先跑 bash /d/tmp/start-cloud-api-prod.sh; 手机到电脑先 adb reverse tcp:18081 tcp:18081")
             } catch (e: java.net.SocketTimeoutException) {
-                throw IllegalStateException("连接超时: $url — 检查手机和电脑的网络/USB 连接")
+                throw IllegalStateException("连接超时: $url — 检查 USB/网络")
             } catch (e: javax.net.ssl.SSLException) {
-                throw IllegalStateException("TLS/明文被拦截: $url — release 包禁明文, 本地请用 adb reverse + http://127.0.0.1:18081, 云端请用 https")
+                throw IllegalStateException("TLS/明文被拦截: $url — release 包禁明文, 本地请 adb reverse + http://127.0.0.1:18081, 云端用 https")
             } catch (e: java.io.IOException) {
                 throw IllegalStateException("网络错误: ${e.message} — url=$url")
             }
         }
-        // step 1: 登录拿 owner JWT
-        val loginResp = httpCall("$base/api/v1/auth/login", JSONObject().put("email", email).put("password", password).toString())
-        if (!loginResp.isSuccessful) {
-            val b = loginResp.body?.string() ?: ""
-            throw IllegalStateException("登录失败 HTTP ${loginResp.code}: ${b.take(120)} — 检查用户名/密码(本地生产库: admin@sincy.dev)")
+        if (code.isBlank()) throw IllegalStateException("请输入控制台生成的 8 位配对码")
+        val body = JSONObject()
+            .put("code", code.trim().uppercase())
+            .put("platform", "android")
+            .put("name", android.os.Build.MODEL)
+            .toString()
+        val resp = httpCall("$base/api/v1/devices/pair", body)
+        if (!resp.isSuccessful) {
+            val b = resp.body?.string() ?: ""
+            throw IllegalStateException("配对失败 HTTP ${resp.code} @ $base: ${b.take(120)} — 码错误/过期/已用过, 请重新生成")
         }
-        val userToken = JSONObject(loginResp.body!!.string()).getString("token")
-        // step 2: register/start (受保护路由)
-        val startResp = httpCall("$base/api/v1/devices/register/start",
-            JSONObject().put("platform", "android").put("name", android.os.Build.MODEL).toString(), userToken)
-        if (!startResp.isSuccessful) throw IllegalStateException("register/start 失败 HTTP ${startResp.code}: ${startResp.body?.string()?.take(120)}")
-        val ch = JSONObject(startResp.body!!.string())
-        val secret = ch.getString("device_secret")
-        val nonce = ch.getString("nonce")
-        val deviceId = ch.getString("device_id")
-        // proof = sha256(sha256(secret) + nonce) — 与服务端校验一致
-        val secretHash = sha256(secret.toByteArray())
-        val proof = sha256((secretHash + nonce).toByteArray())
-        // step 3: register/complete (公开路由)
-        val completeResp = httpCall("$base/api/v1/devices/register/complete",
-            JSONObject().put("device_id", deviceId).put("nonce", nonce).put("proof", proof).toString())
-        if (!completeResp.isSuccessful) throw IllegalStateException("register/complete 失败 HTTP ${completeResp.code}: ${completeResp.body?.string()?.take(120)} — 可能已配对过或 nonce 过期, 重试即可")
-        JSONObject(completeResp.body!!.string()).getString("token")
+        JSONObject(resp.body!!.string()).getString("token")
     }
 
     private fun sha256(bytes: ByteArray): String =

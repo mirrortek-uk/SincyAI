@@ -4,7 +4,9 @@
 fn main() {
     use std::io::Read;
     let mut pw = String::new();
-    std::io::stdin().read_to_string(&mut pw).expect("read stdin");
+    std::io::stdin()
+        .read_to_string(&mut pw)
+        .expect("read stdin");
     let pw = pw.trim_end_matches(['\r', '\n']);
     let hash = sincy_security::password::hash_password(pw).expect("hash");
     println!("{hash}");
