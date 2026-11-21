@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     kotlin("android")
@@ -21,10 +23,26 @@ android {
         }
     }
 
+    // 正式签名: android/key.properties (gitignored) -> keys/sincy-release.jks
+    // 本地没有 key.properties 时回退 debug 签名, 便于纯本地验证
+    signingConfigs {
+        create("release") {
+            val kp = File(rootDir, "key.properties")
+            if (kp.exists()) {
+                val props = Properties().apply { kp.inputStream().use { load(it) } }
+                storeFile = File(rootDir, props.getProperty("storeFile"))
+                storePassword = props.getProperty("storePassword")
+                keyAlias = props.getProperty("keyAlias")
+                keyPassword = props.getProperty("keyPassword")
+            }
+        }
+    }
     buildTypes {
         release {
             isMinifyEnabled = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            val kp = File(rootDir, "key.properties")
+            signingConfig = if (kp.exists()) signingConfigs.getByName("release") else signingConfigs.getByName("debug")
         }
     }
     compileOptions {

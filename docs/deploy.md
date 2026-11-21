@@ -82,3 +82,14 @@ cargo run -p cloud-api
 ## 前端上 Vercel
 
 `frontend/` 已带 `vercel.json`；Vercel 项目里设置 `SINCY_API_INTERNAL=https://<cloud-api 地址>`，`next.config.mjs` 的 rewrites 会把 `/api/v1/*` 代理过去（同域部署，浏览器零 CORS 问题）。注意 agent 的 WSS 长连接不能走 Vercel serverless，cloud-api 请部署在支持长连接的平台（见上文）。
+
+## Android Agent 生产包 (release APK)
+
+`D:\Sincy-Agent-release.apk`（构建: `cargo ndk --release` + `gradle :app:assembleRelease`）是正式包：
+
+- **APK 签名**: `android/key.properties` → `android/keys/sincy-release.jks`（均已 gitignore，密码在 `/d/tmp/apk-keystore-pass.txt`)。上架/分发请换成你们自己的 keystore，并在 `android/app/build.gradle.kts` 保持同一套 signingConfig
+- **Adapter 签名密钥**: release 版 Rust core 编译期内嵌 `keys/adapter_signing_key.bin`（已 gitignore，32 字节随机)。已用它重签 `x.publish_post` 并写入 sincy_demo / sincy_prod 的 `app_adapter_versions`。新增 adapter 一律用 `cargo run -p sincy-agent --example sign_adapter -- adapters/xxx.yaml @keys/adapter_signing_key.bin` 签名（example 支持 `@文件` 读二进制 key)
+- **网络安全**: release 默认禁明文，只放行 `127.0.0.1` / `10.0.2.2` / `localhost`（`res/xml/network_security_config.xml`)。本地配对请用 `adb forward tcp:18080 tcp:18080` + app 里填 `http://127.0.0.1:18080`；生产云端必须 HTTPS/WSS
+- **混淆**: `proguard-rules.pro` 保住 `com.sincy.agent.**` 与 native 方法（JNI 按名字查找）
+
+注意：release APK 内嵌的是生产 adapter 密钥，对 demo/prod 库验签通过；老 debug APK 用 dev key，对这两个库会验签失败（属预期，debug 包只配 sincy_test 验证用）。
