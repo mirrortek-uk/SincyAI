@@ -10,6 +10,7 @@ export default function LoginPage() {
   const [mode, setMode] = useState<"login" | "register">("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [showPw, setShowPw] = useState(false);
   const [name, setName] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -58,12 +59,22 @@ export default function LoginPage() {
           placeholder="owner@agency.dev"
         />
         <label>密码（至少 8 位）</label>
-        <input
-          type="password"
-          autoComplete={mode === "login" ? "current-password" : "new-password"}
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-        />
+        <div style={{ display: "flex", gap: 6 }}>
+          <input
+            type={showPw ? "text" : "password"}
+            autoComplete={mode === "login" ? "current-password" : "new-password"}
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            style={{ flex: 1 }}
+          />
+          <button
+            type="button"
+            style={{ background: "transparent", border: "1px solid var(--border)" }}
+            onClick={() => setShowPw(!showPw)}
+          >
+            {showPw ? "隐藏" : "显示"}
+          </button>
+        </div>
         {error && <p className="muted" style={{ color: "#e06c5a" }}>错误: {error}</p>}
         <div style={{ marginTop: 14, display: "flex", gap: 8 }}>
           <button type="submit" disabled={busy || !email || !password || (mode === "register" && !name)}>
