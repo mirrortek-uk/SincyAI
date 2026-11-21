@@ -104,11 +104,24 @@ class AgentForegroundService : Service() {
     }
 
     private suspend fun handleAssign(webSocket: WebSocket, baseUrl: String, token: String, taskId: String) {
-        // fetch the signed task brief (package text + adapter + signature) over HTTP
+        // fetch the signed task brief (package text + adapter + signature) over HTTP.
+        // 注意必须同时带 ?token= (handler 设备鉴权) 和 Authorization: Bearer 头 (auth middleware),
+        // 参考 crates/sincy-agent/src/client.rs
         val resp = http.newCall(Request.Builder()
-            .url("$baseUrl/api/v1/agent/tasks/$taskId?token=$token").get().build()).execute()
-        if (!resp.isSuccessful) return
+            .url("$baseUrl/api/v1/agent/tasks/$taskId?token=$token")
+            .header("Authorization", "Bearer $token")
+            .get().build()).execute()
+        if (!resp.isSuccessful) {
+            // 拉不到简报绝不能静默 —— 上报失败, 否则任务永远卡 EXECUTING
+            val body = resp.body?.string()
+            send(webSocket, "device.task.result", JSONObject()
+                .put("task_id", taskId)
+                .put("outcome", "no_side_effect_failure")
+                .put("reason", "brief fetch HTTP ${resp.code}: ${body?.take(120)}"))
+            return
+        }
         val brief = JSONObject(resp.body!!.string())
+        resp.close()
         send(webSocket, "device.task.ack", JSONObject().put("task_id", taskId).put("state", "EXECUTING"))
 
         // run the signed adapter through the Rust core; the accessibility service
