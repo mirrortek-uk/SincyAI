@@ -88,8 +88,8 @@ cargo run -p cloud-api
 `D:\Sincy-Agent-release.apk`（构建: `cargo ndk --release` + `gradle :app:assembleRelease`）是正式包：
 
 - **APK 签名**: `android/key.properties` → `android/keys/sincy-release.jks`（均已 gitignore，密码在 `/d/tmp/apk-keystore-pass.txt`)。上架/分发请换成你们自己的 keystore，并在 `android/app/build.gradle.kts` 保持同一套 signingConfig
-- **Adapter 签名密钥**: release 版 Rust core 编译期内嵌 `keys/adapter_signing_key.bin`（已 gitignore，32 字节随机)。已用它重签 `x.publish_post` 并写入 sincy_demo / sincy_prod 的 `app_adapter_versions`。新增 adapter 一律用 `cargo run -p sincy-agent --example sign_adapter -- adapters/xxx.yaml @keys/adapter_signing_key.bin` 签名（example 支持 `@文件` 读二进制 key)
-- **网络安全**: release 默认禁明文，只放行 `127.0.0.1` / `10.0.2.2` / `localhost`（`res/xml/network_security_config.xml`)。本地配对请用 `adb forward tcp:18080 tcp:18080` + app 里填 `http://127.0.0.1:18080`；生产云端必须 HTTPS/WSS
+- **Adapter 签名密钥**: release 版 Rust core 编译期内嵌 `keys/adapter_signing_key.bin`（已 gitignore，32 字节随机)。已用它重签 `x.publish_post` 并写入 sincy_prod 的 `app_adapter_versions`（本地只保留生产库 sincy_prod，demo 库已删除）。新增 adapter 一律用 `cargo run -p sincy-agent --example sign_adapter -- adapters/xxx.yaml @keys/adapter_signing_key.bin` 签名（example 支持 `@文件` 读二进制 key)
+- **网络安全**: release 默认禁明文，只放行 `127.0.0.1` / `10.0.2.2` / `localhost`（`res/xml/network_security_config.xml`)。本地配对请用 `adb forward tcp:18091 tcp:18081` + app 里填 `http://127.0.0.1:18091`（注意不要 forward 同端口，会劫持电脑本机的 127.0.0.1）；生产云端必须 HTTPS/WSS
 - **混淆**: `proguard-rules.pro` 保住 `com.sincy.agent.**` 与 native 方法（JNI 按名字查找）
 
 注意：release APK 内嵌的是生产 adapter 密钥，对 demo/prod 库验签通过；老 debug APK 用 dev key，对这两个库会验签失败（属预期，debug 包只配 sincy_test 验证用）。
