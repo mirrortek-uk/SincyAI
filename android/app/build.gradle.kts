@@ -1,4 +1,6 @@
 import java.util.Properties
+import java.util.Date
+import java.text.SimpleDateFormat
 
 plugins {
     id("com.android.application")
@@ -15,7 +17,8 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = 1
-        versionName = "0.1.0"
+        // 版本名带构建时间戳, 装到手机后一眼能看出是哪一版包
+        versionName = "0.1.0-" + SimpleDateFormat("yyyyMMdd-HHmmss").format(Date())
 
         // Rust core is built by cargo-ndk and loaded via JNI; see rust-core/
         ndk {
