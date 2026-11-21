@@ -40,6 +40,14 @@ async fn main() {
 
     let state = AppState::from_config(pool.clone(), &cfg);
 
+    // 首管理员引导: 仅由环境变量提供, 幂等, 密码只存 Argon2id 哈希
+    if let Some(pool) = pool.clone()
+        && let Err(e) = cloud_api::bootstrap::bootstrap_admin(&pool, &env).await
+    {
+        tracing::error!(error = %e, "bootstrap admin failed");
+        std::process::exit(4);
+    }
+
     let app = Router::new()
         .nest("/api/v1", cloud_api::routes())
         .with_state(state.clone())

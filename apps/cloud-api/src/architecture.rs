@@ -141,15 +141,15 @@ async fn architecture(
         },
         {
             "id": "prod",
-            "title": "生产化目标 (planned): Vercel + Supabase + 云端设备农场",
+            "title": "生产环境 (SINCY_ENV=production · 本地 sincy_prod 已可验证, 云端 Vercel+Supabase 见 docs/deploy.md)",
             "planned": true,
             "nodes": [
-                node("vercel", "Vercel 托管前端", "Next.js 生产构建",
-                     "Console 静态/SSR 部署到 Vercel, 环境变量配 API base; 域名+HTTPS 由 Vercel 接管"),
-                node("supabase", "Supabase", "Postgres + Auth + Realtime",
-                     "生产库迁移同一套 migrations/; RLS 按 agency 租户隔离; auth 可换 Supabase Auth 或保留自签 JWT 过渡"),
-                node("worker", "云端 worker", "cloud-api 容器 · Vercel/Render/Fly",
-                     "跑 REST/WSS/采集器/员工调度器; 通过 adb-over-TCP (或 scrcpy) 连接云端真机农场执行 device 路由"),
+                node("proddb", "生产库 sincy_prod / Supabase", "同一套 migrations + RLS; sincy_app 非超级用户",
+                     "本地生产库已启用(SINCY_ENV=production, 独立 DB, 强制禁 mock); 云端用 Supabase pooler; 首管理员由 SINCY_BOOTSTRAP_ADMIN_* 幂等创建, 无内置 demo 账号"),
+                node("vercel", "Vercel 托管前端", "frontend/vercel.json · Next.js 生产构建",
+                     "SINCY_API_INTERNAL 指向 cloud-api; rewrites 同域代理 /api/v1, 零 CORS; 域名+HTTPS 由 Vercel 接管"),
+                node("worker", "云端 cloud-api", "容器 · Fly/Render/Railway (WSS 长连接, 勿用 serverless)",
+                     "SINCY_ENV=production 启动即强制: 真 JWT secret / 禁 mock adapter / LLM mock+manual-file 拒绝 / healthz 暴露 env; 跑 REST/WSS/采集器/员工调度器"),
                 node("devfarm", "云端真机农场", "adb over TCP · 手机 APK agent",
                      "生产环境设备不离云: 手机装 APK 后 adb forward 到 worker, AdbIo --io adb 驱动, humanize 手势, 挑战屏通知人工远程处理"),
             ]
@@ -286,7 +286,7 @@ async fn architecture(
         ),
         edge("console", "vercel", "生产前端入口", "http"),
         edge("vercel", "worker", "REST/WSS → cloud-api", "http"),
-        edge("worker", "supabase", "生产库 (同 migrations + RLS)", "data"),
+        edge("worker", "proddb", "生产库 (同 migrations + RLS)", "data"),
         edge("worker", "devfarm", "adb-over-TCP 派发 device 任务", "ws"),
         edge("devfarm", "x", "云端真机执行发布", "external"),
     ]);
@@ -325,8 +325,8 @@ async fn architecture(
             "steps": "解释器产出 Action → sincy-adapter::humanize 生成手势计划(偏心抖动 tap / 贝塞尔弓形+逐点抖动+ease-in-out 分段 swipe, 随机延迟, pressure 模型) → 手机 APK: JNI 下发计划, 无障碍 dispatchGesture 多段 willContinue 连续 stroke 注入真实触摸; 电脑: AdbIo 执行 `adb shell input tap/swipe` 分段 → 挑战屏/漂移/版本不符即停 (WAITING_USER / UiDrift), 不盲点"
         },
         {
-            "id": "F9", "title": "生产化路径 (planned)",
-            "steps": "前端 Next.js 部署 Vercel → cloud-api 容器(worker) + 采集器/调度器 → Supabase 托管 Postgres(同一套 migrations + RLS) → 真机装 APK 后 adb-over-TCP 接入云端 worker, AdbIo --io adb 驱动云端设备农场 → 全链路 key 走 vault/环境变量, 不入库不进 git"
+            "id": "F9", "title": "生产化路径 (SINCY_ENV=production)",
+            "steps": "本地先起 sincy_prod 生产库验证(bootstrap 首 admin, 强制禁 mock) → 前端部署 Vercel(vercel.json, SINCY_API_INTERNAL 代理 /api/v1) → cloud-api 容器部署到支持 WSS 的平台 → Supabase 托管 Postgres(同 migrations + RLS, sincy_app 角色) → 真机 APK 经 adb-over-TCP 接入云端设备农场 → healthz 暴露 env/mock 状态, key 全走 vault/环境变量, 不入库不进 git"
         },
     ]);
 

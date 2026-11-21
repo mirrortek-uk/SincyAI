@@ -97,8 +97,16 @@ fn cors_layer() -> tower_http::cors::CorsLayer {
         .allow_headers(AllowHeaders::any())
 }
 
-async fn healthz() -> impl IntoResponse {
-    Json(json!({ "status": "ok", "ts": chrono::Utc::now().to_rfc3339() }))
+async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
+    Json(json!({
+        "status": "ok",
+        "ts": chrono::Utc::now().to_rfc3339(),
+        // 一眼看出这是 demo 还是真环境: 生产环境下 env!=local 且 mock 全关
+        "env": state.env,
+        "allow_mock_adapters": state.allow_mock_adapters,
+        "llm_provider": std::env::var("SINCY_LLM_PROVIDER").unwrap_or_else(|_| "mock".into()),
+        "database": state.pool.is_some(),
+    }))
 }
 
 async fn version() -> impl IntoResponse {

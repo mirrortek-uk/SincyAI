@@ -212,19 +212,31 @@ impl LlmGateway for ManualFileGateway {
 }
 
 /// 按环境变量装配 gateway: SINCY_LLM_PROVIDER = mock | openai-compatible | manual-file
-/// (mock 仅在 allow_mock=true 时可用, 防止生产误用)。
+/// (mock 仅在 allow_mock=true 时可用, 防止生产误用; 非 local 环境下 mock / manual-file
+/// 一律拒绝, openai-compatible 必须带 API key —— 双重保险, 不依赖单一开关)。
 pub fn gateway_from_env(allow_mock: bool) -> Result<Box<dyn LlmGateway>, String> {
+    let env = std::env::var("SINCY_ENV").unwrap_or_else(|_| "local".into());
+    let production_like = env == "production" || env == "prod";
     let provider = std::env::var("SINCY_LLM_PROVIDER").unwrap_or_else(|_| "mock".into());
     match provider.as_str() {
-        "mock" if allow_mock => Ok(Box::new(MockLlmGateway)),
+        "mock" if allow_mock && !production_like => Ok(Box::new(MockLlmGateway)),
         "mock" => Err("mock LLM provider is disabled; set SINCY_LLM_PROVIDER".into()),
-        "openai-compatible" => Ok(Box::new(OpenAiCompatibleGateway::new(
-            std::env::var("SINCY_LLM_BASE_URL")
-                .unwrap_or_else(|_| "https://api.openai.com/v1".into()),
-            std::env::var("SINCY_LLM_API_KEY").unwrap_or_default(),
-            std::env::var("SINCY_LLM_MODEL").unwrap_or_else(|_| "gpt-4o-mini".into()),
-        ))),
-        "manual-file" => Ok(Box::new(ManualFileGateway::from_env())),
+        "openai-compatible" => {
+            let key = std::env::var("SINCY_LLM_API_KEY").unwrap_or_default();
+            if production_like && key.is_empty() {
+                return Err(
+                    "SINCY_LLM_API_KEY is required for openai-compatible in non-local env".into(),
+                );
+            }
+            Ok(Box::new(OpenAiCompatibleGateway::new(
+                std::env::var("SINCY_LLM_BASE_URL")
+                    .unwrap_or_else(|_| "https://api.openai.com/v1".into()),
+                key,
+                std::env::var("SINCY_LLM_MODEL").unwrap_or_else(|_| "gpt-4o-mini".into()),
+            )))
+        }
+        "manual-file" if !production_like => Ok(Box::new(ManualFileGateway::from_env())),
+        "manual-file" => Err("manual-file LLM provider is local-dev only".into()),
         other => Err(format!("unknown SINCY_LLM_PROVIDER: {other}")),
     }
 }
@@ -470,5 +482,35 @@ mod tests {
             .await;
         assert!(r.is_err());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn production_env_refuses_mock_and_manual_file() {
+        // 非 local 环境: 即使 allow_mock=true, mock / manual-file 也拒绝
+        unsafe {
+            std::env::set_var("SINCY_ENV", "production");
+            std::env::set_var("SINCY_LLM_PROVIDER", "mock");
+        }
+        assert!(gateway_from_env(true).is_err());
+        unsafe {
+            std::env::set_var("SINCY_LLM_PROVIDER", "manual-file");
+        }
+        assert!(gateway_from_env(true).is_err());
+        // openai-compatible 在生产环境必须带 key
+        unsafe {
+            std::env::set_var("SINCY_LLM_PROVIDER", "openai-compatible");
+            std::env::remove_var("SINCY_LLM_API_KEY");
+        }
+        assert!(gateway_from_env(false).is_err());
+        // local 下 mock 可用
+        unsafe {
+            std::env::set_var("SINCY_ENV", "local");
+            std::env::set_var("SINCY_LLM_PROVIDER", "mock");
+        }
+        assert!(gateway_from_env(true).is_ok());
+        unsafe {
+            std::env::remove_var("SINCY_ENV");
+            std::env::remove_var("SINCY_LLM_PROVIDER");
+        }
     }
 }

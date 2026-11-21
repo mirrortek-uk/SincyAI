@@ -50,3 +50,35 @@ cloud-api 是 axum 二进制；Vercel 需要 serverless 形态 —— 两条路�
 - [ ] 换 adapter signing key 并重新 seed `app_adapter_versions`
 - [ ] 设备配对全链路在真机走通（注册 → WSS → 派发 → 执行 → COMPLETED）
 - [ ] X 走 device 路线（capability 矩阵 device=verified@10），付费 API 仅作兜底
+
+## 首管理员引导（生产环境没有内置 demo 账号）
+
+服务启动时若设置以下环境变量，会**幂等地**创建第一个 agency + owner（密码只存 Argon2id 哈希）：
+
+| 变量 | 说明 |
+|---|---|
+| `SINCY_BOOTSTRAP_ADMIN_EMAIL` | 首管理员邮箱 |
+| `SINCY_BOOTSTRAP_ADMIN_PASSWORD` | 强密码，进程环境传入，不落库明文 |
+| `SINCY_BOOTSTRAP_AGENCY_NAME` | 可选，默认 `Sincy` |
+
+`SINCY_ENV != local` 时强制生效：`SINCY_ALLOW_MOCK_ADAPTERS` 被忽略、`SINCY_JWT_SECRET` 缺失直接启动失败、LLM 的 `mock` / `manual-file` provider 被拒绝、`openai-compatible` 必须带 `SINCY_LLM_API_KEY`。`GET /api/v1/healthz` 会返回 `env / allow_mock_adapters / llm_provider / database`，一眼可辨是不是真环境。
+
+## 本地生产库验证（不用 demo 库）
+
+本机可起独立的生产模式实例做上线前验证（与 demo 完全隔离）：
+
+```bash
+createdb sincy_prod
+SINCY_ENV=production \
+SINCY_DATABASE_URL=postgres://...@127.0.0.1:5432/sincy_prod \
+SINCY_HTTP_PORT=18081 \
+SINCY_JWT_SECRET=$(openssl rand -hex 32) \
+SINCY_BOOTSTRAP_ADMIN_EMAIL=admin@yourco.com \
+SINCY_BOOTSTRAP_ADMIN_PASSWORD=$(openssl rand -urlsafe 24) \
+SINCY_LLM_PROVIDER=openai-compatible SINCY_LLM_API_KEY=... \
+cargo run -p cloud-api
+```
+
+## 前端上 Vercel
+
+`frontend/` 已带 `vercel.json`；Vercel 项目里设置 `SINCY_API_INTERNAL=https://<cloud-api 地址>`，`next.config.mjs` 的 rewrites 会把 `/api/v1/*` 代理过去（同域部署，浏览器零 CORS 问题）。注意 agent 的 WSS 长连接不能走 Vercel serverless，cloud-api 请部署在支持长连接的平台（见上文）。

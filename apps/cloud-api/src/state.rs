@@ -21,15 +21,23 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(pool: Option<PgPool>, env: String) -> Self {
+        let production_like = env == "production" || env == "prod";
         let secret = std::env::var("SINCY_JWT_SECRET")
             .unwrap_or_else(|_| "dev-only-not-for-production".to_string());
+        if production_like && secret == "dev-only-not-for-production" {
+            panic!("SINCY_JWT_SECRET must be set to a real secret when SINCY_ENV={env}");
+        }
         let ttl: i64 = std::env::var("SINCY_JWT_TTL_MINUTES")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(60);
-        let allow_mock = std::env::var("SINCY_ALLOW_MOCK_ADAPTERS")
+        let mut allow_mock = std::env::var("SINCY_ALLOW_MOCK_ADAPTERS")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
+        if production_like && allow_mock {
+            eprintln!("warning: SINCY_ALLOW_MOCK_ADAPTERS ignored because SINCY_ENV={env}");
+            allow_mock = false;
+        }
         let budget = std::env::var("SINCY_MONTHLY_BUDGET_USD")
             .ok()
             .and_then(|v| v.parse().ok());
@@ -46,11 +54,20 @@ impl AppState {
     }
 
     pub fn from_config(pool: Option<PgPool>, cfg: &AppConfig) -> Self {
+        let production_like = cfg.env == "production" || cfg.env == "prod";
         let secret = if cfg.security.jwt_secret.is_empty() {
             "dev-only-not-for-production".to_string()
         } else {
             cfg.security.jwt_secret.clone()
         };
+        if production_like && secret == "dev-only-not-for-production" {
+            panic!(
+                "SINCY_JWT_SECRET must be set to a real secret when SINCY_ENV={}",
+                cfg.env
+            );
+        }
+        // 生产环境强制禁 mock, 不信任配置文件里的开关
+        let allow_mock = cfg.security.allow_mock_adapters && !production_like;
         // middleware verifier (process-global)
         crate::auth::init_auth(secret.as_bytes(), cfg.security.jwt_ttl_minutes);
         Self {
@@ -61,7 +78,7 @@ impl AppState {
                 secret.as_bytes(),
                 cfg.security.jwt_ttl_minutes,
             )),
-            allow_mock_adapters: cfg.security.allow_mock_adapters,
+            allow_mock_adapters: allow_mock,
             monthly_budget_usd: cfg.security.monthly_budget_usd,
         }
     }

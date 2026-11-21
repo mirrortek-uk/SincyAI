@@ -3,6 +3,7 @@
 pub mod api;
 pub mod architecture;
 pub mod auth;
+pub mod bootstrap;
 pub mod employees;
 pub mod gateway;
 pub mod intel;
