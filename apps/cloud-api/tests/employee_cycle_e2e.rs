@@ -305,6 +305,15 @@ async fn employee_phase(pool: &sqlx::PgPool, port: &u16, token: &str, brand_id: 
         .unwrap();
     assert_eq!(bound["items"].as_array().unwrap().len(), 77);
     // register a new version of an existing skill -> version bumps (old archived in skill_versions)
+    // skills 表是平台级种子, 不在 TRUNCATE 列表里, 所以按相对版本断言
+    let before = auth(client.get(format!("{base}/skills?q=social_post_generation")))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let v_before = before["items"][0]["version"].as_i64().unwrap();
     let v2 = auth(client.post(format!("{base}/skills")).json(&json!({
         "domain": "content", "name": "social_post_generation", "description": "v2 contract"
     })))
@@ -314,7 +323,7 @@ async fn employee_phase(pool: &sqlx::PgPool, port: &u16, token: &str, brand_id: 
     .json::<serde_json::Value>()
     .await
     .unwrap();
-    assert_eq!(v2["version"].as_i64().unwrap(), 2);
+    assert_eq!(v2["version"].as_i64().unwrap(), v_before + 1);
     // disable one binding
     let sid = bound["items"][0]["id"].as_str().unwrap().to_string();
     auth(
@@ -469,8 +478,8 @@ async fn employee_phase(pool: &sqlx::PgPool, port: &u16, token: &str, brand_id: 
     .unwrap();
     // second trend so the auto_publish cycle has a fresh opportunity to pick
     auth(client.post(format!("{base}/intel/ingest")).json(&json!({
-        "source_id": "trendradar", "kind": "trend", "dedup_key": "trend:llm-ops",
-        "payload": {"topic":"llm ops","platforms":["x"],"volume":8000,"velocity":3.5,"sentiment":0.65,"window_hours":24}
+        "source_id": "trendradar", "kind": "trend", "dedup_key": "trend:ai-agents-evals",
+        "payload": {"topic":"ai agents evals","platforms":["x"],"volume":8000,"velocity":3.5,"sentiment":0.65,"window_hours":24}
     }))).send().await.unwrap();
     auth(client.post(format!("{base}/intel/opportunities")))
         .send()

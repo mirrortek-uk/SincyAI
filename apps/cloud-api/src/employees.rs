@@ -21,7 +21,8 @@ use sincy_employee::domain::{
 use sincy_employee::lifecycle::transition;
 use sincy_employee::memory::MemoryItem;
 use sincy_intel::adapter::EmployeeContext;
-use sincy_intel::model::Opportunity;
+use sincy_intel::model::{Opportunity, Trend};
+use sincy_intel::opportunity::{pillar_match, score_opportunity};
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -836,40 +837,113 @@ struct PgIntelPort {
 
 #[async_trait]
 impl IntelPort for PgIntelPort {
+    /// 品牌感知的机会选择 (WI §20 adapter: 只给建议): 拉一批候选, 用员工的
+    /// 支柱/受众对每个 topic 重新算 pillar_match 并重打分, 低相关直接过滤,
+    /// 证据解析成可读的 "标题 (来源) url" 喂给内容生产 prompt。
     async fn opportunities(
         &self,
-        _ctx: &EmployeeContext,
+        ctx: &EmployeeContext,
         limit: usize,
     ) -> Result<Vec<Opportunity>, String> {
         let rows = sqlx::query(
-            "SELECT topic, score, rationale, evidence FROM intel_opportunities WHERE status = 'new' ORDER BY score DESC LIMIT $1",
+            "SELECT topic, score, rationale, evidence FROM intel_opportunities WHERE status = 'new' ORDER BY score DESC LIMIT 400",
         )
-        .bind(limit as i64)
         .fetch_all(&self.pool).await.map_err(|e| e.to_string())?;
-        Ok(rows
-            .iter()
-            .map(|r| {
-                let evidence: Vec<String> = r
-                    .get::<Value, _>("evidence")
-                    .as_array()
+        let mut out: Vec<Opportunity> = Vec::new();
+        for r in &rows {
+            let topic: String = r.get("topic");
+            let rationale: Value = r.get("rationale");
+            let title = rationale
+                .get("title")
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .to_string();
+            // 品牌相关性: topic + 标题 vs 支柱/受众
+            let haystack = format!("{topic} {title}");
+            let pm = pillar_match(&haystack, &ctx.pillars, &ctx.audience);
+            if pm < 0.2 {
+                continue; // 与品牌支柱不沾边的直接不给员工看
+            }
+            // 用 rationale 里的趋势分量重打分
+            let velocity = rationale
+                .get("velocity")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.5);
+            let volume = rationale
+                .get("volume")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(600);
+            let freshness = rationale
+                .get("freshness_hours")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(24.0);
+            let trend = Trend {
+                topic: topic.clone(),
+                platforms: rationale
+                    .get("platforms")
+                    .and_then(|p| p.as_array())
                     .map(|a| {
                         a.iter()
-                            .filter_map(|v| v.as_str().map(String::from))
+                            .filter_map(|x| x.as_str().map(String::from))
                             .collect()
                     })
-                    .unwrap_or_default();
-                Opportunity {
-                    topic: r.get("topic"),
-                    score: r
-                        .get::<rust_decimal::Decimal, _>("score")
-                        .try_into()
-                        .unwrap_or(0.0),
-                    rationale: r.get("rationale"),
-                    evidence,
-                    status: "new".into(),
+                    .unwrap_or_default(),
+                volume,
+                velocity,
+                sentiment: 0.5,
+                window_hours: 24,
+            };
+            let score = score_opportunity(pm, &trend, 0.2, freshness);
+            let mut rat = rationale.clone();
+            rat["pillar_match"] = json!(pm);
+            // 证据解析成可读条目
+            let keys: Vec<String> = r
+                .get::<Value, _>("evidence")
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut evidence: Vec<String> = Vec::new();
+            if !keys.is_empty() {
+                let items = sqlx::query(
+                    "SELECT source_id, kind, payload FROM intel_items WHERE dedup_key = ANY($1) LIMIT 10",
+                )
+                .bind(&keys)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| e.to_string())?;
+                for it in &items {
+                    let p: Value = it.get("payload");
+                    let t = p.get("title").and_then(|t| t.as_str()).unwrap_or("");
+                    let u = p.get("url").and_then(|u| u.as_str()).unwrap_or("");
+                    let s: String = it.get("source_id");
+                    if !t.is_empty() {
+                        evidence.push(format!("{t} ({s}) {u}"));
+                    }
                 }
-            })
-            .collect())
+            }
+            if evidence.is_empty() {
+                evidence = keys;
+            }
+            out.push(Opportunity {
+                topic,
+                score,
+                rationale: rat,
+                evidence,
+                status: "new".into(),
+            });
+        }
+        out.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.topic.cmp(&b.topic))
+        });
+        out.truncate(limit.max(10));
+        Ok(out)
     }
 }
 

@@ -546,8 +546,13 @@ async fn refresh_opportunities(
 pub(crate) async fn refresh_opportunities_db(
     pool: &sqlx::PgPool,
 ) -> Result<(usize, usize), axum::response::Response> {
+    // 机会输入: trend + news + knowledge + social_content (72h 内), 显式排除
+    // event 类 (如 Wikipedia 最近修改) —— 高频低价值噪声不参与选题。
     let rows = sqlx::query(
-        "SELECT dedup_key, payload, collected_at FROM intel_items WHERE kind = 'trend' ORDER BY collected_at DESC LIMIT 200",
+        "SELECT dedup_key, source_id, kind, payload, collected_at FROM intel_items \
+         WHERE kind IN ('trend','news','knowledge','social_content') \
+           AND collected_at > now() - interval '72 hours' \
+         ORDER BY collected_at DESC LIMIT 400",
     )
     .fetch_all(pool)
     .await
@@ -556,17 +561,53 @@ pub(crate) async fn refresh_opportunities_db(
     let mut opps = Vec::new();
     for r in &rows {
         let dedup_key: String = r.get("dedup_key");
+        let source_id: String = r.get("source_id");
+        let kind: String = r.get("kind");
+        let payload: Value = r.get("payload");
         let collected_at: chrono::DateTime<chrono::Utc> = r.get("collected_at");
-        if let Ok(trend) = serde_json::from_value::<Trend>(r.get::<Value, _>("payload")) {
-            let freshness_hours = (now - collected_at).num_minutes() as f64 / 60.0;
-            opps.push(opportunity_from_trend(
-                &trend,
-                0.5,
-                0.2,
-                freshness_hours.max(0.0),
-                vec![dedup_key],
-            ));
-        }
+        let freshness_hours = (now - collected_at).num_minutes() as f64 / 60.0;
+        let title = payload
+            .get("title")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_string();
+        let url = payload
+            .get("url")
+            .and_then(|u| u.as_str())
+            .unwrap_or("")
+            .to_string();
+        let trend = if kind == "trend" {
+            match serde_json::from_value::<Trend>(payload.clone()) {
+                Ok(t) => t,
+                Err(_) => continue,
+            }
+        } else {
+            // 编辑类内容 (news/knowledge/social_content): 用标题作 topic,
+            // 给一个中性的基线量/速度, 由 freshness 和品牌相关性主导排序
+            if title.is_empty() {
+                continue;
+            }
+            Trend {
+                topic: title.clone(),
+                platforms: vec![source_id.clone()],
+                volume: 600,
+                velocity: 0.8,
+                sentiment: 0.5,
+                window_hours: 24,
+            }
+        };
+        let mut opp = opportunity_from_trend(
+            &trend,
+            0.5,
+            0.2,
+            freshness_hours.max(0.0),
+            vec![dedup_key.clone()],
+        );
+        opp.rationale["title"] = json!(title);
+        opp.rationale["url"] = json!(url);
+        opp.rationale["source"] = json!(source_id);
+        opp.rationale["kind"] = json!(kind);
+        opps.push(opp);
     }
     let ranked = rank_opportunities(opps);
     let mut upserted = 0usize;

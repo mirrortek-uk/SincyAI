@@ -62,6 +62,49 @@ pub fn opportunity_from_trend(
     }
 }
 
+/// 把话题文本切成小写词元 (短词要求全等, 长词允许词干前缀匹配)。
+fn words(s: &str) -> Vec<String> {
+    s.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() >= 2)
+        .map(|w| w.to_lowercase())
+        .collect()
+}
+
+fn word_matches(topic_words: &[String], w: &str) -> bool {
+    topic_words.iter().any(|tw| {
+        if w.len() < 4 {
+            tw == w
+        } else {
+            tw == w || tw.starts_with(w) || w.starts_with(tw)
+        }
+    })
+}
+
+/// 品牌相关性: topic/title 与员工内容支柱 + 受众关键词的命中比例 (0..1)。
+/// 选题时用它替换全局写死的 pillar_match, 让机会池按品牌过滤。
+pub fn pillar_match(topic: &str, pillars: &[String], audience: &[String]) -> f64 {
+    let tw = words(topic);
+    if tw.is_empty() {
+        return 0.0;
+    }
+    let keys: Vec<String> = pillars
+        .iter()
+        .chain(audience.iter())
+        .flat_map(|p| words(p))
+        .collect();
+    if keys.is_empty() {
+        return 0.5; // 没有配置支柱时保持中性
+    }
+    let hit = keys.iter().filter(|k| word_matches(&tw, k)).count();
+    // 命中越多相关性越高; 至少命中 1 个关键词给 0.4 起步, 满额 1.0
+    let matched_ratio = hit as f64 / keys.len() as f64;
+    if hit == 0 {
+        0.0
+    } else {
+        (0.4 + 0.6 * matched_ratio * 4.0).min(1.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,5 +140,23 @@ mod tests {
         let ranked = rank_opportunities(opps);
         assert_eq!(ranked[0].topic, "b");
         assert!(ranked[0].score >= ranked[1].score && ranked[1].score >= ranked[2].score);
+    }
+
+    #[test]
+    fn pillar_match_prefers_on_brand_topics() {
+        let pillars = vec![
+            "ai agents".to_string(),
+            "llm ops".to_string(),
+            "multi-agent".to_string(),
+        ];
+        let audience = vec!["developers".to_string()];
+        let on = pillar_match("addyosmani/agent-skills", &pillars, &audience);
+        let off = pillar_match("ZhuLinsen/daily_stock_analysis", &pillars, &audience);
+        assert!(on > 0.0, "on-brand topic should match, got {on}");
+        assert!(off == 0.0, "stock repo should not match, got {off}");
+        assert!(
+            pillar_match("anything", &[], &[]) == 0.5,
+            "no pillars -> neutral"
+        );
     }
 }

@@ -176,6 +176,15 @@ fn mock_draft(prompt: &str, max_tokens: u32) -> String {
         })
         .unwrap_or_else(|| "zh-CN".to_string());
     let is_zh = language.starts_with("zh");
+    // 证据里第一条的人类可读标题 (prompt 的 Evidence: [...] 第一项), 让草稿带点实料
+    let evidence_title = prompt
+        .to_lowercase()
+        .split("evidence:")
+        .nth(1)
+        .and_then(|rest| rest.split('[').nth(1))
+        .and_then(|arr| arr.split('"').nth(1))
+        .map(|s| s.split(" (").next().unwrap_or(s).trim().to_string())
+        .filter(|s| !s.is_empty() && s.chars().count() <= 80);
     // platform limit for X posts is 280 WEIGHTED chars INCLUDING the [mock:...] label
     // (CJK counts double, same as the critic in sincy-employee)
     let prefix = "[mock:mock-1] ";
@@ -185,13 +194,21 @@ fn mock_draft(prompt: &str, max_tokens: u32) -> String {
         280
     };
     let budget = limit.saturating_sub(weighted_len(prefix));
+    let ev_zh = evidence_title
+        .as_ref()
+        .map(|e| format!("（灵感来自：{e}）"))
+        .unwrap_or_default();
+    let ev_en = evidence_title
+        .as_ref()
+        .map(|e| format!(" (inspired by: {e})"))
+        .unwrap_or_default();
     let body = if is_zh {
         format!(
-            "本周聊聊 {topic} 的三个收获：\n1) 它带来的复利比想象中快；\n2) 最不起眼的部分（评测、护栏）反而最关键；\n3) 先从一个窄场景做起，别一上来就想做大而全的 agent。你会补充哪一条？"
+            "本周聊聊 {topic}{ev_zh} 的三个收获：\n1) 它带来的复利比想象中快；\n2) 最不起眼的部分（评测、护栏）反而最关键；\n3) 先从一个窄场景做起，别一上来就想做大而全的 agent。你会补充哪一条？"
         )
     } else {
         format!(
-            "3 things I learned about {topic} this week:\n1) it compounds faster than expected;\n2) the boring parts (evals, guardrails) matter most;\n3) start with one narrow use case, not a grand agent. What would you add?"
+            "3 things I learned about {topic}{ev_en} this week:\n1) it compounds faster than expected;\n2) the boring parts (evals, guardrails) matter most;\n3) start with one narrow use case, not a grand agent. What would you add?"
         )
     };
     let mut w = 0usize;
