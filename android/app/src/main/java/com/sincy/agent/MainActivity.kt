@@ -9,9 +9,10 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.edit
 import androidx.lifecycle.lifecycleScope
-import androidx.security.crypto.EncryptedSharedPreferences
-import androidx.security.crypto.MasterKey
+import android.Manifest
+import android.content.pm.PackageManager
 import com.sincy.agent.core.AgentForegroundService
+import com.sincy.agent.perception.SincyAccessibilityService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -52,7 +53,7 @@ class MainActivity : AppCompatActivity() {
             setText(BuildConfig.DEFAULT_SERVER)
         }
         val code = EditText(this).apply {
-            hint = "配对码 (控制台生成的 8 位码)"
+            hint = "配对码 (控制台生成的 4 位数字)"
             inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
         }
         val pair = Button(this).apply { text = "Pair this device" }
@@ -65,11 +66,21 @@ class MainActivity : AppCompatActivity() {
         pair.setOnClickListener {
             lifecycleScope.launch {
                 try {
-                    val token = pairWithCode(server.text.toString(), code.text.toString())
-                    prefs().edit { putString("device_token", token) }
-                    Toast.makeText(this@MainActivity, "Device paired ✔ v${BuildConfig.VERSION_NAME}", Toast.LENGTH_LONG).show()
+                    val existing = prefs().getString("device_token", null)
+                    if (code.text.toString().isBlank() && !existing.isNullOrEmpty()) {
+                        Toast.makeText(this@MainActivity, "已配对 (v${BuildConfig.VERSION_NAME})，如需重新配对请在控制台生成新码后再输入", Toast.LENGTH_LONG).show()
+                        return@launch
+                    }
+                    val r = pairWithCode(server.text.toString(), code.text.toString())
+                    prefs().edit {
+                        putString("device_token", r.token)
+                        putString("device_id", r.deviceId)
+                        putString("agency_id", r.agencyId)
+                        putString("cloud_url", r.baseUrl)
+                    }
+                    Toast.makeText(this@MainActivity, "配对成功 ✔ v${BuildConfig.VERSION_NAME}，设备 ${r.deviceId.take(8)}", Toast.LENGTH_LONG).show()
                 } catch (e: Exception) {
-                    Toast.makeText(this@MainActivity, "Pairing failed: ${e.message}", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this@MainActivity, "配对失败: ${e.message}", Toast.LENGTH_LONG).show()
                 }
             }
         }
@@ -77,23 +88,40 @@ class MainActivity : AppCompatActivity() {
         start.setOnClickListener {
             val token = prefs().getString("device_token", null)
             if (token.isNullOrEmpty()) {
-                Toast.makeText(this, "Pair first", Toast.LENGTH_LONG).show()
-            } else {
+                Toast.makeText(this, "请先配对 (输入 4 位配对码)", Toast.LENGTH_LONG).show()
+                return@setOnClickListener
+            }
+            // 服务地址以当前输入框为准
+            prefs().edit().putString("cloud_url", server.text.toString().trim().ifBlank { "http://127.0.0.1:18081" }).apply()
+            // Android 13+ 前台服务通知需要运行时权限
+            if (android.os.Build.VERSION.SDK_INT >= 33 &&
+                checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+            }
+            if (!a11yEnabled()) {
+                Toast.makeText(this, "建议先点上方按钮开启无障碍服务，否则 agent 看不到屏幕", Toast.LENGTH_LONG).show()
+            }
+            try {
                 startForegroundService(Intent(this, AgentForegroundService::class.java))
+                Toast.makeText(this, "Agent 已启动 — 连接状态看通知栏 (WSS ${server.text})", Toast.LENGTH_LONG).show()
+            } catch (e: Exception) {
+                Toast.makeText(this, "启动失败: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
     }
 
-    private fun prefs() = EncryptedSharedPreferences.create(
-        this,
-        "sincy_agent_prefs",
-        MasterKey.Builder(this).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
-        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
-    )
+    private fun prefs() = Prefs.get(this)
+
+    private fun a11yEnabled(): Boolean {
+        val enabled = Settings.Secure.getString(
+            contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: return false
+        return enabled.split(':').any { it.contains("SincyAccessibilityService", ignoreCase = true) }
+    }
+
+    data class PairResult(val token: String, val deviceId: String, val agencyId: String, val baseUrl: String)
 
     /** 只凭配对码配对: POST /devices/pair (公开端点), 不需要账号密码。 */
-    private suspend fun pairWithCode(baseUrl: String, code: String): String = withContext(Dispatchers.IO) {
+    private suspend fun pairWithCode(baseUrl: String, code: String): PairResult = withContext(Dispatchers.IO) {
         val base = baseUrl.trim().ifBlank { "http://127.0.0.1:18081" }
         fun httpCall(url: String, body: String): okhttp3.Response {
             return try {
@@ -110,7 +138,7 @@ class MainActivity : AppCompatActivity() {
                 throw IllegalStateException("网络错误: ${e.message} — url=$url")
             }
         }
-        if (code.isBlank()) throw IllegalStateException("请输入控制台生成的 8 位配对码")
+        if (code.isBlank()) throw IllegalStateException("请输入控制台生成的 4 位数字配对码")
         val body = JSONObject()
             .put("code", code.trim().uppercase())
             .put("platform", "android")
@@ -121,7 +149,8 @@ class MainActivity : AppCompatActivity() {
             val b = resp.body?.string() ?: ""
             throw IllegalStateException("配对失败 HTTP ${resp.code} @ $base: ${b.take(120)} — 码错误/过期/已用过, 请重新生成")
         }
-        JSONObject(resp.body!!.string()).getString("token")
+        val j = JSONObject(resp.body!!.string())
+        PairResult(j.getString("token"), j.getString("device_id"), j.optString("agency_id"), base)
     }
 
     private fun sha256(bytes: ByteArray): String =

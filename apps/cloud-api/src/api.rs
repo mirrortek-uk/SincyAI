@@ -1096,7 +1096,7 @@ struct RegisterCompleteBody {
     proof: String,
 }
 
-/// POST /devices/pairing-codes (JWT) — 控制台生成一次性配对码, 给手机 app 输入。
+/// POST /devices/pairing-codes (JWT) — 控制台生成一次性 4 位数字配对码, 给手机 app 输入。
 #[derive(Debug, Deserialize)]
 struct PairingCodeBody {
     ttl_minutes: Option<i64>,
@@ -1150,7 +1150,7 @@ async fn pair_with_code(
             app_error_response(AppError::non_retryable("pairing_failed", e.to_string()))
         })?;
     Ok(Json(
-        json!({ "device_id": sess.device_id, "token": sess.token }),
+        json!({ "device_id": sess.device_id, "agency_id": sess.agency_id.as_uuid(), "token": sess.token }),
     ))
 }
 

@@ -107,13 +107,17 @@ async fn pairing_code_pairs_device_without_password() {
     assert_eq!(resp.status(), 200, "create code: {:?}", resp.text().await);
     let body: serde_json::Value = resp.json().await.expect("json");
     let code = body["code"].as_str().expect("code").to_string();
-    assert_eq!(code.len(), 8, "code is 8 chars: {code}");
+    assert_eq!(code.len(), 4, "code is 4 digits: {code}");
+    assert!(
+        code.bytes().all(|b| b.is_ascii_digit()),
+        "digits only: {code}"
+    );
     assert!(body["expires_at"].is_string());
 
     // 3) 手机端不带任何认证头, 只凭码配对
     let resp = http
         .post(format!("{base}/devices/pair"))
-        .json(&json!({"code": code.to_lowercase(), "platform": "android", "name": "e2e-pixel"}))
+        .json(&json!({"code": code, "platform": "android", "name": "e2e-pixel"}))
         .send()
         .await
         .expect("send");
@@ -156,27 +160,49 @@ async fn pairing_code_pairs_device_without_password() {
         .expect("send");
     assert_eq!(resp.status(), 400, "reused code must fail");
 
-    // 7) 错码 -> 400
+    // 7) 错码 -> 400 (把生成码的最后一位改掉, 保证与已用码不同)
+    let wrong = format!(
+        "{}{}",
+        &code[..3],
+        if code.ends_with('9') { '8' } else { '9' }
+    );
     let resp = http
         .post(format!("{base}/devices/pair"))
-        .json(&json!({"code": "ZZZZZZZZ"}))
+        .json(&json!({"code": wrong}))
         .send()
         .await
         .expect("send");
     assert_eq!(resp.status(), 400, "wrong code must fail");
 
+    // 7b) 非 4 位数字的码 -> 400
+    for bad in ["12", "12345", "ABCD", "12 4"] {
+        let resp = http
+            .post(format!("{base}/devices/pair"))
+            .json(&json!({"code": bad}))
+            .send()
+            .await
+            .expect("send");
+        assert_eq!(resp.status(), 400, "malformed code {bad:?} must fail");
+    }
+
     // 8) 过期码 -> 400 (直接塞一条已过期的码)
+    let expired_code = format!(
+        "{}{}",
+        if code.starts_with('9') { '8' } else { '9' },
+        &code[1..]
+    );
     sqlx::query(
         "INSERT INTO device_pairing_codes (code, agency_id, created_by, expires_at)
-         VALUES ('EXPIRED1', (SELECT id FROM agencies LIMIT 1), $1, now() - interval '1 minute')",
+         VALUES ($2, (SELECT id FROM agencies LIMIT 1), $1, now() - interval '1 minute')",
     )
     .bind(Uuid::new_v4())
+    .bind(&expired_code)
     .execute(&pool)
     .await
     .expect("insert expired");
     let resp = http
         .post(format!("{base}/devices/pair"))
-        .json(&json!({"code": "EXPIRED1"}))
+        .json(&json!({"code": expired_code}))
         .send()
         .await
         .expect("send");

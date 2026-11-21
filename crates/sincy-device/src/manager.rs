@@ -54,13 +54,14 @@ pub struct DeviceRecord {
 pub struct SessionToken {
     pub token: String,
     pub device_id: Uuid,
+    pub agency_id: AgencyId,
 }
 
-/// 一次性配对码: 8 位, 去掉易混淆字符 (0/O/1/I/l), 大写字母+数字。
-const CODE_ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+/// 一次性配对码: 4 位纯数字。
+const CODE_ALPHABET: &[u8] = b"0123456789";
 
 fn gen_code() -> String {
-    let b: [u8; 8] = rand::random();
+    let b: [u8; 4] = rand::random();
     b.iter()
         .map(|x| CODE_ALPHABET[(*x as usize) % CODE_ALPHABET.len()] as char)
         .collect()
@@ -75,7 +76,7 @@ impl<'a> DeviceManager<'a> {
     pub fn new(pool: &'a PgPool, jwt_secret: &[u8]) -> Self {
         Self {
             pool,
-            jwt: JwtIssuer::new(jwt_secret, 60 * 24), // 24h device token; rotation via re-register
+            jwt: JwtIssuer::new(jwt_secret, 60 * 24 * 60), // 配对后设备 token 默认有效 60 天
         }
     }
 
@@ -180,7 +181,11 @@ impl<'a> DeviceManager<'a> {
                 vec!["device".into()],
             )
             .map_err(|e| DeviceError::InvalidToken(e.to_string()))?;
-        Ok(SessionToken { token, device_id })
+        Ok(SessionToken {
+            token,
+            device_id,
+            agency_id,
+        })
     }
 
     /// 控制台(已登录)生成一次性配对码: 10 分钟有效, 一次性。
@@ -217,14 +222,14 @@ impl<'a> DeviceManager<'a> {
         platform: &str,
         name: Option<&str>,
     ) -> Result<SessionToken, DeviceError> {
-        let code = code.trim().to_uppercase();
-        if code.len() != 8 {
+        let code = code.trim();
+        if code.len() != 4 || !code.bytes().all(|b| b.is_ascii_digit()) {
             return Err(DeviceError::BadPairingCode);
         }
         let row = sqlx::query(
             "SELECT agency_id, created_by, expires_at, used_at FROM device_pairing_codes WHERE code = $1",
         )
-        .bind(&code)
+        .bind(code)
         .fetch_optional(self.pool)
         .await?
         .ok_or(DeviceError::BadPairingCode)?;
@@ -274,11 +279,15 @@ impl<'a> DeviceManager<'a> {
         sqlx::query(
             "UPDATE device_pairing_codes SET used_at = now(), device_id = $2 WHERE code = $1",
         )
-        .bind(&code)
+        .bind(code)
         .bind(device_id)
         .execute(self.pool)
         .await?;
-        Ok(SessionToken { token, device_id })
+        Ok(SessionToken {
+            token,
+            device_id,
+            agency_id,
+        })
     }
 
     /// Authenticate a WSS/REST request: valid JWT + active device + active session.

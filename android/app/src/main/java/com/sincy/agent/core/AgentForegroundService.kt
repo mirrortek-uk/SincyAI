@@ -7,6 +7,7 @@ import android.app.Service
 import android.content.Intent
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import com.sincy.agent.Prefs
 import com.sincy.agent.R
 import com.sincy.agent.adapter.AdapterRuntime
 import com.sincy.agent.net.AgentGateway
@@ -46,22 +47,33 @@ class AgentForegroundService : Service() {
         super.onCreate()
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(NotificationChannel(CHANNEL, "Sincy Agent", NotificationManager.IMPORTANCE_LOW))
-        startForeground(NOTIF_ID, NotificationCompat.Builder(this, CHANNEL)
-            .setContentTitle("Sincy Agent")
-            .setContentText("connected to cloud")
-            .setSmallIcon(android.R.drawable.ic_menu_compass)
-            .build())
+        notify("启动中…")
         connect()
     }
 
-    private fun prefs() = getSharedPreferences("sincy_agent_prefs", MODE_PRIVATE)
+    private fun prefs() = Prefs.get(this)
+
+    private fun notify(text: String) {
+        val nm = getSystemService(NotificationManager::class.java)
+        val n = NotificationCompat.Builder(this, CHANNEL)
+            .setContentTitle("Sincy Agent v${com.sincy.agent.BuildConfig.VERSION_NAME}")
+            .setContentText(text)
+            .setSmallIcon(android.R.drawable.ic_menu_compass)
+            .setOngoing(true)
+            .build()
+        nm.notify(NOTIF_ID, n)
+        try { startForeground(NOTIF_ID, n) } catch (_: Exception) {}
+    }
 
     private fun connect() {
-        val token = prefs().getString("device_token", null) ?: return stopSelf()
-        val baseUrl = prefs().getString("cloud_url", "http://10.0.2.2:18080")!!
+        val token = prefs().getString("device_token", null)
+        if (token.isNullOrEmpty()) { notify("未配对 — 请先在 app 里用配对码配对"); return stopSelf() }
+        val baseUrl = prefs().getString("cloud_url", "http://127.0.0.1:18081")!!
+        notify("连接中 $baseUrl …")
         val gateway = AgentGateway(baseUrl)
         ws = gateway.connect(token, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: okhttp3.Response) {
+                notify("● online — WSS 已连接")
                 heartbeatJob = scope.launch {
                     while (isActive) {
                         send(webSocket, "device.heartbeat", JSONObject().put("status", "online"))
@@ -76,8 +88,14 @@ class AgentForegroundService : Service() {
                     "device.session.revoke" -> stopSelf()
                 }
             }
-            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) { scheduleReconnect() }
-            override fun onFailure(webSocket: WebSocket, t: Throwable, response: okhttp3.Response?) { scheduleReconnect() }
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                notify("连接断开 ($code) — 5s 后重连")
+                scheduleReconnect()
+            }
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: okhttp3.Response?) {
+                notify("连接失败 (HTTP ${response?.code ?: "?"}) ${t.message ?: ""} — 5s 后重连")
+                scheduleReconnect()
+            }
         })
     }
 

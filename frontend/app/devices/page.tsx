@@ -37,7 +37,7 @@ export default function DevicesPage() {
         <p>
           <button onClick={genCode}>生成配对码</button>{" "}
           <span className="muted">
-            在手机 Agent 里只输入这个 8 位码即可配对，无需账号密码
+            在手机 Agent 里只输入这个 4 位数字码即可配对，无需账号密码 (配对成功后设备会话默认有效 60 天)
           </span>
         </p>
         {codeError && <p style={{ color: "#e06c5a" }}>生成失败: {codeError}</p>}

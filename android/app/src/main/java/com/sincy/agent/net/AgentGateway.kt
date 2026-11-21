@@ -18,7 +18,7 @@ class AgentGateway(private val baseUrl: String) {
     fun connect(token: String, listener: WebSocketListener): WebSocket {
         val url = baseUrl
             .replace("http://", "ws://")
-            .replace("https://", "wss://") + "/agent/connect?token=" + token
+            .replace("https://", "wss://") + "/api/v1/agent/connect?token=" + token
         val req = Request.Builder().url(url).build()
         return client.newWebSocket(req, listener)
     }
