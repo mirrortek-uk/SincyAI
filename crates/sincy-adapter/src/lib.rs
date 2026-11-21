@@ -11,6 +11,7 @@
 //!   the adapter degraded and blocks execution.
 
 pub mod drift;
+pub mod humanize;
 pub mod interpreter;
 pub mod schema;
 pub mod sign;

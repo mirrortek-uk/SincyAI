@@ -47,6 +47,8 @@ async fn main() {
     // --io scripted (default, canned snapshots) | --io adb (real touch via adb input)
     let io_mode = arg("io", Some("scripted"));
     let adb_device = arg("adb-device", None);
+    // --seed for the humanized gesture RNG (adb mode); empty = time-seeded
+    let adb_seed = arg("seed", Some(""));
 
     let screens: Vec<MockSnapshot> = serde_json::from_str::<Vec<serde_json::Value>>(&screens_json)
         .expect("screens must be a JSON array of {ids:[], texts:[]}")
@@ -115,7 +117,12 @@ async fn main() {
                     } else {
                         adb_device.clone()
                     };
-                    Box::new(sincy_agent::AdbIo::new(dev))
+                    let io = if adb_seed.is_empty() {
+                        sincy_agent::AdbIo::new(dev)
+                    } else {
+                        sincy_agent::AdbIo::with_seed(dev, adb_seed.parse::<u64>().unwrap_or(42))
+                    };
+                    Box::new(io)
                 } else {
                     Box::new(ScriptedIo::new(screens))
                 }

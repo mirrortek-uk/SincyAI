@@ -129,11 +129,67 @@ mod jni {
     use ::jni::sys::jstring;
     use ::jni::JNIEnv;
     use serde_json::json;
+    use sincy_adapter::humanize::{plan_swipe, plan_tap, HumanProfile, Rng};
     use sincy_adapter::interpreter::{Action, PlatformIo, ScreenSnapshot};
     use sincy_adapter::schema::FlowStep;
 
-    /// Snapshot JSON handed over from Kotlin (ids/texts arrays for anchor match).
+    /// Snapshot JSON handed over from Kotlin: ids/texts for anchor match plus a
+    /// nodes array with bounds (used to plan humanized gestures) and screen size.
     struct JsonSnapshot(String);
+
+    impl JsonSnapshot {
+        fn value(&self) -> serde_json::Value {
+            serde_json::from_str(&self.0)
+                .unwrap_or_else(|_| json!({"ids": [], "texts": [], "nodes": []}))
+        }
+
+        /// Bounds (l, t, r, b) of the first node matching a target anchor.
+        fn bounds_for(&self, target: &serde_json::Value) -> Option<(i32, i32, i32, i32)> {
+            let v = self.value();
+            let nodes = v["nodes"].as_array()?;
+            let id = target["id"].as_str().filter(|s| !s.is_empty());
+            let text = target["text"].as_str().filter(|s| !s.is_empty());
+            let any: Vec<&str> = target["text_any"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
+                .unwrap_or_default();
+            for n in nodes {
+                let nid = n["id"].as_str().unwrap_or("");
+                let ntext = n["text"].as_str().unwrap_or("");
+                let ndesc = n["desc"].as_str().unwrap_or("");
+                let hay = format!("{nid} {ntext} {ndesc}");
+                let id_ok = id.is_some_and(|id| {
+                    !nid.is_empty()
+                        && (nid == id
+                            || nid.ends_with(&format!("/{id}"))
+                            || nid.ends_with(&format!(":{id}")))
+                });
+                let text_ok = text.is_some_and(|t| ntext == t || ndesc == t);
+                let any_ok = !any.is_empty() && any.iter().any(|t| hay.contains(t));
+                if id_ok || text_ok || any_ok {
+                    let b = n["bounds"].as_array()?;
+                    if b.len() == 4 {
+                        return Some((
+                            b[0].as_i64()? as i32,
+                            b[1].as_i64()? as i32,
+                            b[2].as_i64()? as i32,
+                            b[3].as_i64()? as i32,
+                        ));
+                    }
+                }
+            }
+            None
+        }
+
+        fn screen_size(&self) -> (i32, i32) {
+            let v = self.value();
+            (
+                v["width"].as_i64().unwrap_or(1080) as i32,
+                v["height"].as_i64().unwrap_or(2400) as i32,
+            )
+        }
+    }
+
     impl ScreenSnapshot for JsonSnapshot {
         fn has_node_with_id(&self, id: &str) -> bool {
             serde_json::from_str::<serde_json::Value>(&self.0)
@@ -162,9 +218,14 @@ mod jni {
     /// Bridge that calls BACK into Kotlin: AdapterRuntime.snapshotJson() before each
     /// interpreter step, AdapterRuntime.performAction(json) for each action. The
     /// Kotlin accessibility service injects the real touch (dispatchGesture).
+    /// Humanization lives on the Rust side: the bridge resolves node bounds from
+    /// the snapshot and sends CONCRETE gesture plans (coordinates + timing) down.
     struct JniBridge<'a> {
         env: JNIEnv<'a>,
         thiz: JObject<'a>,
+        profile: HumanProfile,
+        rng: Rng,
+        last_snapshot: String,
     }
 
     impl<'a> PlatformIo for JniBridge<'a> {
@@ -181,13 +242,15 @@ mod jni {
                         .ok()
                         .map(|s| s.to_string_lossy().into_owned())
                 })
-                .unwrap_or_else(|| "{\"ids\":[],\"texts\":[]}".into());
+                .unwrap_or_else(|| "{\"ids\":[],\"texts\":[],\"nodes\":[]}".into());
+            self.last_snapshot = json.clone();
             Box::new(JsonSnapshot(json))
         }
 
         fn perform(&mut self, step: &FlowStep) -> Result<(), String> {
             let action = step.to_action(0).ok_or("step has no performable action")?;
-            let payload = action_json(&action);
+            let snap = JsonSnapshot(self.last_snapshot.clone());
+            let payload = action_payload(&action, &snap, &self.profile, &mut self.rng);
             let js = self.env.new_string(&payload).map_err(|e| e.to_string())?;
             let ok = self
                 .env
@@ -208,18 +271,60 @@ mod jni {
     }
 
     /// Serialize an interpreter action into the JSON contract Kotlin parses.
-    fn action_json(a: &Action) -> String {
+    /// Tap/scroll carry a concrete humanized plan; if the node bounds are not in
+    /// the snapshot we fall back to target-based resolution on the Kotlin side.
+    fn action_payload(a: &Action, snap: &JsonSnapshot, p: &HumanProfile, rng: &mut Rng) -> String {
         match a {
-            Action::Tap(t) => json!({"kind": "tap", "target": t}).to_string(),
-            Action::SetText { target, value } => {
-                json!({"kind": "set_text", "target": target, "value": value}).to_string()
+            Action::Tap(t) => {
+                let target = serde_json::to_value(t).unwrap_or_default();
+                if let Some(b) = snap.bounds_for(&target) {
+                    let plan = plan_tap(b, p, rng);
+                    json!({
+                        "kind": "tap",
+                        "x": plan.x, "y": plan.y,
+                        "hold_ms": plan.hold_ms,
+                        "pre_ms": plan.pre_ms, "post_ms": plan.post_ms,
+                    })
+                    .to_string()
+                } else {
+                    json!({"kind": "tap", "target": t}).to_string()
+                }
             }
-            Action::PickMedia { index } => {
-                json!({"kind": "pick_media", "index": index}).to_string()
+            Action::Scroll => {
+                let (w, h) = snap.screen_size();
+                let plan = plan_swipe(
+                    w / 2,
+                    (h as f64 * 0.72) as i32,
+                    w / 2 + rng.int(-30, 30),
+                    (h as f64 * 0.28) as i32,
+                    p,
+                    rng,
+                );
+                json!({
+                    "kind": "swipe",
+                    "segments": plan.segments,
+                    "post_ms": rng.range(250.0, 700.0) as u64,
+                })
+                .to_string()
             }
-            Action::Scroll => json!({"kind": "scroll"}).to_string(),
-            Action::Back => json!({"kind": "back"}).to_string(),
-            Action::CloseDialog => json!({"kind": "close_dialog"}).to_string(),
+            Action::SetText { target, value } => json!({
+                "kind": "set_text",
+                "target": target, "value": value,
+                "pre_ms": rng.range(120.0, 450.0) as u64,
+            })
+            .to_string(),
+            Action::PickMedia { index } => json!({
+                "kind": "pick_media", "index": index,
+                "pre_ms": rng.range(120.0, 450.0) as u64,
+            })
+            .to_string(),
+            Action::Back => {
+                json!({"kind": "back", "pre_ms": rng.range(120.0, 450.0) as u64}).to_string()
+            }
+            Action::CloseDialog => {
+                json!({"kind": "close_dialog", "pre_ms": rng.range(120.0, 450.0) as u64})
+                    .to_string()
+            }
         }
     }
 
@@ -246,7 +351,13 @@ mod jni {
             .get_string(&app_version)
             .map(|s| s.into())
             .unwrap_or_default();
-        let mut bridge = JniBridge { env, thiz };
+        let mut bridge = JniBridge {
+            env,
+            thiz,
+            profile: HumanProfile::default(),
+            rng: Rng::from_time(),
+            last_snapshot: "{\"ids\":[],\"texts\":[],\"nodes\":[]}".into(),
+        };
         let result = match run_adapter(
             &adapter_json,
             &signature,

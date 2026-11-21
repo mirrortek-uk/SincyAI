@@ -14,6 +14,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+use sincy_adapter::humanize::{HumanProfile, Rng, plan_swipe, plan_tap};
 use sincy_adapter::interpreter::{Action, PlatformIo, ScreenSnapshot};
 use sincy_adapter::schema::{Anchor, FlowStep};
 
@@ -165,15 +166,30 @@ pub fn adb_escape(s: &str) -> String {
 }
 
 /// PlatformIo over adb: real injected touch events on an emulator or USB phone.
+/// All gestures go through the shared humanizer (sincy_adapter::humanize) so
+/// taps/swipes look human: off-center jittered taps, bowed bezier swipe paths,
+/// ease-in-out segment timing, random pre/post delays.
 pub struct AdbIo {
     pub device: String,
     pub workdir: PathBuf,
     pub performed: Vec<String>,
     pub last_snapshot: Vec<UiNode>,
+    pub profile: HumanProfile,
+    pub rng: Rng,
+    screen_size: Option<(i32, i32)>,
 }
 
 impl AdbIo {
     pub fn new(device: String) -> Self {
+        Self::with_rng(device, Rng::from_time())
+    }
+
+    /// Deterministic-seed constructor (sim `--seed`, reproducible runs).
+    pub fn with_seed(device: String, seed: u64) -> Self {
+        Self::with_rng(device, Rng::new(seed))
+    }
+
+    pub fn with_rng(device: String, rng: Rng) -> Self {
         let workdir = std::env::temp_dir().join("sincy-adb-io");
         std::fs::create_dir_all(&workdir).ok();
         Self {
@@ -181,7 +197,41 @@ impl AdbIo {
             workdir,
             performed: vec![],
             last_snapshot: vec![],
+            profile: HumanProfile::default(),
+            rng,
+            screen_size: None,
         }
+    }
+
+    fn sleep_ms(ms: u64) {
+        if ms > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+        }
+    }
+
+    /// Physical screen size via `wm size` (cached).
+    fn screen_size(&mut self) -> (i32, i32) {
+        if let Some(s) = self.screen_size {
+            return s;
+        }
+        let out = self.shell("wm size");
+        let txt = String::from_utf8_lossy(&out.stdout);
+        let size = txt
+            .split_whitespace()
+            .last()
+            .and_then(|s| {
+                s.split('x').next().and_then(|w| w.parse().ok()).map(|w| {
+                    let h = s
+                        .split('x')
+                        .nth(1)
+                        .and_then(|h| h.parse().ok())
+                        .unwrap_or(2400);
+                    (w, h)
+                })
+            })
+            .unwrap_or((1080, 2400));
+        self.screen_size = Some(size);
+        size
     }
 
     fn adb(&self, args: &[&str]) -> std::process::Output {
@@ -243,40 +293,86 @@ impl PlatformIo for AdbIo {
                 let node = self
                     .find_node(anchor)
                     .ok_or_else(|| format!("no node for anchor {anchor:?}"))?;
-                let (x, y) = node
-                    .center()
+                let bounds = node
+                    .bounds
                     .ok_or_else(|| format!("node {:?} has no bounds", node.id))?;
-                let o = self.shell(&format!("input tap {x} {y}"));
+                let plan = plan_tap(bounds, &self.profile, &mut self.rng);
+                Self::sleep_ms(plan.pre_ms);
+                let o = self.shell(&format!("input tap {} {}", plan.x, plan.y));
                 if !o.status.success() {
                     return Err(format!(
                         "input tap failed: {}",
                         String::from_utf8_lossy(&o.stderr)
                     ));
                 }
+                Self::sleep_ms(plan.post_ms);
             }
             Action::SetText { target, value } => {
                 let node = self
                     .find_node(target)
                     .ok_or_else(|| format!("no node for set_text target {target:?}"))?;
                 if let Some((x, y)) = node.center() {
-                    let _ = self.shell(&format!("input tap {x} {y}"));
+                    // human-like focus tap: jittered, with pre/post delays
+                    let plan = plan_tap(
+                        node.bounds.unwrap_or((x - 50, y - 20, x + 50, y + 20)),
+                        &self.profile,
+                        &mut self.rng,
+                    );
+                    Self::sleep_ms(plan.pre_ms);
+                    let _ = self.shell(&format!("input tap {} {}", plan.x, plan.y));
+                    Self::sleep_ms(plan.post_ms);
                 }
-                std::thread::sleep(std::time::Duration::from_millis(300));
-                let o = self.shell(&format!("input text {}", adb_escape(value)));
-                if !o.status.success() {
-                    return Err(format!(
-                        "input text failed: {}",
-                        String::from_utf8_lossy(&o.stderr)
-                    ));
+                // type in chunks with human gaps instead of one instant dump
+                for chunk in value.split_inclusive(' ') {
+                    let piece = chunk.trim_end_matches(' ');
+                    if !piece.is_empty() {
+                        let o = self.shell(&format!("input text {}", adb_escape(piece)));
+                        if !o.status.success() {
+                            return Err(format!(
+                                "input text failed: {}",
+                                String::from_utf8_lossy(&o.stderr)
+                            ));
+                        }
+                    }
+                    if chunk.ends_with(' ') {
+                        let _ = self.shell(&format!("input text {}", adb_escape(" ")));
+                    }
+                    Self::sleep_ms(self.rng.range(60.0, 220.0) as u64);
                 }
             }
             Action::Back => {
+                Self::sleep_ms(self.rng.range(120.0, 450.0) as u64);
                 let _ = self.shell("input keyevent KEYCODE_BACK");
             }
             Action::Scroll => {
-                let _ = self.shell("input swipe 540 1500 540 700 300");
+                let (w, h) = self.screen_size();
+                let plan = plan_swipe(
+                    w / 2,
+                    (h as f64 * 0.72) as i32,
+                    w / 2 + self.rng.int(-30, 30),
+                    (h as f64 * 0.28) as i32,
+                    &self.profile,
+                    &mut self.rng,
+                );
+                // adb `input swipe` only takes endpoints, so a curved human path
+                // is approximated as chained short swipes; the APK backend runs
+                // the same plan as ONE continuous multi-stroke gesture.
+                for seg in &plan.segments {
+                    let o = self.shell(&format!(
+                        "input swipe {} {} {} {} {}",
+                        seg.x1, seg.y1, seg.x2, seg.y2, seg.ms
+                    ));
+                    if !o.status.success() {
+                        return Err(format!(
+                            "input swipe failed: {}",
+                            String::from_utf8_lossy(&o.stderr)
+                        ));
+                    }
+                }
+                Self::sleep_ms(self.rng.range(250.0, 700.0) as u64);
             }
             Action::PickMedia { .. } | Action::CloseDialog => {
+                Self::sleep_ms(self.rng.range(120.0, 450.0) as u64);
                 let _ = self.shell("input keyevent KEYCODE_BACK");
             }
         }

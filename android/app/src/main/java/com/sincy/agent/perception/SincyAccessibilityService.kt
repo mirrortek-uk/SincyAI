@@ -40,7 +40,7 @@ class SincyAccessibilityService : AccessibilityService() {
     companion object {
 
         @Volatile
-        private var latestSnapshot: String = "{\"ids\":[],\"texts\":[],\"nodes\":[]}"
+        private var latestSnapshot: String = "{\"ids\":[],\"texts\":[],\"nodes\":[],\"width\":1080,\"height\":2400}"
 
         @Volatile
         var instance: SincyAccessibilityService? = null
@@ -60,22 +60,52 @@ class SincyAccessibilityService : AccessibilityService() {
 
         /**
          * Perform one interpreter action. actionJson =
-         * {"kind":"tap|set_text|back|scroll|pick_media|close_dialog",
-         *  "target":{"id","text","text_any"}, "value":...}
+         * {"kind":"tap|swipe|set_text|back|pick_media|close_dialog", ...}
+         *
+         * The Rust core sends CONCRETE humanized gesture plans (planned by
+         * sincy-adapter::humanize): tap carries {x,y,hold_ms,pre_ms,post_ms},
+         * swipe carries {segments:[{x1,y1,x2,y2,ms}],post_ms} — a bowed bezier
+         * path with ease-in-out segment timing, executed as ONE continuous
+         * multi-stroke dispatchGesture (willContinue). If coordinates are
+         * absent we fall back to resolving "target" against the node tree.
          * Returns true when an input event was dispatched.
          */
         fun performAction(actionJson: String): Boolean {
             val svc = instance ?: return false
             val a = try { JSONObject(actionJson) } catch (e: Exception) { return false }
             val kind = a.optString("kind")
-            val target = a.optJSONObject("target")
+            val pre = a.optLong("pre_ms", 0)
             return when (kind) {
-                "tap" -> tap(svc, target)
-                "set_text" -> setText(svc, target, a.optString("value"))
-                "back", "close_dialog", "pick_media" -> svc.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
-                "scroll" -> swipe(svc, up = true)
+                "tap" -> {
+                    if (a.has("x") && a.has("y")) {
+                        sleepQuiet(pre)
+                        val ok = tapAt(svc, a.getInt("x"), a.getInt("y"), a.optLong("hold_ms", 80))
+                        sleepQuiet(a.optLong("post_ms", 0))
+                        ok
+                    } else {
+                        tap(svc, a.optJSONObject("target"))
+                    }
+                }
+                "swipe", "scroll" -> {
+                    val segs = a.optJSONArray("segments")
+                    val ok = if (segs != null && segs.length() > 0) swipePlan(svc, segs) else swipe(svc, up = true)
+                    sleepQuiet(a.optLong("post_ms", 0))
+                    ok
+                }
+                "set_text" -> {
+                    sleepQuiet(pre)
+                    setText(svc, a.optJSONObject("target"), a.optString("value"))
+                }
+                "back", "close_dialog", "pick_media" -> {
+                    sleepQuiet(pre)
+                    svc.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+                }
                 else -> false
             }
+        }
+
+        private fun sleepQuiet(ms: Long) {
+            if (ms > 0) try { Thread.sleep(ms) } catch (_: InterruptedException) {}
         }
 
         private fun findNode(root: AccessibilityNodeInfo, target: JSONObject?): AccessibilityNodeInfo? {
@@ -116,16 +146,33 @@ class SincyAccessibilityService : AccessibilityService() {
                 val cx = r.centerX().toFloat()
                 val cy = r.centerY().toFloat()
                 root.recycle()
-                val path = Path().apply { moveTo(cx, cy); lineTo(cx + 0.1f, cy) }
-                val stroke = GestureDescription.StrokeDescription(path, 0, 80)
-                val gesture = GestureDescription.Builder().addStroke(stroke).build()
-                val dispatched = svc.dispatchGesture(gesture, null, null)
-                if (dispatched) return true
-                // fallback: semantic click on the node itself
-                return node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                return tapAt(svc, cx.toInt(), cy.toInt(), 80)
             }
             root.recycle()
             return false
+        }
+
+        /** dispatchGesture click at an exact (already humanized) point, with a hold. */
+        private fun tapAt(svc: SincyAccessibilityService, x: Int, y: Int, holdMs: Long): Boolean {
+            val path = Path().apply { moveTo(x.toFloat(), y.toFloat()); lineTo(x + 0.1f, y.toFloat()) }
+            val stroke = GestureDescription.StrokeDescription(path, 0, holdMs.coerceAtLeast(30))
+            val gesture = GestureDescription.Builder().addStroke(stroke).build()
+            if (svc.dispatchGesture(gesture, null, null)) return true
+            // fallback: semantic click on the deepest clickable node containing the point
+            val root = svc.rootInActiveWindow ?: return false
+            val hit = findClickableAt(root, x, y)
+            root.recycle()
+            return hit?.performAction(AccessibilityNodeInfo.ACTION_CLICK) ?: false
+        }
+
+        private fun findClickableAt(node: AccessibilityNodeInfo, x: Int, y: Int): AccessibilityNodeInfo? {
+            val r = android.graphics.Rect()
+            node.getBoundsInScreen(r)
+            if (node.isClickable && r.contains(x, y)) return node
+            for (i in 0 until node.childCount) {
+                node.getChild(i)?.let { c -> findClickableAt(c, x, y)?.let { return it } }
+            }
+            return null
         }
 
         /** Set text into an editable node: focus + ACTION_SET_TEXT, clipboard paste as fallback. */
@@ -155,7 +202,7 @@ class SincyAccessibilityService : AccessibilityService() {
             return true
         }
 
-        /** Real injected swipe (scroll). */
+        /** Real injected swipe (scroll) — legacy fixed path. */
         private fun swipe(svc: SincyAccessibilityService, up: Boolean): Boolean {
             val path = Path().apply {
                 if (up) { moveTo(540f, 1500f); lineTo(540f, 700f) } else { moveTo(540f, 700f); lineTo(540f, 1500f) }
@@ -165,10 +212,37 @@ class SincyAccessibilityService : AccessibilityService() {
             return svc.dispatchGesture(gesture, null, null)
         }
 
+        /**
+         * Execute a humanized swipe plan as ONE continuous gesture: each segment
+         * becomes a StrokeDescription with willContinue=true (except the last),
+         * startTime offset by the cumulative segment durations — so the finger
+         * follows the bowed, jittered path with ease-in-out speed instead of a
+         * single straight constant-speed line.
+         */
+        private fun swipePlan(svc: SincyAccessibilityService, segs: JSONArray): Boolean {
+            val builder = GestureDescription.Builder()
+            var start = 0L
+            for (i in 0 until segs.length()) {
+                val s = segs.getJSONObject(i)
+                val path = Path().apply {
+                    moveTo(s.getInt("x1").toFloat(), s.getInt("y1").toFloat())
+                    lineTo(s.getInt("x2").toFloat(), s.getInt("y2").toFloat())
+                }
+                val ms = s.optLong("ms", 50).coerceAtLeast(16)
+                val willContinue = i < segs.length() - 1
+                builder.addStroke(GestureDescription.StrokeDescription(path, start, ms, willContinue))
+                start += ms
+            }
+            return svc.dispatchGesture(builder.build(), null, null)
+        }
+
         private fun summarize(root: AccessibilityNodeInfo): String {
             val ids = JSONArray()
             val texts = JSONArray()
             val nodes = JSONArray()
+            val dm = instance?.resources?.displayMetrics
+            val width = dm?.widthPixels ?: 1080
+            val height = dm?.heightPixels ?: 2400
             fun walk(node: AccessibilityNodeInfo, depth: Int) {
                 if (depth > 14) return
                 val r = android.graphics.Rect()
@@ -191,7 +265,13 @@ class SincyAccessibilityService : AccessibilityService() {
                 }
             }
             walk(root, 0)
-            return JSONObject().put("ids", ids).put("texts", texts).put("nodes", nodes).toString()
+            return JSONObject()
+                .put("ids", ids)
+                .put("texts", texts)
+                .put("nodes", nodes)
+                .put("width", width)
+                .put("height", height)
+                .toString()
         }
     }
 
