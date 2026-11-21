@@ -39,4 +39,15 @@ object AdapterRuntime {
      * @param appVersion   installed versionName of the target app
      */
     external fun runAdapter(adapterJson: String, signature: String, appVersion: String): String
+
+    /** Called by the Rust core before each interpreter step: current screen summary. */
+    fun snapshotJson(): String =
+        com.sincy.agent.perception.SincyAccessibilityService.currentSnapshotJson()
+
+    /**
+     * Called by the Rust core for each step action; the accessibility service
+     * resolves the anchor to a node and injects a real touch (dispatchGesture).
+     */
+    fun performAction(actionJson: String): Boolean =
+        com.sincy.agent.perception.SincyAccessibilityService.performAction(actionJson)
 }

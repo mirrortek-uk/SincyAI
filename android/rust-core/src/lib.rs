@@ -125,60 +125,111 @@ mod tests {
 #[cfg(target_os = "android")]
 mod jni {
     use super::*;
-    use ::jni::objects::{JClass, JString};
+    use ::jni::objects::{JObject, JString, JValue};
     use ::jni::sys::jstring;
     use ::jni::JNIEnv;
-    use sincy_adapter::interpreter::ScreenSnapshot;
+    use serde_json::json;
+    use sincy_adapter::interpreter::{Action, PlatformIo, ScreenSnapshot};
     use sincy_adapter::schema::FlowStep;
-    use std::sync::Mutex;
 
-    /// Bridge implemented on the Kotlin side (perception/NodeTreeBridge):
-    /// `snapshotJson()` returns the current screen summary, `perform(actionJson)`
-    /// executes one interpreter action on the node tree.
-    pub struct KotlinBridge {
-        pub snapshot: Mutex<String>,
-        pub performed: Mutex<Vec<String>>,
-    }
-
-    impl PlatformIo for KotlinBridge {
-        fn snapshot(&mut self) -> Box<dyn ScreenSnapshot> {
-            // parsed on the Kotlin side into a node list; here we wrap the raw json
-            let json = self.snapshot.lock().unwrap().clone();
-            Box::new(JsonSnapshot(json))
-        }
-        fn perform(&mut self, step: &FlowStep) -> Result<(), String> {
-            self.performed
-                .lock()
-                .unwrap()
-                .push(serde_json::to_string(step).unwrap_or_default());
-            Ok(())
-        }
-    }
-
+    /// Snapshot JSON handed over from Kotlin (ids/texts arrays for anchor match).
     struct JsonSnapshot(String);
     impl ScreenSnapshot for JsonSnapshot {
         fn has_node_with_id(&self, id: &str) -> bool {
             serde_json::from_str::<serde_json::Value>(&self.0)
                 .ok()
                 .and_then(|v| v["ids"].as_array().cloned())
-                .map(|a| a.iter().any(|x| x.as_str() == Some(id)))
+                .map(|a| {
+                    a.iter().any(|x| {
+                        let x = x.as_str().unwrap_or("");
+                        x == id || x.ends_with(&format!("/{id}")) || x.ends_with(&format!(":{id}"))
+                    })
+                })
                 .unwrap_or(false)
         }
         fn has_text(&self, text: &str) -> bool {
             serde_json::from_str::<serde_json::Value>(&self.0)
                 .ok()
                 .and_then(|v| v["texts"].as_array().cloned())
-                .map(|a| a.iter().any(|x| x.as_str() == Some(text)))
+                .map(|a| {
+                    a.iter()
+                        .any(|x| x.as_str().map(|t| t.trim() == text.trim()).unwrap_or(false))
+                })
                 .unwrap_or(false)
         }
     }
 
+    /// Bridge that calls BACK into Kotlin: AdapterRuntime.snapshotJson() before each
+    /// interpreter step, AdapterRuntime.performAction(json) for each action. The
+    /// Kotlin accessibility service injects the real touch (dispatchGesture).
+    struct JniBridge<'a> {
+        env: JNIEnv<'a>,
+        thiz: JObject<'a>,
+    }
+
+    impl<'a> PlatformIo for JniBridge<'a> {
+        fn snapshot(&mut self) -> Box<dyn ScreenSnapshot> {
+            let json = self
+                .env
+                .call_method(&self.thiz, "snapshotJson", "()Ljava/lang/String;", &[])
+                .and_then(|v| v.l())
+                .ok()
+                .and_then(|o| {
+                    let js = JString::from(o);
+                    self.env
+                        .get_string(&js)
+                        .ok()
+                        .map(|s| s.to_string_lossy().into_owned())
+                })
+                .unwrap_or_else(|| "{\"ids\":[],\"texts\":[]}".into());
+            Box::new(JsonSnapshot(json))
+        }
+
+        fn perform(&mut self, step: &FlowStep) -> Result<(), String> {
+            let action = step.to_action(0).ok_or("step has no performable action")?;
+            let payload = action_json(&action);
+            let js = self.env.new_string(&payload).map_err(|e| e.to_string())?;
+            let ok = self
+                .env
+                .call_method(
+                    &self.thiz,
+                    "performAction",
+                    "(Ljava/lang/String;)Z",
+                    &[JValue::Object(&js)],
+                )
+                .and_then(|v| v.z())
+                .map_err(|e| e.to_string())?;
+            if ok {
+                Ok(())
+            } else {
+                Err(format!("performAction rejected: {payload}"))
+            }
+        }
+    }
+
+    /// Serialize an interpreter action into the JSON contract Kotlin parses.
+    fn action_json(a: &Action) -> String {
+        match a {
+            Action::Tap(t) => json!({"kind": "tap", "target": t}).to_string(),
+            Action::SetText { target, value } => {
+                json!({"kind": "set_text", "target": target, "value": value}).to_string()
+            }
+            Action::PickMedia { index } => {
+                json!({"kind": "pick_media", "index": index}).to_string()
+            }
+            Action::Scroll => json!({"kind": "scroll"}).to_string(),
+            Action::Back => json!({"kind": "back"}).to_string(),
+            Action::CloseDialog => json!({"kind": "close_dialog"}).to_string(),
+        }
+    }
+
     /// Java_com_sincy_agent_adapter_AdapterRuntime_runAdapter
-    /// (adapterJson, signature, appVersion) -> result JSON string.
+    /// Instance method of the Kotlin `object AdapterRuntime`, so JNI receives
+    /// (env, thiz, adapterJson, signature, appVersion) -> result JSON string.
     #[no_mangle]
     pub extern "C" fn Java_com_sincy_agent_adapter_AdapterRuntime_runAdapter(
         mut env: JNIEnv,
-        _class: JClass,
+        thiz: JObject,
         adapter_json: JString,
         signature: JString,
         app_version: JString,
@@ -195,23 +246,12 @@ mod jni {
             .get_string(&app_version)
             .map(|s| s.into())
             .unwrap_or_default();
-        let result = run_adapter_with_bridge(&adapter_json, &signature, &app_version);
-        let out = env.new_string(result).unwrap_or_default();
-        out.into_raw()
-    }
-
-    fn run_adapter_with_bridge(adapter_json: &str, signature: &str, app_version: &str) -> String {
-        // The Kotlin NodeTreeBridge fills the snapshot before each step via the
-        // accessibility service; here we execute with that bridge.
-        let mut bridge = KotlinBridge {
-            snapshot: Mutex::new(String::from("{\"ids\":[],\"texts\":[]}")),
-            performed: Mutex::new(vec![]),
-        };
-        match run_adapter(
-            adapter_json,
-            signature,
+        let mut bridge = JniBridge { env, thiz };
+        let result = match run_adapter(
+            &adapter_json,
+            &signature,
             PINNED_SIGNING_KEY,
-            app_version,
+            &app_version,
             &mut bridge,
             0,
         ) {
@@ -224,6 +264,9 @@ mod jni {
                 events: vec![e],
             })
             .unwrap_or_else(|_| "{\"outcome\":\"refused\"}".into()),
-        }
+        };
+        let env = bridge.env;
+        let out = env.new_string(result).unwrap_or_default();
+        out.into_raw()
     }
 }

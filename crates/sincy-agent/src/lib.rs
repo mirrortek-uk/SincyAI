@@ -15,8 +15,10 @@
 //! - after the side_effect step, any failure is Uncertain (VERIFICATION_PENDING),
 //!   never auto-retried or degraded.
 
+pub mod adb_io;
 pub mod client;
 pub mod execute;
 
+pub use adb_io::AdbIo;
 pub use client::{AgentClient, AgentError, TaskBrief};
 pub use execute::{AdapterExecution, ScriptedIo, TaskOutcome, execute_signed_adapter};

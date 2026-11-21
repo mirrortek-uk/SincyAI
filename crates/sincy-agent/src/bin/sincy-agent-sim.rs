@@ -44,6 +44,9 @@ async fn main() {
     let signing_key = arg("signing-key", Some("sincy-dev-adapter-signing-key"));
     let app_version = arg("app-version", Some("10.5.0"));
     let screens_json = arg("screens", Some("[]"));
+    // --io scripted (default, canned snapshots) | --io adb (real touch via adb input)
+    let io_mode = arg("io", Some("scripted"));
+    let adb_device = arg("adb-device", None);
 
     let screens: Vec<MockSnapshot> = serde_json::from_str::<Vec<serde_json::Value>>(&screens_json)
         .expect("screens must be a JSON array of {ids:[], texts:[]}")
@@ -79,10 +82,44 @@ async fn main() {
         signing_key: signing_key.into_bytes(),
     };
 
-    println!("sim agent: waiting for a device.task.assign ...");
+    println!(
+        "sim agent: waiting for a device.task.assign ... (io={io_mode}{})",
+        if io_mode == "adb" {
+            format!(
+                ", adb-device={}",
+                if adb_device.is_empty() {
+                    "<auto>".into()
+                } else {
+                    adb_device.clone()
+                }
+            )
+        } else {
+            String::new()
+        }
+    );
     let result = client
         .run_next_task(
-            move || Box::new(ScriptedIo::new(screens)),
+            move || -> Box<dyn sincy_adapter::interpreter::PlatformIo + Send> {
+                if io_mode == "adb" {
+                    let dev = if adb_device.is_empty() {
+                        // first device from `adb devices`
+                        let out = std::process::Command::new("adb")
+                            .args(["devices"])
+                            .output()
+                            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                            .unwrap_or_default();
+                        out.lines()
+                            .skip(1)
+                            .find_map(|l| l.split_whitespace().next().map(String::from))
+                            .unwrap_or_else(|| "emulator-5554".into())
+                    } else {
+                        adb_device.clone()
+                    };
+                    Box::new(sincy_agent::AdbIo::new(dev))
+                } else {
+                    Box::new(ScriptedIo::new(screens))
+                }
+            },
             &app_version,
             std::time::Duration::from_secs(30),
         )
