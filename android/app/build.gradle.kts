@@ -24,9 +24,16 @@ android {
 
         // 配对界面预填默认值: 构建期从环境变量注入, 代码仓库里不落任何密码.
         // 本地生产包构建脚本会从 /d/tmp/sincy-prod.env 读取; 不设置则为空, 手工填写.
-        buildConfigField("String", "DEFAULT_SERVER", "\"${System.getenv("SINCY_AGENT_DEFAULT_SERVER") ?: "http://127.0.0.1:18081"}\"")
-        buildConfigField("String", "DEFAULT_EMAIL", "\"${System.getenv("SINCY_AGENT_DEFAULT_EMAIL") ?: ""}\"")
-        buildConfigField("String", "DEFAULT_PASSWORD", "\"${System.getenv("SINCY_AGENT_DEFAULT_PASSWORD") ?: ""}\"")
+        // 优先 -PsincyAgentDefault* (gradle daemon 不刷新 env, -P 每次构建都生效), 其次环境变量
+        val defServer = (project.findProperty("sincyAgentDefaultServer") as String?)
+            ?: System.getenv("SINCY_AGENT_DEFAULT_SERVER") ?: "http://127.0.0.1:18081"
+        val defEmail = (project.findProperty("sincyAgentDefaultEmail") as String?)
+            ?: System.getenv("SINCY_AGENT_DEFAULT_EMAIL") ?: ""
+        val defPass = (project.findProperty("sincyAgentDefaultPassword") as String?)
+            ?: System.getenv("SINCY_AGENT_DEFAULT_PASSWORD") ?: ""
+        buildConfigField("String", "DEFAULT_SERVER", "\"$defServer\"")
+        buildConfigField("String", "DEFAULT_EMAIL", "\"$defEmail\"")
+        buildConfigField("String", "DEFAULT_PASSWORD", "\"$defPass\"")
     }
 
     // 正式签名: android/key.properties (gitignored) -> keys/sincy-release.jks
