@@ -94,7 +94,7 @@ async fn architecture(
             "title": "业务域 crates",
             "nodes": [
                 node("de", "数字员工 sincy-employee", "lifecycle · cycle · agents(6) · skills · memory",
-                     "状态机 CREATED→READY→RUNNING→PAUSED→STOPPED; 10 步运营周期(可恢复, 步级幂等, 每步记录调用的 agent+skills); 6 核心 agent 按域动态调用 skill; 版本化身份/使命/策略/skill; 结构化记忆+洞察"),
+                     "状态机 CREATED→READY→RUNNING→PAUSED→STOPPED; 10 步运营周期(可恢复, 步级幂等, 每步记录调用的 agent+skills); 后台调度器按 strategy.cadence_per_week 自动触发 scheduled 周期; 6 核心 agent 按域动态调用 skill; 版本化身份/使命/策略/skill; 结构化记忆+洞察"),
                 node("wi", "世界情报 sincy-intel", "registry · router · opportunity · adapter",
                      "信源/Provider 注册表; 路由打分 健康.45+可靠.30+限流.15+成本.10 + 降级链; ingest 按 dedup_key 去重; 机会引擎; DE 适配器(只给建议不改策略)"),
                 node("pub", "发布管线 routing/execution/platform/content", "publish_core",

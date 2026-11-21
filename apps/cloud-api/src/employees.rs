@@ -588,7 +588,7 @@ async fn start_cycle(
     Json(body): Json<StartCycleBody>,
 ) -> Result<Json<Value>, axum::response::Response> {
     let pool = state.pool().map_err(app_error_response)?;
-    let (emp, identity, mission, strategy) = load_full(pool, id).await?;
+    let (emp, _identity, _mission, _strategy) = load_full(pool, id).await?;
     // ownership check
     if emp.agency_id != *auth.agency_id.as_uuid() {
         return Err(app_error_response(sincy_common::AppError::non_retryable(
@@ -606,24 +606,15 @@ async fn start_cycle(
         .idempotency_key
         .clone()
         .unwrap_or_else(|| format!("cycle-{}", Uuid::new_v4()));
-    let allow_mock = state.allow_mock_adapters;
-    let jwt_secret = state.jwt_secret().to_vec();
-
-    let deps = CycleDeps {
-        store: Box::new(PgCycleStore { pool: pool.clone() }),
-        intel: Box::new(PgIntelPort { pool: pool.clone() }),
-        llm: Box::new(PgLlmPort { allow_mock }),
-        publish: Box::new(PgPublishPort {
-            pool: pool.clone(),
-            agency: auth.agency_id,
-            allow_mock,
-            jwt_secret,
-        }),
-    };
     let trigger = body.trigger.unwrap_or_else(|| "manual".into());
-    let skills = crate::skills::load_bound_skills(pool, id).await?;
-    let outcome = run_cycle(
-        &deps, &emp, &identity, &mission, &strategy, &skills, &trigger, &idem,
+    let outcome = run_cycle_for(
+        pool,
+        auth.agency_id,
+        id,
+        &trigger,
+        &idem,
+        state.allow_mock_adapters,
+        state.jwt_secret(),
     )
     .await
     .map_err(|e| app_error_response(sincy_common::AppError::retryable("cycle", e)))?;
@@ -636,6 +627,123 @@ async fn start_cycle(
         "task_state": outcome.task_state,
         "summary": outcome.summary,
     })))
+}
+
+/// 执行一个运营周期的共享实现 (HTTP 手工触发 + 后台调度器共用)。
+pub(crate) async fn run_cycle_for(
+    pool: &sqlx::PgPool,
+    agency: sincy_common::AgencyId,
+    id: Uuid,
+    trigger: &str,
+    idem: &str,
+    allow_mock: bool,
+    jwt_secret: &[u8],
+) -> Result<sincy_employee::CycleOutcome, String> {
+    let (emp, identity, mission, strategy) = load_full(pool, id)
+        .await
+        .map_err(|e| format!("load employee: {e:?}"))?;
+    if emp.agency_id != *agency.as_uuid() {
+        return Err("not your employee".into());
+    }
+    if emp.status != EmployeeStatus::Running {
+        return Err(format!(
+            "employee status is {}; start it first",
+            emp.status.as_str()
+        ));
+    }
+    let deps = CycleDeps {
+        store: Box::new(PgCycleStore { pool: pool.clone() }),
+        intel: Box::new(PgIntelPort { pool: pool.clone() }),
+        llm: Box::new(PgLlmPort { allow_mock }),
+        publish: Box::new(PgPublishPort {
+            pool: pool.clone(),
+            agency,
+            allow_mock,
+            jwt_secret: jwt_secret.to_vec(),
+        }),
+    };
+    let skills = crate::skills::load_bound_skills(pool, id)
+        .await
+        .map_err(|e| format!("load skills: {e:?}"))?;
+    run_cycle(
+        &deps, &emp, &identity, &mission, &strategy, &skills, trigger, idem,
+    )
+    .await
+}
+
+/// 后台调度器 (DE: strategy.cadence_per_week 决定周期节奏)。
+/// 每 SINCY_EMPLOYEE_SCHEDULER_INTERVAL_SECS (默认 60s) 扫描一次 RUNNING 员工,
+/// 上次周期(或创建时间)超过 cadence 间隔的就自动跑一个 trigger=scheduled 的周期。
+/// 幂等键按小时分桶: sched-<emp>-<yyyymmddhh>, 同一小时不会重复触发。
+/// SINCY_EMPLOYEE_SCHEDULER_ENABLED=false 可关闭。
+pub fn spawn_scheduler(state: crate::state::AppState) {
+    let interval_secs: u64 = std::env::var("SINCY_EMPLOYEE_SCHEDULER_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60);
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+        loop {
+            tick.tick().await;
+            let pool = match state.pool() {
+                Ok(p) => p.clone(),
+                Err(_) => continue,
+            };
+            let due: Vec<Uuid> = match sqlx::query_scalar(
+                "SELECT e.id FROM digital_employees e \
+                 JOIN employee_strategies s ON s.employee_id = e.id AND s.status = 'ACTIVE' \
+                 WHERE e.status = 'RUNNING' \
+                   AND COALESCE( \
+                       (SELECT c.created_at FROM operating_cycles c WHERE c.employee_id = e.id ORDER BY c.created_at DESC LIMIT 1), \
+                       e.created_at) \
+                     + make_interval(secs => (604800.0 / GREATEST(COALESCE(NULLIF(s.strategy->>'cadence_per_week','')::int, 7), 1))::float8) \
+                   <= now()",
+            )
+            .fetch_all(&pool)
+            .await
+            {
+                Ok(rows) => rows,
+                Err(e) => {
+                    tracing::warn!(error = %e, "employee scheduler: due query failed");
+                    continue;
+                }
+            };
+            for emp_id in due {
+                let bucket = chrono::Utc::now().format("%Y%m%d%H").to_string();
+                let idem = format!("sched-{emp_id}-{bucket}");
+                let agency_row: Option<(Uuid,)> =
+                    sqlx::query_as("SELECT agency_id FROM digital_employees WHERE id = $1")
+                        .bind(emp_id)
+                        .fetch_optional(&pool)
+                        .await
+                        .ok()
+                        .flatten();
+                let Some((agency_uuid,)) = agency_row else {
+                    continue;
+                };
+                let agency = sincy_common::AgencyId::from_uuid(agency_uuid);
+                tracing::info!(%emp_id, %idem, "employee scheduler: running scheduled cycle");
+                match run_cycle_for(
+                    &pool,
+                    agency,
+                    emp_id,
+                    "scheduled",
+                    &idem,
+                    state.allow_mock_adapters,
+                    state.jwt_secret(),
+                )
+                .await
+                {
+                    Ok(out) => {
+                        tracing::info!(%emp_id, cycle = %out.cycle_id, state = %out.state, topic = ?out.selected_opportunity, "scheduled cycle done");
+                    }
+                    Err(e) => {
+                        tracing::warn!(%emp_id, error = %e, "scheduled cycle failed");
+                    }
+                }
+            }
+        }
+    });
 }
 
 async fn get_cycle(

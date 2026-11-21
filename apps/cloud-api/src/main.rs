@@ -42,7 +42,7 @@ async fn main() {
 
     let app = Router::new()
         .nest("/api/v1", cloud_api::routes())
-        .with_state(state)
+        .with_state(state.clone())
         .fallback(cloud_api::api::not_found);
 
     // World Intelligence collector (WI §9): background loop over registered
@@ -59,6 +59,17 @@ async fn main() {
             "intel collector starting"
         );
         tokio::spawn(cloud_api::intel_collector::run_loop(pool, cfg));
+    }
+
+    // Digital Employee scheduler (DE §cadence): auto-runs operating cycles for
+    // RUNNING employees per strategy.cadence_per_week. Disable with
+    // SINCY_EMPLOYEE_SCHEDULER_ENABLED=false.
+    if std::env::var("SINCY_EMPLOYEE_SCHEDULER_ENABLED")
+        .map(|v| v != "false")
+        .unwrap_or(true)
+    {
+        tracing::info!("employee scheduler starting");
+        cloud_api::employees::spawn_scheduler(state.clone());
     }
 
     let addr = SocketAddr::from(([0, 0, 0, 0], cfg.http.port));
