@@ -341,8 +341,12 @@ fn run_agentic_loop(
 
     let mut events: Vec<ExecEvent> = vec![];
     let mut history: Vec<String> = vec![];
+    let mut prev_describe = String::new();
+    let mut last_decision = String::new();
+    let mut repeat_count = 0usize;
     for step in 1..=max_steps {
         let snap = io.snapshot();
+        let describe = snap.describe();
         // challenge screens park for a human without relying on the LLM
         for ct in &challenge_texts {
             if snap.has_text(ct) {
@@ -355,12 +359,19 @@ fn run_agentic_loop(
                 });
             }
         }
+        // 屏幕没变化时明确告诉 LLM, 防止它对着同一个目标点 30 次
+        if !prev_describe.is_empty() && describe == prev_describe && step > 1 {
+            history.push(format!(
+                "NOTE: screen UNCHANGED after step {} — do not repeat the same action, pick a different target or scroll",
+                step - 1
+            ));
+        }
         let req = serde_json::json!({
             "goal": goal,
             "step": step,
             "max_steps": max_steps,
             "allowed_actions": allowed,
-            "screen": snap.describe(),
+            "screen": describe,
             "history": history,
         });
         let decision = match io.llm_decide(&req) {
@@ -379,6 +390,25 @@ fn run_agentic_loop(
             .get("action")
             .and_then(|a| a.as_str())
             .unwrap_or("");
+        // 连续 3 次完全相同的决策 => 死循环, 立即失败而不是烧完 max_steps
+        let decision_str = decision.to_string();
+        if decision_str == last_decision && action != "done" && action != "challenge" {
+            repeat_count += 1;
+            if repeat_count >= 3 {
+                return Ok(AdapterExecution {
+                    outcome: TaskOutcome::NoSideEffectFailure(format!(
+                        "loop detected at step {step}: identical LLM decision 3x ({decision_str})"
+                    )),
+                    side_effect_done: false,
+                    events,
+                    adapter_id: def.adapter.clone(),
+                    adapter_version: def.version as i32,
+                });
+            }
+        } else {
+            repeat_count = 0;
+        }
+        last_decision = decision_str;
         match action {
             "done" => {
                 events.push(ExecEvent::Completed);
@@ -433,6 +463,7 @@ fn run_agentic_loop(
                     Ok(()) => {
                         let desc = format!("step {step}: {a} {}", decision);
                         history.push(desc.clone());
+                        prev_describe = describe.clone();
                         events.push(ExecEvent::Step(StepOutcome {
                             step_index: step,
                             screen_id: "agentic".into(),

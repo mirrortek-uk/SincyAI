@@ -169,6 +169,53 @@ async fn agentic_e2e() {
     agentic_disallowed_action_fails_without_side_effect().await;
     agentic_challenge_screen_parks_waiting_user().await;
     agentic_missing_goal_rejected().await;
+    agentic_identical_decision_loop_fails_fast().await;
+}
+
+/// LLM 连续 3 次返回完全相同的决策 => 立即 FAILED (loop detected), 不烧完 max_steps
+async fn agentic_identical_decision_loop_fails_fast() {
+    let Some((pool, agency, port, user_token)) = setup().await else {
+        eprintln!("skip: {TEST_URL_ENV} not set");
+        return;
+    };
+    let (device_id, device_token) = register_device(&pool, agency).await;
+
+    let resp = dispatch(port, &user_token, "点开 Play 商店").await;
+    let task_id: Uuid = resp["task_id"].as_str().unwrap().parse().unwrap();
+
+    let mut io = ScriptedIo::new(vec![
+        MockSnapshot::new(vec![], vec!["桌面".into()]),
+        MockSnapshot::new(vec![], vec!["桌面".into()]),
+        MockSnapshot::new(vec![], vec!["桌面".into()]),
+        MockSnapshot::new(vec![], vec!["桌面".into()]),
+    ]);
+    let same_tap = json!({"action": "tap", "target": {"text": "Play 商店"}});
+    for _ in 0..4 {
+        io.llm_script.push_back(Ok(same_tap.clone()));
+    }
+    let handle = tokio::spawn({
+        let pool = pool.clone();
+        let device_token = device_token.clone();
+        async move { run_agent(&pool, agency, port, &device_token, device_id, io).await }
+    });
+
+    wait_task_state(&pool, task_id, "FAILED", 20).await;
+    let exec = handle.await.expect("join");
+    match &exec.outcome {
+        sincy_agent::TaskOutcome::NoSideEffectFailure(reason) => {
+            assert!(reason.contains("loop detected"), "reason: {reason}");
+        }
+        other => panic!("expected NoSideEffectFailure(loop detected), got {other:?}"),
+    }
+    // 只跑了 3 步 (第 4 次决策前就 fail-fast), 不是 30 步
+    let steps: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM task_events WHERE task_id = $1 AND event = 'device.step.evidence'",
+    )
+    .bind(task_id)
+    .fetch_one(&pool)
+    .await
+    .expect("count");
+    assert!(steps <= 3, "should fail fast, got {steps} steps");
 }
 
 /// LLM 决定 tap -> done: 任务 COMPLETED, performed 留下 tap 证据, 简报带 goal

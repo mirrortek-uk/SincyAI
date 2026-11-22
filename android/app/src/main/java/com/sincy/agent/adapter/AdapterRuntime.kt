@@ -83,7 +83,11 @@ object AdapterRuntime {
             append('\n')
             append("""{"action":"back"} | {"action":"close_dialog"} | {"action":"done"} | {"action":"challenge","reason":"..."}""")
             append('\n')
-            append("Pick tap targets from ids/texts actually visible on the SCREEN. Never invent actions outside ALLOWED ACTIONS.")
+            append("Pick tap targets from ids/texts actually visible on the SCREEN. Never invent actions outside ALLOWED ACTIONS.\n")
+            append("RULES: (1) If a HISTORY line says screen UNCHANGED, do NOT repeat that action — scroll or pick a different target. ")
+            append("(2) When the GOAL is visibly achieved on the SCREEN, reply {\"action\":\"done\"}. ")
+            append("(3) Prefer tapping by id (resource-id) over text when both exist. ")
+            append("(4) If stuck after a few steps, reply {\"action\":\"challenge\",\"reason\":\"stuck: ...\"} instead of looping.")
         }
         val base = cloudBase.ifEmpty { "http://127.0.0.1:18081" }
         val token = deviceToken
