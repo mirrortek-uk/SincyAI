@@ -20,6 +20,7 @@ pub mod version_range;
 pub use drift::{DriftReason, DriftVerdict, anchor_match_rate};
 pub use interpreter::{
     Action, AdapterRuntime, ExecEvent, ExecStatus, Interpreter, ScreenSnapshot, StepOutcome,
+    SystemOp,
 };
 pub use schema::{AdapterDefinition, AdapterError, FlowStep, ScreenDef};
 pub use sign::{SigningError, sign_definition, verify_definition};

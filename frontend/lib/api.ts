@@ -444,6 +444,11 @@ export const api = {
   me: () => req<Me>("/agencies/me"),
   listTasks: () => req<{ items: TaskItem[] }>("/tasks"),
   listDevices: () => req<{ items: DeviceItem[] }>("/devices"),
+  runSetup: (action: string) =>
+    req<{ task_id: string; state: string; route: string }>("/setup/run", {
+      method: "POST",
+      body: JSON.stringify({ action }),
+    }),
   createPairingCode: (ttlMinutes?: number) =>
     req<{ code: string; expires_at: string }>("/devices/pairing-codes", {
       method: "POST",

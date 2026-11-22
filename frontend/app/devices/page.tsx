@@ -12,6 +12,15 @@ export default function DevicesPage() {
     expires_at: string;
   } | null>(null);
   const [codeError, setCodeError] = useState<string | null>(null);
+  const [setupMsg, setSetupMsg] = useState<string | null>(null);
+
+  const runSetupInstall = () => {
+    setSetupMsg(null);
+    api
+      .runSetup("setup_install")
+      .then((r) => setSetupMsg(`已派发引导安装任务 ${r.task_id.slice(0, 8)} (${r.state}) — 看手机通知栏/任务页`))
+      .catch((e) => setSetupMsg(`派发失败: ${e}`));
+  };
 
   useEffect(() => {
     if (!getToken()) return;
@@ -41,6 +50,13 @@ export default function DevicesPage() {
           </span>
         </p>
         {codeError && <p style={{ color: "#e06c5a" }}>生成失败: {codeError}</p>}
+        <p>
+          <button onClick={runSetupInstall}>引导安装 X（agent 自动下载安装）</button>{" "}
+          <span className="muted">
+            手机 agent 会下载 X 安装包、校验 SHA-256、调起系统安装器（需你手点「安装」），完成后到 X 登录页等你输入账号密码
+          </span>
+        </p>
+        {setupMsg && <p className="muted">{setupMsg}</p>}
         {pairingCode && (
           <p
             style={{

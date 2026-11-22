@@ -23,6 +23,10 @@ pub struct AdapterDefinition {
     pub flow: Vec<FlowStep>,
     #[serde(default)]
     pub known_interrupts: Vec<Interrupt>,
+    /// system.* adapter 专用: 结构化参数 (下载 URL / sha256 / 目标包名等),
+    /// 随签名一起被 HMAC 覆盖, 设备端不可篡改。
+    #[serde(default)]
+    pub params: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,6 +97,23 @@ impl AdapterDefinition {
     pub fn validate(&self) -> Result<(), AdapterError> {
         if self.adapter.is_empty() || self.version == 0 {
             return Err(AdapterError::Invalid("adapter id/version required".into()));
+        }
+        // system.* adapter 走原生 op 执行器 (不走屏幕解释器), 只要求 params 存在且含目标包名
+        if self.adapter.starts_with("system.") {
+            let params = self
+                .params
+                .as_ref()
+                .ok_or_else(|| AdapterError::Invalid("system adapter requires params".into()))?;
+            if params
+                .get("target_package")
+                .and_then(|v| v.as_str())
+                .is_none()
+            {
+                return Err(AdapterError::Invalid(
+                    "system adapter params.target_package required".into(),
+                ));
+            }
+            return Ok(());
         }
         if self.app.package.is_empty() || self.app.version_range.is_empty() {
             return Err(AdapterError::Invalid(

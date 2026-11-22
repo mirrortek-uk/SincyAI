@@ -277,6 +277,89 @@ impl AdbIo {
 }
 
 impl PlatformIo for AdbIo {
+    fn perform_system_op(
+        &mut self,
+        op: &sincy_adapter::interpreter::SystemOp,
+    ) -> Result<String, String> {
+        use sincy_adapter::interpreter::SystemOp;
+        match op {
+            // 本地模拟: 下载由宿主机 curl 完成并校验 sha256
+            SystemOp::DownloadFile { url, sha256 } => {
+                let out = std::env::temp_dir().join("sincy_setup_download.apk");
+                let st = std::process::Command::new("curl")
+                    .args(["-sSL", url, "-o"])
+                    .arg(&out)
+                    .status()
+                    .map_err(|e| e.to_string())?;
+                if !st.success() {
+                    return Err(format!("curl failed: {st}"));
+                }
+                let bytes = std::fs::read(&out).map_err(|e| e.to_string())?;
+                use sha2::Digest;
+                let got = format!("{:x}", sha2::Sha256::digest(&bytes));
+                if !got.eq_ignore_ascii_case(sha256) {
+                    return Err(format!("sha256 mismatch: {got}"));
+                }
+                Ok(format!("downloaded {} bytes", bytes.len()))
+            }
+            SystemOp::InstallApk => {
+                let apk = std::env::temp_dir().join("sincy_setup_download.apk");
+                let st = std::process::Command::new("adb")
+                    .args(["install", "-r"])
+                    .arg(&apk)
+                    .status()
+                    .map_err(|e| e.to_string())?;
+                if st.success() {
+                    Ok("installed".into())
+                } else {
+                    Err("adb install failed".into())
+                }
+            }
+            SystemOp::WaitInstalled {
+                package,
+                timeout_ms,
+            } => {
+                let deadline =
+                    std::time::Instant::now() + std::time::Duration::from_millis(*timeout_ms);
+                while std::time::Instant::now() < deadline {
+                    let out = std::process::Command::new("adb")
+                        .args(["shell", "pm", "list", "packages", package])
+                        .output()
+                        .map_err(|e| e.to_string())?;
+                    if String::from_utf8_lossy(&out.stdout).contains(package) {
+                        return Ok("installed".into());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1000));
+                }
+                Err("timeout waiting for install".into())
+            }
+            SystemOp::VerifySigner { .. } => Ok("ok (sim: signer not checked)".into()),
+            SystemOp::LaunchApp { package } => {
+                let out = std::process::Command::new("adb")
+                    .args([
+                        "shell",
+                        "monkey",
+                        "-p",
+                        package,
+                        "-c",
+                        "android.intent.category.LAUNCHER",
+                        "1",
+                    ])
+                    .output()
+                    .map_err(|e| e.to_string())?;
+                if out.status.success() {
+                    Ok("launched".into())
+                } else {
+                    Err("launch failed".into())
+                }
+            }
+            SystemOp::WaitMs { ms } => {
+                std::thread::sleep(std::time::Duration::from_millis(*ms));
+                Ok("ok".into())
+            }
+        }
+    }
+
     fn snapshot(&mut self) -> Box<dyn ScreenSnapshot> {
         Box::new(self.fetch_snapshot())
     }

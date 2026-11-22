@@ -52,6 +52,7 @@ pub fn routes() -> Router<AppState> {
         .route("/devices/register/start", post(start_device_registration))
         .route("/devices/pairing-codes", post(create_pairing_code))
         .route("/devices/pair", post(pair_with_code))
+        .route("/setup/run", post(run_setup))
         .route(
             "/devices/register/complete",
             post(complete_device_registration),
@@ -1151,6 +1152,118 @@ async fn pair_with_code(
         })?;
     Ok(Json(
         json!({ "device_id": sess.device_id, "agency_id": sess.agency_id.as_uuid(), "token": sess.token }),
+    ))
+}
+
+/// POST /setup/run (JWT) — 设备引导任务: 创建一条 platform=system 的 device 路由任务,
+/// 由在线 agent 通过签名 system.* adapter 原生执行 (如下载安装 X)。
+/// 与内容发布同样受急停开关约束; 不需要内容包。
+#[derive(Debug, Deserialize)]
+struct SetupRunBody {
+    action: String, // e.g. "setup_install"
+}
+
+async fn run_setup(
+    State(state): State<AppState>,
+    axum::extract::Extension(auth): axum::extract::Extension<crate::auth::AuthCtx>,
+    Json(body): Json<SetupRunBody>,
+) -> Result<Json<Value>, Response> {
+    let pool = state.pool().map_err(app_error_response)?;
+    let agency = auth.agency_id;
+    // 急停检查 (global +租户)
+    let ks = sqlx::query(
+        "SELECT reason FROM kill_switches WHERE active AND (agency_id IS NULL OR agency_id = $1) LIMIT 1",
+    )
+    .bind(agency.as_uuid())
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
+    if let Some(r) = ks {
+        return Err(app_error_response(AppError::needs_user(
+            "kill_switch_active",
+            format!(
+                "被急停: {}",
+                r.get::<Option<String>, _>("reason").unwrap_or_default()
+            ),
+        )));
+    }
+    // capability 必须存在且绑定了签名 adapter
+    let cap = sqlx::query(
+        "SELECT constraints, priority FROM channel_capabilities
+         WHERE platform = 'system' AND action = $1 AND route = 'device'",
+    )
+    .bind(&body.action)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?
+    .ok_or_else(|| {
+        app_error_response(AppError::non_retryable(
+            "no_capability",
+            format!(
+                "system.{action} 没有 device 路由 capability",
+                action = body.action
+            ),
+        ))
+    })?;
+    let adapter_id = cap.get::<serde_json::Value, _>("constraints")["adapter"]
+        .as_str()
+        .map(String::from)
+        .ok_or_else(|| {
+            app_error_response(AppError::non_retryable(
+                "no_adapter",
+                "capability 未绑定 adapter",
+            ))
+        })?;
+    let av = sqlx::query(
+        "SELECT v.version FROM app_adapter_versions v WHERE v.adapter_id = $1 AND v.state = 'active' ORDER BY v.version DESC LIMIT 1",
+    )
+    .bind(&adapter_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?
+    .ok_or_else(|| {
+        app_error_response(AppError::non_retryable(
+            "adapter_not_registered",
+            format!("adapter {adapter_id} 无 active 签名版本"),
+        ))
+    })?;
+
+    let task_id = Uuid::new_v4();
+    let route_id = Uuid::new_v4();
+    let idem = format!("setup-{}-{}", body.action, task_id);
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
+    sqlx::query(
+        "INSERT INTO execution_routes (id, agency_id, task_id, platform, action, selected_route, capability_status, priority)
+         VALUES ($1, $2, $3, 'system', $4, 'device', 'verified', $5)",
+    )
+    .bind(route_id)
+    .bind(agency.as_uuid())
+    .bind(task_id)
+    .bind(&body.action)
+    .bind(cap.get::<i32, _>("priority"))
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
+    sqlx::query(
+        "INSERT INTO device_tasks (id, agency_id, idempotency_key, state, route_id, adapter_version)
+         VALUES ($1, $2, $3, 'QUEUED', $4, $5)",
+    )
+    .bind(task_id)
+    .bind(agency.as_uuid())
+    .bind(idem)
+    .bind(route_id)
+    .bind(av.get::<i32, _>("version"))
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
+    tx.commit()
+        .await
+        .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
+    Ok(Json(
+        json!({ "task_id": task_id, "action": body.action, "state": "QUEUED", "route": "device" }),
     ))
 }
 

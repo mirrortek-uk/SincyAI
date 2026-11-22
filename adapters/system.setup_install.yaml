@@ -1,0 +1,29 @@
+# System-level setup adapter: 设备引导安装目标 App (TDD: system.* 走原生 op 执行器)。
+# 与 x.publish_post 的区别: 不走屏幕解释器, 由设备端原生执行 op 序列 —
+#   download_file(url + sha256 校验) -> install_apk(调起系统安装器, 人手点「安装」)
+#   -> wait_installed -> verify_signer(可选) -> launch_app -> 登录页 WAITING_USER
+#
+# 安全约定:
+#  - params 整体被平台 HMAC 签名覆盖, 设备端不可篡改;
+#  - download_url 必须来自白名单来源, sha256 不匹配直接拒绝安装;
+#  - 安装确认弹窗必须人手点击 (Android 硬要求), 超时转 WAITING_USER;
+#  - 账号密码永不经过 agent。
+#
+# 发布前由运维把下面的 download_url / sha256 / signer_cert_sha256 替换为
+# 白名单渠道的真实值, 然后重新签名入库:
+#   cargo run -p sincy-agent --example sign_adapter -- adapters/system.setup_install.yaml @keys/adapter_signing_key.bin
+adapter: system.setup_install
+version: 1
+app:
+  package: com.twitter.android
+  version_range: ">=0"
+screens: {}
+flow: []
+params:
+  target_package: com.twitter.android
+  # 占位: 替换为白名单真实下载地址 (如官方/可信镜像的 X APK)
+  download_url: "https://REPLACE_WITH_WHITELISTED_X_APK_URL/x.apk"
+  # 对应 APK 文件的 SHA-256 (小写 hex)
+  sha256: "REPLACE_WITH_APK_SHA256"
+  # 可选: X 官方签名证书 SHA-256, 安装后校验防篡改
+  signer_cert_sha256: ""

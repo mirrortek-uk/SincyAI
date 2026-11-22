@@ -1,6 +1,7 @@
 //! Signed-adapter execution on device: verify signature -> version guard ->
 //! run the sincy-adapter interpreter against the device's PlatformIo.
 
+use sincy_adapter::StepOutcome;
 use std::collections::VecDeque;
 
 use sincy_adapter::interpreter::{
@@ -90,6 +91,13 @@ pub fn execute_signed_adapter(
     let adapter_id = def.adapter.clone();
     let adapter_version = def.version as i32;
 
+    // system.* adapters run native device ops (install/verify/launch), not the
+    // screen interpreter; the version guard is skipped because the target app
+    // may legitimately be absent (that is the point of a setup task).
+    if adapter_id.starts_with("system.") {
+        return run_system_adapter(&def, io);
+    }
+
     // version guard BEFORE any interaction with the target app
     let range = VersionRange::parse(&def.app.version_range)
         .map_err(|e| ExecuteError::BadVersionRange(e.to_string()))?;
@@ -134,11 +142,135 @@ pub fn execute_signed_adapter(
     })
 }
 
+/// Execute a signed `system.*` adapter as a fixed op sequence derived from its
+/// (signed) params. Any op failure aborts with zero further side effects.
+pub fn run_system_adapter(
+    def: &AdapterDefinition,
+    io: &mut dyn PlatformIo,
+) -> Result<AdapterExecution, ExecuteError> {
+    use sincy_adapter::interpreter::SystemOp;
+    let params = def
+        .params
+        .clone()
+        .ok_or_else(|| ExecuteError::InvalidDefinition("system adapter missing params".into()))?;
+    let get = |k: &str| {
+        params
+            .get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let target = get("target_package");
+    let mut events: Vec<ExecEvent> = vec![];
+    let ops: Vec<SystemOp> = match def.adapter.as_str() {
+        "system.setup_install" => {
+            let url = get("download_url");
+            let sha256 = get("sha256");
+            if url.is_empty() || sha256.is_empty() {
+                return Err(ExecuteError::InvalidDefinition(
+                    "setup_install params need download_url + sha256".into(),
+                ));
+            }
+            let mut ops = vec![
+                SystemOp::DownloadFile {
+                    url,
+                    sha256: sha256.clone(),
+                },
+                SystemOp::InstallApk,
+                SystemOp::WaitInstalled {
+                    package: target.clone(),
+                    timeout_ms: 180_000,
+                },
+            ];
+            let cert = get("signer_cert_sha256");
+            if !cert.is_empty() {
+                ops.push(SystemOp::VerifySigner {
+                    package: target.clone(),
+                    cert_sha256: cert,
+                });
+            }
+            ops.push(SystemOp::LaunchApp {
+                package: target.clone(),
+            });
+            ops
+        }
+        other => {
+            return Err(ExecuteError::InvalidDefinition(format!(
+                "unknown system adapter {other}"
+            )));
+        }
+    };
+    let mut side_effect_done = false;
+    for op in &ops {
+        let is_side_effect = matches!(op, SystemOp::InstallApk);
+        match io.perform_system_op(op) {
+            Ok(res) => {
+                side_effect_done = side_effect_done || is_side_effect;
+                events.push(ExecEvent::Step(StepOutcome {
+                    step_index: events.len(),
+                    screen_id: op_name(op).to_string(),
+                    action: None,
+                    side_effect: is_side_effect,
+                    evidence: res,
+                }));
+            }
+            Err(e) => {
+                events.push(ExecEvent::Step(StepOutcome {
+                    step_index: events.len(),
+                    screen_id: op_name(op).to_string(),
+                    action: None,
+                    side_effect: is_side_effect,
+                    evidence: format!("FAILED: {e}"),
+                }));
+                let outcome = if matches!(op, SystemOp::WaitInstalled { .. }) {
+                    // 安装确认弹窗需要人手点击, 超时即转人工
+                    TaskOutcome::WaitingUser(format!(
+                        "waiting for user to confirm install dialog: {e}"
+                    ))
+                } else if side_effect_done {
+                    TaskOutcome::Uncertain(e)
+                } else {
+                    TaskOutcome::NoSideEffectFailure(e)
+                };
+                return Ok(AdapterExecution {
+                    outcome,
+                    side_effect_done,
+                    events,
+                    adapter_id: def.adapter.clone(),
+                    adapter_version: def.version as i32,
+                });
+            }
+        }
+    }
+    Ok(AdapterExecution {
+        outcome: TaskOutcome::Success,
+        side_effect_done,
+        events,
+        adapter_id: def.adapter.clone(),
+        adapter_version: def.version as i32,
+    })
+}
+
+fn op_name(op: &sincy_adapter::interpreter::SystemOp) -> &'static str {
+    use sincy_adapter::interpreter::SystemOp;
+    match op {
+        SystemOp::DownloadFile { .. } => "download_file",
+        SystemOp::InstallApk => "install_apk",
+        SystemOp::WaitInstalled { .. } => "wait_installed",
+        SystemOp::VerifySigner { .. } => "verify_signer",
+        SystemOp::LaunchApp { .. } => "launch_app",
+        SystemOp::WaitMs { .. } => "wait_ms",
+    }
+}
+
 /// Scripted PlatformIo for the host simulator and tests: replays a fixed list
 /// of screen snapshots and records performed actions.
 pub struct ScriptedIo {
     pub screens: VecDeque<MockSnapshot>,
     pub performed: Vec<String>,
+    pub system_ops: Vec<String>,
+    /// scripted results for system ops; empty => all Ok("ok")
+    pub system_results: VecDeque<Result<String, String>>,
 }
 
 impl ScriptedIo {
@@ -146,11 +278,24 @@ impl ScriptedIo {
         Self {
             screens: screens.into(),
             performed: vec![],
+            system_ops: vec![],
+            system_results: VecDeque::new(),
         }
     }
 }
 
 impl PlatformIo for ScriptedIo {
+    fn perform_system_op(
+        &mut self,
+        op: &sincy_adapter::interpreter::SystemOp,
+    ) -> Result<String, String> {
+        self.system_ops
+            .push(serde_json::to_string(op).unwrap_or_default());
+        self.system_results
+            .pop_front()
+            .unwrap_or_else(|| Ok("ok".to_string()))
+    }
+
     fn snapshot(&mut self) -> Box<dyn ScreenSnapshot> {
         let s = self
             .screens

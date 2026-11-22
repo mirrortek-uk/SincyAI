@@ -50,4 +50,11 @@ object AdapterRuntime {
      */
     fun performAction(actionJson: String): Boolean =
         com.sincy.agent.perception.SincyAccessibilityService.performAction(actionJson)
+
+    /** system_op 执行结果字符串, 由 Rust JNI 通过 lastOpResult() 读回。 */
+    @Volatile
+    var lastOpResult: String = "ok"
+
+    /** Called by the Rust core after a system op to read its result string. */
+    fun lastOpResult(): String = lastOpResult
 }

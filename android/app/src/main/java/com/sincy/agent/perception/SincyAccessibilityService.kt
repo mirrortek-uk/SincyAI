@@ -100,6 +100,8 @@ class SincyAccessibilityService : AccessibilityService() {
                     sleepQuiet(pre)
                     svc.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
                 }
+                // 系统级 op (签名 system.* adapter): 下载/安装/轮询/验签/启动, 不走屏幕解释器
+                "system_op" -> com.sincy.agent.setup.SetupOps.execute(svc, a.optJSONObject("op"))
                 else -> false
             }
         }

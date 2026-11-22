@@ -45,6 +45,45 @@ pub trait PlatformIo {
     fn snapshot(&mut self) -> Box<dyn ScreenSnapshot>;
     /// Perform a step action (tap / set text / pick media / back ...).
     fn perform(&mut self, step: &FlowStep) -> Result<(), String>;
+    /// Execute one native system op (system.* adapters only: download+verify,
+    /// fire install intent, poll installed, verify signer, launch app).
+    /// Default refuses so a runtime that cannot do system ops fails closed.
+    /// Returns a short result string ("ok" / details) on success.
+    fn perform_system_op(&mut self, op: &SystemOp) -> Result<String, String> {
+        let _ = op;
+        Err("system ops unsupported on this io".into())
+    }
+}
+
+/// Native device operations for signed `system.*` adapters.
+/// Params come from the signed adapter definition, so they are tamper-proof.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum SystemOp {
+    /// 下载文件到设备私有目录并校验 SHA-256; 不匹配必须失败。
+    DownloadFile {
+        url: String,
+        sha256: String,
+    },
+    /// 调起系统安装器 (人手确认弹窗是 Android 硬要求, 不可跳过)。
+    InstallApk,
+    /// 轮询直到目标包安装完成或超时。
+    WaitInstalled {
+        package: String,
+        timeout_ms: u64,
+    },
+    /// 校验已安装应用的签名证书 SHA-256 (防篡改替换)。
+    VerifySigner {
+        package: String,
+        cert_sha256: String,
+    },
+    /// 启动目标 app。
+    LaunchApp {
+        package: String,
+    },
+    WaitMs {
+        ms: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

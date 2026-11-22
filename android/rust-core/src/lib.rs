@@ -130,7 +130,7 @@ mod jni {
     use ::jni::JNIEnv;
     use serde_json::json;
     use sincy_adapter::humanize::{plan_swipe, plan_tap, HumanProfile, Rng};
-    use sincy_adapter::interpreter::{Action, PlatformIo, ScreenSnapshot};
+    use sincy_adapter::interpreter::{Action, PlatformIo, ScreenSnapshot, SystemOp};
     use sincy_adapter::schema::FlowStep;
 
     /// Snapshot JSON handed over from Kotlin: ids/texts for anchor match plus a
@@ -245,6 +245,40 @@ mod jni {
                 .unwrap_or_else(|| "{\"ids\":[],\"texts\":[],\"nodes\":[]}".into());
             self.last_snapshot = json.clone();
             Box::new(JsonSnapshot(json))
+        }
+
+        fn perform_system_op(&mut self, op: &SystemOp) -> Result<String, String> {
+            // 系统级 op 直接以 JSON 形式交给 Kotlin 侧执行 (下载/安装/轮询/验签/启动),
+            // Kotlin 执行后把结果字符串记在 AdapterRuntime.lastOpResult, 这里再读回。
+            let payload = json!({"kind": "system_op", "op": op}).to_string();
+            let js = self.env.new_string(&payload).map_err(|e| e.to_string())?;
+            let ok = self
+                .env
+                .call_method(
+                    &self.thiz,
+                    "performAction",
+                    "(Ljava/lang/String;)Z",
+                    &[JValue::Object(&js)],
+                )
+                .and_then(|v| v.z())
+                .map_err(|e| e.to_string())?;
+            if !ok {
+                return Err(format!("system op rejected: {payload}"));
+            }
+            let r = self
+                .env
+                .call_method(&self.thiz, "lastOpResult", "()Ljava/lang/String;", &[])
+                .and_then(|v| v.l())
+                .ok()
+                .and_then(|o| {
+                    let js = JString::from(o);
+                    self.env
+                        .get_string(&js)
+                        .ok()
+                        .map(|s| s.to_string_lossy().into_owned())
+                })
+                .unwrap_or_else(|| "ok".into());
+            Ok(r)
         }
 
         fn perform(&mut self, step: &FlowStep) -> Result<(), String> {
