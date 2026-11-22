@@ -42,16 +42,83 @@ class AgentForegroundService : Service() {
     private var ws: WebSocket? = null
     private var heartbeatJob: Job? = null
     private val http = OkHttpClient()
+    private var wakeLock: android.os.PowerManager.WakeLock? = null
+    private var savedScreenOffTimeout: Int = -1
     // 同一时刻只跑一个任务: gateway 会把多条 QUEUED 一次性派发, 串行执行避免
     // 两个 agentic 闭环同时抢屏幕/同时调 LLM 互相干扰
     private val taskMutex = kotlinx.coroutines.sync.Mutex()
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(NotificationChannel(CHANNEL, "Sincy Agent", NotificationManager.IMPORTANCE_LOW))
+        applyAntiLock()
         notify("启动中…")
         connect()
+    }
+
+    /**
+     * 防锁屏: 服务存活期间 (1) 持有 PARTIAL_WAKE_LOCK 保证 CPU 不休眠 (WSS/解释器持续跑);
+     * (2) 若用户开启了防锁屏 (默认开) 且已授予 WRITE_SETTINGS, 把系统屏幕休眠时间改成"永不",
+     *     服务退出时恢复原值。没有 WRITE_SETTINGS 授权时静默跳过 (2), (1) 不受影响。
+     */
+    private fun applyAntiLock() {
+        try {
+            val pm = getSystemService(android.os.PowerManager::class.java)
+            wakeLock = pm.newWakeLock(
+                android.os.PowerManager.PARTIAL_WAKE_LOCK,
+                "sincy:agent-control",
+            ).apply { acquire() }
+        } catch (_: Exception) {
+        }
+        val enabled = antilockRuntime ?: prefs().getBoolean("antilock", true)
+        if (enabled) {
+            try {
+                if (android.provider.Settings.System.canWrite(this)) {
+                    savedScreenOffTimeout = android.provider.Settings.System.getInt(
+                        contentResolver,
+                        android.provider.Settings.System.SCREEN_OFF_TIMEOUT,
+                        30_000,
+                    )
+                    android.provider.Settings.System.putInt(
+                        contentResolver,
+                        android.provider.Settings.System.SCREEN_OFF_TIMEOUT,
+                        Int.MAX_VALUE, // 永不休眠
+                    )
+                }
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    /** 运行时切换防锁屏 (MainActivity 勾选框调用) */
+    private fun setAntilockInstance(enabled: Boolean) {
+        antilockRuntime = enabled
+        if (enabled) {
+            applyAntiLock()
+        } else {
+            releaseAntiLock()
+        }
+    }
+
+    private fun releaseAntiLock() {
+        try {
+            wakeLock?.let { if (it.isHeld) it.release() }
+        } catch (_: Exception) {
+        }
+        wakeLock = null
+        if (savedScreenOffTimeout >= 0) {
+            try {
+                android.provider.Settings.System.putInt(
+                    contentResolver,
+                    android.provider.Settings.System.SCREEN_OFF_TIMEOUT,
+                    savedScreenOffTimeout,
+                )
+            } catch (_: Exception) {
+            }
+            savedScreenOffTimeout = -1
+        }
     }
 
     private fun prefs() = Prefs.get(this)
@@ -192,6 +259,8 @@ class AgentForegroundService : Service() {
     override fun onDestroy() {
         heartbeatJob?.cancel()
         ws?.close(1000, "bye")
+        releaseAntiLock()
+        instance = null
         super.onDestroy()
     }
 
@@ -200,5 +269,17 @@ class AgentForegroundService : Service() {
     companion object {
         const val CHANNEL = "sincy.agent"
         const val NOTIF_ID = 1
+
+        /** 防锁屏开关的运行时镜像 (MainActivity 勾选框实时改这里, 服务立即生效) */
+        @Volatile
+        var antilockRuntime: Boolean? = null
+
+        /** 当前运行的服务实例, 供 UI 勾选框实时切换防锁屏 */
+        @Volatile
+        var instance: AgentForegroundService? = null
+
+        fun setAntilock(enabled: Boolean) {
+            instance?.setAntilockInstance(enabled)
+        }
     }
 }

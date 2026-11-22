@@ -39,6 +39,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 打开 app 期间屏幕常亮
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         // Minimal programmatic UI (a layout can replace this without touching logic)
         val root = android.widget.LinearLayout(this).apply {
             orientation = android.widget.LinearLayout.VERTICAL
@@ -59,8 +61,32 @@ class MainActivity : AppCompatActivity() {
         val pair = Button(this).apply { text = "Pair this device" }
         val openA11y = Button(this).apply { text = "Enable accessibility service" }
         val start = Button(this).apply { text = "Start agent" }
+        val antilock = android.widget.CheckBox(this).apply {
+            text = "防锁屏 (agent 运行时屏幕常亮, 需要系统设置授权)"
+            isChecked = prefs().getBoolean("antilock", true)
+            setOnCheckedChangeListener { _, checked ->
+                prefs().edit { putBoolean("antilock", checked) }
+                AgentForegroundService.setAntilock(checked)
+            }
+        }
+        val grantSettings = Button(this).apply {
+            text = "授权修改系统设置 (防锁屏需要)"
+            setOnClickListener {
+                if (!android.provider.Settings.System.canWrite(this@MainActivity)) {
+                    startActivity(
+                        Intent(
+                            android.provider.Settings.ACTION_MANAGE_WRITE_SETTINGS,
+                            android.net.Uri.parse("package:$packageName"),
+                        ),
+                    )
+                } else {
+                    Toast.makeText(this@MainActivity, "已授权 ✔", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
         root.addView(version); root.addView(server); root.addView(code)
         root.addView(pair); root.addView(openA11y); root.addView(start)
+        root.addView(antilock); root.addView(grantSettings)
         setContentView(root)
 
         pair.setOnClickListener {
@@ -126,6 +152,14 @@ class MainActivity : AppCompatActivity() {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         }
         startForegroundService(Intent(this, AgentForegroundService::class.java))
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // 从系统设置授权页回来后, 立即生效防锁屏
+        if (prefs().getBoolean("antilock", true)) {
+            AgentForegroundService.setAntilock(true)
+        }
     }
 
     private fun prefs() = Prefs.get(this)
