@@ -48,6 +48,7 @@ pub fn routes() -> Router<AppState> {
         .route("/tasks", get(list_tasks))
         .route("/tasks/publish", post(publish_task))
         .route("/tasks/{id}/route", get(get_task_route))
+        .route("/tasks/{id}/retry", post(retry_task))
         .route("/devices", get(list_devices))
         .route("/devices/register/start", post(start_device_registration))
         .route("/devices/pairing-codes", post(create_pairing_code))
@@ -659,6 +660,43 @@ async fn get_task_route(
         "priority": row.get::<i32, _>("priority"),
         "skipped": row.get::<Value, _>("skipped"),
         "decided_at": row.get::<chrono::DateTime<chrono::Utc>, _>("decided_at"),
+    })))
+}
+
+/// POST /tasks/{id}/retry — WAITING_USER / FAILED 的任务重新排队 (attempt+1)。
+/// 用于"人工处理完挑战界面后让 agent 继续"的场景。
+async fn retry_task(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    axum::extract::Extension(auth): axum::extract::Extension<crate::auth::AuthCtx>,
+) -> Result<Json<Value>, Response> {
+    let pool = state.pool().map_err(app_error_response)?;
+    let row = sqlx::query(
+        "UPDATE device_tasks SET state = 'QUEUED', assigned_device_id = NULL, attempt = attempt + 1, updated_at = now()
+         WHERE id = $1 AND agency_id = $2 AND state IN ('WAITING_USER', 'FAILED')
+         RETURNING id, state, attempt",
+    )
+    .bind(id)
+    .bind(auth.agency_id.as_uuid())
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?
+    .ok_or_else(|| {
+        app_error_response(AppError::non_retryable(
+            "not_retryable",
+            "only WAITING_USER/FAILED tasks of this agency can be retried",
+        ))
+    })?;
+    sqlx::query("INSERT INTO task_events (agency_id, task_id, event, from_state, to_state, detail) VALUES ($1, $2, 'task.retry', 'WAITING_USER', 'QUEUED', '{}')")
+        .bind(auth.agency_id.as_uuid())
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
+    Ok(Json(json!({
+        "task_id": row.get::<Uuid, _>("id"),
+        "state": row.get::<String, _>("state"),
+        "attempt": row.get::<i32, _>("attempt"),
     })))
 }
 

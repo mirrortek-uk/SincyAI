@@ -443,6 +443,8 @@ export const api = {
     }),
   me: () => req<Me>("/agencies/me"),
   listTasks: () => req<{ items: TaskItem[] }>("/tasks"),
+  retryTask: (id: string) =>
+    req<{ task_id: string; state: string; attempt: number }>(`/tasks/${id}/retry`, { method: "POST" }),
   listDevices: () => req<{ items: DeviceItem[] }>("/devices"),
   runSetup: (action: string, app?: string, goal?: string) =>
     req<{ task_id: string; state: string; route: string; adapter?: string }>("/setup/run", {

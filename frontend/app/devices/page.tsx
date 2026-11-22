@@ -98,7 +98,7 @@ export default function DevicesPage() {
           />
           <button onClick={runAgentic}>派发 agentic 任务</button>{" "}
           <span className="muted">
-            「真人模式」: 手机每步截屏发给云端 LLM 决定下一步点击/滑动/输入 (只允许安全动作, 安装/发布仍走签名 adapter; 遇到验证页自动转人工)
+            「真人模式」: 手机每步截屏发给云端 LLM 决定下一步点击/滑动/输入 (只允许安全动作, 安装/发布仍走签名 adapter; 遇到验证页/锁屏自动转人工 — 解锁手机后在任务页点「已人工处理，重试」继续)
           </span>
         </p>
         {setupMsg && <p className="muted">{setupMsg}</p>}

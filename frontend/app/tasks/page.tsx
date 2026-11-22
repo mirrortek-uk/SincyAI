@@ -201,6 +201,7 @@ export default function TasksPage() {
               <th>平台/动作</th>
               <th>幂等键</th>
               <th>创建时间</th>
+              <th>操作</th>
             </tr>
           </thead>
           <tbody>
@@ -213,11 +214,25 @@ export default function TasksPage() {
                 </td>
                 <td className="muted">{t.idempotency_key.slice(0, 18)}…</td>
                 <td className="muted">{new Date(t.created_at).toLocaleString()}</td>
+                <td>
+                  {(t.state === "WAITING_USER" || t.state === "FAILED") && (
+                    <button
+                      onClick={() =>
+                        api
+                          .retryTask(t.id)
+                          .then(() => load())
+                          .catch((e) => setError(String(e)))
+                      }
+                    >
+                      {t.state === "WAITING_USER" ? "已人工处理，重试" : "重试"}
+                    </button>
+                  )}
+                </td>
               </tr>
             ))}
             {tasks.length === 0 && (
               <tr>
-                <td colSpan={5} className="muted">
+                <td colSpan={6} className="muted">
                   暂无任务
                 </td>
               </tr>
