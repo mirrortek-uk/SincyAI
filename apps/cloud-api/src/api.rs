@@ -55,6 +55,7 @@ pub fn routes() -> Router<AppState> {
         .route("/devices/pair", post(pair_with_code))
         .route("/setup/run", post(run_setup))
         .route("/setup/apps", get(list_setup_apps))
+        .route("/setup/apps/{app_key}", patch(update_setup_app))
         .route(
             "/devices/register/complete",
             post(complete_device_registration),
@@ -1217,7 +1218,7 @@ async fn list_setup_apps(
 ) -> Result<Json<Value>, Response> {
     let pool = state.pool().map_err(app_error_response)?;
     let rows = sqlx::query(
-        "SELECT app_key, display_name, target_package FROM setup_app_catalog WHERE active ORDER BY app_key",
+        "SELECT app_key, display_name, target_package, download_url, sha256 FROM setup_app_catalog WHERE active ORDER BY app_key",
     )
     .fetch_all(pool)
     .await
@@ -1229,10 +1230,87 @@ async fn list_setup_apps(
                 "app_key": r.get::<String, _>("app_key"),
                 "display_name": r.get::<String, _>("display_name"),
                 "target_package": r.get::<String, _>("target_package"),
+                "download_url": r.get::<String, _>("download_url"),
+                "sha256": r.get::<String, _>("sha256"),
             })
         })
         .collect();
     Ok(Json(json!({ "items": items })))
+}
+
+/// PATCH /setup/apps/{app_key} (JWT, owner) — 更新应用目录里的下载地址/SHA-256/签名证书。
+/// 安装包必须来自白名单渠道: 设备端下载后会强制校验 sha256, 不匹配则零副作用失败。
+#[derive(Debug, Deserialize)]
+struct UpdateSetupAppBody {
+    download_url: Option<String>,
+    sha256: Option<String>,
+    signer_cert_sha256: Option<String>,
+    display_name: Option<String>,
+    active: Option<bool>,
+}
+
+async fn update_setup_app(
+    State(state): State<AppState>,
+    Path(app_key): Path<String>,
+    axum::extract::Extension(auth): axum::extract::Extension<crate::auth::AuthCtx>,
+    Json(body): Json<UpdateSetupAppBody>,
+) -> Result<Json<Value>, Response> {
+    if !auth.roles.iter().any(|r| r == "owner") {
+        return Err(app_error_response(AppError::non_retryable(
+            "forbidden",
+            "only owner can update the setup app catalog",
+        )));
+    }
+    if body
+        .download_url
+        .as_deref()
+        .is_some_and(|u| !u.starts_with("https://"))
+    {
+        return Err(app_error_response(AppError::non_retryable(
+            "bad_url",
+            "download_url must be https:// (whitelisted channel only)",
+        )));
+    }
+    if body
+        .sha256
+        .as_deref()
+        .is_some_and(|s| s.len() != 64 || !s.chars().all(|c| c.is_ascii_hexdigit()))
+    {
+        return Err(app_error_response(AppError::non_retryable(
+            "bad_sha256",
+            "sha256 must be 64 hex chars",
+        )));
+    }
+    let pool = state.pool().map_err(app_error_response)?;
+    let row = sqlx::query(
+        "UPDATE setup_app_catalog SET
+           download_url = COALESCE($2, download_url),
+           sha256 = COALESCE($3, sha256),
+           signer_cert_sha256 = COALESCE($4, signer_cert_sha256),
+           display_name = COALESCE($5, display_name),
+           active = COALESCE($6, active)
+         WHERE app_key = $1
+         RETURNING app_key, display_name, target_package, download_url, sha256, signer_cert_sha256, active",
+    )
+    .bind(&app_key)
+    .bind(&body.download_url)
+    .bind(&body.sha256)
+    .bind(&body.signer_cert_sha256)
+    .bind(&body.display_name)
+    .bind(body.active)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?
+    .ok_or_else(|| app_error_response(AppError::non_retryable("not_found", "app_key not in catalog")))?;
+    Ok(Json(json!({
+        "app_key": row.get::<String, _>("app_key"),
+        "display_name": row.get::<String, _>("display_name"),
+        "target_package": row.get::<String, _>("target_package"),
+        "download_url": row.get::<String, _>("download_url"),
+        "sha256": row.get::<String, _>("sha256"),
+        "signer_cert_sha256": row.get::<Option<String>, _>("signer_cert_sha256"),
+        "active": row.get::<bool, _>("active"),
+    })))
 }
 
 /// POST /setup/run (JWT) — 设备引导任务: 创建一条 platform=system 的 device 路由任务,

@@ -452,7 +452,20 @@ export const api = {
       body: JSON.stringify({ action, ...(app ? { app } : {}), ...(goal ? { goal } : {}) }),
     }),
   listSetupApps: () =>
-    req<{ items: { app_key: string; display_name: string; target_package: string }[] }>("/setup/apps"),
+    req<{
+      items: {
+        app_key: string;
+        display_name: string;
+        target_package: string;
+        download_url?: string;
+        sha256?: string;
+      }[];
+    }>("/setup/apps"),
+  updateSetupApp: (appKey: string, downloadUrl?: string, sha256?: string) =>
+    req<{ app_key: string }>(`/setup/apps/${appKey}`, {
+      method: "PATCH",
+      body: JSON.stringify({ download_url: downloadUrl, sha256 }),
+    }),
   createPairingCode: (ttlMinutes?: number) =>
     req<{ code: string; expires_at: string }>("/devices/pairing-codes", {
       method: "POST",

@@ -3,7 +3,13 @@
 import { useEffect, useState } from "react";
 import { api, getToken, type DeviceItem } from "@/lib/api";
 
-type SetupApp = { app_key: string; display_name: string; target_package: string };
+type SetupApp = {
+  app_key: string;
+  display_name: string;
+  target_package: string;
+  download_url?: string;
+  sha256?: string;
+};
 
 // 设备页: 本租户注册的 Agent 设备及在线状态 (心跳 120s 内视为在线)。
 export default function DevicesPage() {
@@ -17,6 +23,7 @@ export default function DevicesPage() {
   const [setupMsg, setSetupMsg] = useState<string | null>(null);
   const [setupApps, setSetupApps] = useState<SetupApp[]>([]);
   const [goal, setGoal] = useState("");
+  const [editApp, setEditApp] = useState<Record<string, { url: string; sha: string }>>({});
 
   useEffect(() => {
     if (!getToken()) return;
@@ -78,9 +85,56 @@ export default function DevicesPage() {
         {codeError && <p style={{ color: "#e06c5a" }}>生成失败: {codeError}</p>}
         <p>
           {setupApps.map((a) => (
-            <button key={a.app_key} style={{ marginRight: 8 }} onClick={() => runSetupInstall(a.app_key)}>
-              引导安装 {a.display_name}
-            </button>
+            <span key={a.app_key} style={{ marginRight: 16 }}>
+              <button onClick={() => runSetupInstall(a.app_key)}>引导安装 {a.display_name}</button>{" "}
+              <button
+                onClick={() =>
+                  setEditApp((cur) => ({
+                    ...cur,
+                    [a.app_key]: cur[a.app_key] ?? { url: a.download_url ?? "", sha: a.sha256 ?? "" },
+                  }))
+                }
+              >
+                {editApp[a.app_key] ? "收起" : "配置下载地址"}
+              </button>
+              {editApp[a.app_key] && (
+                <span style={{ display: "inline-block", marginLeft: 8 }}>
+                  <input
+                    placeholder="https:// 白名单 APK 直链"
+                    style={{ width: 300, marginRight: 4 }}
+                    value={editApp[a.app_key].url}
+                    onChange={(e) =>
+                      setEditApp((cur) => ({
+                        ...cur,
+                        [a.app_key]: { ...cur[a.app_key], url: e.target.value.trim() },
+                      }))
+                    }
+                  />
+                  <input
+                    placeholder="APK SHA-256 (64 hex)"
+                    style={{ width: 260, marginRight: 4 }}
+                    value={editApp[a.app_key].sha}
+                    onChange={(e) =>
+                      setEditApp((cur) => ({
+                        ...cur,
+                        [a.app_key]: { ...cur[a.app_key], sha: e.target.value.trim() },
+                      }))
+                    }
+                  />
+                  <button
+                    onClick={() => {
+                      const v = editApp[a.app_key];
+                      api
+                        .updateSetupApp(a.app_key, v.url, v.sha)
+                        .then(() => setSetupMsg(`已更新 ${a.display_name} 的下载地址/SHA-256`))
+                        .catch((e) => setSetupMsg(`更新失败: ${e}`));
+                    }}
+                  >
+                    保存
+                  </button>
+                </span>
+              )}
+            </span>
           ))}
           {setupApps.length === 0 && (
             <button onClick={() => runSetupInstall()}>引导安装（通用）</button>

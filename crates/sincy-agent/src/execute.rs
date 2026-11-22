@@ -188,7 +188,9 @@ pub fn run_system_adapter(
     let target = get("target_package");
     let mut events: Vec<ExecEvent> = vec![];
     let ops: Vec<SystemOp> = match def.adapter.as_str() {
-        "system.setup_install" => {
+        // system.setup_install 及其按应用分裂的变体 (system.setup_install.x 等):
+        // 参数 (download_url/sha256/target_package) 都来自签名定义, 行为完全一致
+        a if a == "system.setup_install" || a.starts_with("system.setup_install.") => {
             let url = get("download_url");
             let sha256 = get("sha256");
             if url.is_empty() || sha256.is_empty() {
