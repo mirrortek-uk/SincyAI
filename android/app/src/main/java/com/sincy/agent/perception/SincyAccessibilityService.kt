@@ -299,6 +299,7 @@ class SincyAccessibilityService : AccessibilityService() {
             val width = dm?.widthPixels ?: 1080
             val height = dm?.heightPixels ?: 2400
             var elementIdx = 0
+            val marks = mutableListOf<Triple<Int, Int, Int>>()
             fun walk(node: AccessibilityNodeInfo, depth: Int) {
                 if (depth > 14) return
                 val r = android.graphics.Rect()
@@ -314,6 +315,7 @@ class SincyAccessibilityService : AccessibilityService() {
                 val idx = if (onScreen && (node.isClickable || editable) && elementIdx < 120) {
                     ++elementIdx
                 } else 0
+                if (idx > 0) marks.add(Triple(idx, (r.left + r.right) / 2, (r.top + r.bottom) / 2))
                 nodes.put(
                     JSONObject()
                         .put("id", node.viewIdResourceName ?: "")
@@ -330,8 +332,8 @@ class SincyAccessibilityService : AccessibilityService() {
                 }
             }
             walk(root, 0)
-            // 视觉通道: 若已授权录屏, 附带当前帧截图 (base64 jpeg), 喂给 VLM
-            val shot = try { ScreenCapture.captureBase64Jpeg() } catch (_: Exception) { null }
+            // 视觉通道: 若已授权录屏, 附带当前帧截图 (base64 jpeg, 带元素编号标注), 喂给 VLM
+            val shot = try { ScreenCapture.captureBase64Jpeg(marks = marks.ifEmpty { null }) } catch (_: Exception) { null }
             return JSONObject()
                 .put("ids", ids)
                 .put("texts", texts)

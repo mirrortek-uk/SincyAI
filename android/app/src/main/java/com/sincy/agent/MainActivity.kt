@@ -39,6 +39,19 @@ class MainActivity : AppCompatActivity() {
         @Volatile
         var instance: MainActivity? = null
 
+        /** agentic 任务需要视觉能力: 若还没授权录屏, 弹系统授权对话框 (用户点一次即可, 系统级一次性确认) */
+        fun requestScreenCapIfNeeded() {
+            val act = instance ?: return
+            if (com.sincy.agent.perception.ScreenCapture.active) return
+            try {
+                val mpm = act.getSystemService(android.content.Context.MEDIA_PROJECTION_SERVICE)
+                    as android.media.projection.MediaProjectionManager
+                act.screenCapLauncher.launch(mpm.createScreenCaptureIntent())
+            } catch (e: Exception) {
+                android.util.Log.e("SincyAgent", "requestScreenCap failed: ${e.message}")
+            }
+        }
+
         /** 前台 Activity 代劳启动目标 app (绕过后台 startActivity 的 BAL 限制) */
         fun launchAppViaActivity(pkg: String): Boolean {
             val act = instance ?: return false

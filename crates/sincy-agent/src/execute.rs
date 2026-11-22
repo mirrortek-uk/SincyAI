@@ -629,9 +629,10 @@ fn run_agentic_loop(
                     side_effect: false,
                     verify: false,
                 };
+                let vision = snap.image_base64().is_some();
                 match io.perform(&step_def) {
                     Ok(()) => {
-                        let desc = format!("step {step}: {a} {}", decision);
+                        let desc = format!("step {step}: {a} {} vision={vision}", decision);
                         history.push(desc.clone());
                         prev_describe = describe.clone();
                         events.push(ExecEvent::Step(StepOutcome {

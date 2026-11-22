@@ -74,7 +74,7 @@ object AdapterRuntime {
         val prompt = buildString {
             append("You are a vision-capable Android phone agent (like DroidRun). You control the phone through touch gestures to accomplish the user's goal. ")
             append("Decide the SINGLE next action.\n")
-            if (hasImage) append("A SCREENSHOT of the current phone screen is attached — use it to see icons, positions and layout. Coordinates are in the screenshot's pixel space (screen width/height are in SCREEN header).\n")
+            if (hasImage) append("A SCREENSHOT of the current phone screen is attached with RED NUMBERED CIRCLES drawn on every interactive element — the numbers match the ELEMENTS list idx. Use tap_element with the number you see on the target. Coordinates are in full-screen pixel space (screen width/height are in SCREEN header).\n")
             append("GOAL: ").append(goal).append('\n')
             append("STEP: ").append(step).append('/').append(maxSteps).append('\n')
             append("ALLOWED ACTIONS: ").append(allowed).append(", done, challenge\n")

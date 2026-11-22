@@ -66,9 +66,12 @@ object ScreenCapture {
     /**
      * 最新一帧截图 → 缩放 → JPEG base64。整个过程应在几十毫秒内完成。
      * 没授权或拿不到帧时返回 null。
+     *
+     * marks: 屏幕全分辨率下的标注点 [(idx, cx, cy), ...]，会在缩放后的图上画编号圆圈
+     * (Set-of-Mark): VLM 看到的截图上每个可交互元素都标了号, 与 a11y 的 idx 一一对应。
      */
     @Synchronized
-    fun captureBase64Jpeg(maxEdge: Int = 540, quality: Int = 70): String? {
+    fun captureBase64Jpeg(maxEdge: Int = 540, quality: Int = 70, marks: List<Triple<Int, Int, Int>>? = null): String? {
         val r = reader ?: return null
         // 给 virtual display 一小段时间出帧
         var img: Image? = null
@@ -102,6 +105,28 @@ object ScreenCapture {
                 )
             } else full
             if (scaled !== full) full.recycle()
+            // Set-of-Mark: 在截图上画元素编号, 与 a11y idx 对应
+            if (!marks.isNullOrEmpty() && scaled.width > 0) {
+                val canvas = android.graphics.Canvas(scaled)
+                val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                    color = android.graphics.Color.RED
+                    style = android.graphics.Paint.Style.FILL
+                }
+                val textPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                    color = android.graphics.Color.WHITE
+                    textSize = (scaled.width / 34f).coerceAtLeast(14f)
+                    typeface = android.graphics.Typeface.DEFAULT_BOLD
+                    textAlign = android.graphics.Paint.Align.CENTER
+                }
+                val r = (scaled.width / 46f).coerceAtLeast(12f)
+                for ((idx, cx, cy) in marks) {
+                    val x = cx * scale
+                    val y = cy * scale
+                    canvas.drawCircle(x, y, r, paint)
+                    val baseline = y - (textPaint.ascent() + textPaint.descent()) / 2f
+                    canvas.drawText(idx.toString(), x, baseline, textPaint)
+                }
+            }
             val bos = ByteArrayOutputStream()
             scaled.compress(Bitmap.CompressFormat.JPEG, quality, bos)
             if (scaled !== full) scaled.recycle()

@@ -245,6 +245,11 @@ class AgentForegroundService : Service() {
         // agentic 任务的 goal 在 task_context 里 (数据, 非签名参数)
         val taskContext = brief.optJSONObject("task_context")?.toString() ?: "{}"
 
+        // agentic 闭环走"控件树 + 截图"双通道: 没授权录屏时弹一次系统授权框 (用户点允许即可)
+        if (brief.optString("adapter_id") == "system.agentic") {
+            try { com.sincy.agent.MainActivity.requestScreenCapIfNeeded() } catch (_: Exception) {}
+        }
+
         // app adapter 假定目标 app 已在前台; 这里先把它拉起来 (幂等), 再等它稳定。
         // system.* adapter (如 system.agentic) 自己决定操作哪个 app, 不在这里预启动。
         val adapterId = brief.optString("adapter_id")
