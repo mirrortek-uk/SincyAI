@@ -41,16 +41,14 @@ class MainActivity : AppCompatActivity() {
         androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult(),
     ) { result ->
         if (result.resultCode == android.app.Activity.RESULT_OK && result.data != null) {
-            val mpm = getSystemService(android.media.projection.MediaProjectionManager::class.java)
-            val proj = mpm.getMediaProjection(android.app.Activity.RESULT_OK, result.data!!)
-            val disp = windowManager.defaultDisplay
-            com.sincy.agent.perception.ScreenCapture.start(proj, disp, resources.displayMetrics.densityDpi)
-            Toast.makeText(
+            // Android 14+: 必须经 mediaProjection 前台服务拿 projection, 直接在 Activity
+            // 调 getMediaProjection 会 SecurityException 崩溃
+            com.sincy.agent.core.MediaProjectionService.startWithResult(
                 this,
-                if (com.sincy.agent.perception.ScreenCapture.active) "录屏授权成功 ✔ agent 现在能看屏幕了"
-                else "录屏授权失败",
-                Toast.LENGTH_LONG,
-            ).show()
+                result.resultCode,
+                result.data!!,
+            )
+            Toast.makeText(this, "正在启动录屏服务… 看通知栏", Toast.LENGTH_LONG).show()
         } else {
             Toast.makeText(this, "未授权录屏 — agent 只能用控件树(无视觉)", Toast.LENGTH_LONG).show()
         }

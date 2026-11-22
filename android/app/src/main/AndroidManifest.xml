@@ -9,6 +9,7 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.WRITE_SETTINGS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
 
     <application
         android:label="Sincy Agent"
@@ -53,6 +54,12 @@
             android:name=".core.AgentForegroundService"
             android:exported="false"
             android:foregroundServiceType="specialUse" />
+
+        <!-- Android 14+ 录屏: 必须是 mediaProjection 类型的前台服务持 projection -->
+        <service
+            android:name=".core.MediaProjectionService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
 
         <receiver
             android:name=".core.BootReceiver"
