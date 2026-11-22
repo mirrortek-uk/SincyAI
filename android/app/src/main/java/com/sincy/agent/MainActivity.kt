@@ -37,6 +37,25 @@ class MainActivity : AppCompatActivity() {
 
     private val http = OkHttpClient()
 
+    private val screenCapLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK && result.data != null) {
+            val mpm = getSystemService(android.media.projection.MediaProjectionManager::class.java)
+            val proj = mpm.getMediaProjection(android.app.Activity.RESULT_OK, result.data!!)
+            val disp = windowManager.defaultDisplay
+            com.sincy.agent.perception.ScreenCapture.start(proj, disp, resources.displayMetrics.densityDpi)
+            Toast.makeText(
+                this,
+                if (com.sincy.agent.perception.ScreenCapture.active) "录屏授权成功 ✔ agent 现在能看屏幕了"
+                else "录屏授权失败",
+                Toast.LENGTH_LONG,
+            ).show()
+        } else {
+            Toast.makeText(this, "未授权录屏 — agent 只能用控件树(无视觉)", Toast.LENGTH_LONG).show()
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // 打开 app 期间屏幕常亮
@@ -84,9 +103,16 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+        val grantScreen = Button(this).apply {
+            text = "授权录屏 (视觉能力: agent 直接看屏幕截图)"
+            setOnClickListener {
+                val mpm = getSystemService(android.media.projection.MediaProjectionManager::class.java)
+                screenCapLauncher.launch(mpm.createScreenCaptureIntent())
+            }
+        }
         root.addView(version); root.addView(server); root.addView(code)
         root.addView(pair); root.addView(openA11y); root.addView(start)
-        root.addView(antilock); root.addView(grantSettings)
+        root.addView(antilock); root.addView(grantSettings); root.addView(grantScreen)
         setContentView(root)
 
         pair.setOnClickListener {

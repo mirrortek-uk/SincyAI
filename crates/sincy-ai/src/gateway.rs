@@ -13,6 +13,9 @@ pub struct GenerationRequest {
     pub max_tokens: u32,
     /// request id for cost attribution
     pub content_item_id: Option<String>,
+    /// base64-encoded images (jpeg/png) for vision/multimodal requests (device agent screenshots)
+    #[serde(default)]
+    pub images: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,9 +89,22 @@ impl LlmGateway for OpenAiCompatibleGateway {
         } else {
             req.model.clone()
         };
+        // multimodal: text + image parts (OpenAI-compatible content array)
+        let content: Value = if req.images.is_empty() {
+            json!(req.prompt)
+        } else {
+            let mut parts = vec![json!({"type": "text", "text": req.prompt})];
+            for img in &req.images {
+                parts.push(json!({
+                    "type": "image_url",
+                    "image_url": {"url": format!("data:image/jpeg;base64,{img}")}
+                }));
+            }
+            json!(parts)
+        };
         let body = json!({
             "model": model,
-            "messages": [{"role": "user", "content": req.prompt}],
+            "messages": [{"role": "user", "content": content}],
             "max_tokens": req.max_tokens,
         });
         let resp = self
@@ -379,6 +395,7 @@ mod tests {
                 model: "mock-1".into(),
                 max_tokens: 100,
                 content_item_id: None,
+                images: Vec::new(),
             })
             .await
             .expect("gen");
@@ -394,6 +411,7 @@ mod tests {
                 model: "mock-1".into(),
                 max_tokens: 512,
                 content_item_id: None,
+                images: Vec::new(),
             })
             .await
             .unwrap();
@@ -407,6 +425,7 @@ mod tests {
                 model: "mock-1".into(),
                 max_tokens: 512,
                 content_item_id: None,
+                images: Vec::new(),
             })
             .await
             .unwrap();
@@ -452,6 +471,7 @@ mod tests {
                 model: "vibe".into(),
                 max_tokens: 100,
                 content_item_id: None,
+                images: Vec::new(),
             })
             .await
             .unwrap();
@@ -478,6 +498,7 @@ mod tests {
                 model: "vibe".into(),
                 max_tokens: 10,
                 content_item_id: None,
+                images: Vec::new(),
             })
             .await;
         assert!(r.is_err());

@@ -1065,6 +1065,7 @@ impl LlmPort for PgLlmPort {
         // same provider policy as /ai/generate (mock only when explicitly allowed)
         let gw = sincy_ai::gateway_from_env(self.allow_mock)?;
         let req = sincy_ai::GenerationRequest {
+            images: Vec::new(),
             prompt: prompt.to_string(),
             model: std::env::var("SINCY_LLM_MODEL").unwrap_or_else(|_| "mock-1".into()),
             max_tokens,

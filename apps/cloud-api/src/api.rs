@@ -1563,6 +1563,8 @@ struct AiGenerateBody {
     content_item_id: Option<Uuid>,
     /// 生成后直接保存为发布包（内容来源: AI 生成页 → 内容包 → 发布）
     save_as_package: Option<SaveAsPackage>,
+    /// base64 图片 (jpeg/png), 多模态/视觉请求 — 设备 agent 每步截图走这里
+    images: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1586,9 +1588,34 @@ async fn ai_generate(
             .monthly_budget_usd
             .map(|v| rust_decimal::Decimal::try_from(v).unwrap_or(rust_decimal::Decimal::ZERO)),
     );
-    // 估算成本: 约 $0.002/1k tokens (保守估计, 按 max_tokens 全额计)
+    // 估算成本: 约 $0.002/1k tokens (保守估计, 按 max_tokens 全额计) + 每张图约 $0.0005 (视觉 token)
+    let images = body.images.unwrap_or_default();
+    if images.len() > 4 {
+        return Err(app_error_response(AppError::non_retryable(
+            "too_many_images",
+            "at most 4 images per request",
+        )));
+    }
+    for img in &images {
+        // base64 解码后不超过 2MB, 且必须是合法 base64
+        use base64::Engine;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(img)
+            .map_err(|e| {
+                app_error_response(AppError::non_retryable(
+                    "bad_image",
+                    format!("invalid base64: {e}"),
+                ))
+            })?;
+        if decoded.len() > 2 * 1024 * 1024 {
+            return Err(app_error_response(AppError::non_retryable(
+                "image_too_large",
+                "each image must decode to <= 2MB",
+            )));
+        }
+    }
     let max_tokens = body.max_tokens.unwrap_or(1024).max(1);
-    let est_usd = max_tokens as f64 / 1000.0 * 0.002;
+    let est_usd = max_tokens as f64 / 1000.0 * 0.002 + images.len() as f64 * 0.0005;
     let est = rust_decimal::Decimal::try_from(est_usd).unwrap_or(rust_decimal::Decimal::ZERO);
     if let Err(e) = checker.check(auth.agency_id, None, est).await {
         crate::metrics::Metrics::inc(&crate::metrics::metrics().budget_blocked_total);
@@ -1604,6 +1631,7 @@ async fn ai_generate(
         }),
         max_tokens,
         content_item_id: body.content_item_id.map(|u| u.to_string()),
+        images,
     };
     let gw = sincy_ai::gateway_from_env(state.allow_mock_adapters)
         .map_err(|e| app_error_response(AppError::non_retryable("llm_provider", e)))?;

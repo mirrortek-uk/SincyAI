@@ -21,6 +21,10 @@ pub trait ScreenSnapshot {
     fn describe(&self) -> String {
         String::new()
     }
+    /// Base64-encoded screenshot (jpeg) for vision LLMs; None when unavailable.
+    fn image_base64(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Test/mock snapshot.
@@ -103,11 +107,33 @@ pub enum SystemOp {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     Tap(Anchor),
-    SetText { target: Anchor, value: String },
-    PickMedia { index: usize },
+    SetText {
+        target: Anchor,
+        value: String,
+    },
+    PickMedia {
+        index: usize,
+    },
     Scroll,
     Back,
     CloseDialog,
+    /// coordinate tap (vision agents); value JSON {"x","y"}
+    TapAt {
+        x: i32,
+        y: i32,
+    },
+    /// coordinate swipe (vision agents); value JSON {"x1","y1","x2","y2","ms"?}
+    SwipePath {
+        x1: i32,
+        y1: i32,
+        x2: i32,
+        y2: i32,
+        ms: u64,
+    },
+    /// sleep ms (no injection)
+    Wait {
+        ms: u64,
+    },
 }
 
 impl FlowStep {
@@ -125,6 +151,30 @@ impl FlowStep {
             ActionKind::Scroll => Some(Action::Scroll),
             ActionKind::Back => Some(Action::Back),
             ActionKind::CloseDialog => Some(Action::CloseDialog),
+            ActionKind::TapAt => {
+                let v = self.value.clone()?;
+                let o: serde_json::Value = serde_json::from_str(&v).ok()?;
+                Some(Action::TapAt {
+                    x: o["x"].as_i64()? as i32,
+                    y: o["y"].as_i64()? as i32,
+                })
+            }
+            ActionKind::SwipePath => {
+                let v = self.value.clone()?;
+                let o: serde_json::Value = serde_json::from_str(&v).ok()?;
+                Some(Action::SwipePath {
+                    x1: o["x1"].as_i64()? as i32,
+                    y1: o["y1"].as_i64()? as i32,
+                    x2: o["x2"].as_i64()? as i32,
+                    y2: o["y2"].as_i64()? as i32,
+                    ms: o["ms"].as_u64().unwrap_or(350),
+                })
+            }
+            ActionKind::Wait => {
+                let v = self.value.clone()?;
+                let ms = v.parse::<u64>().ok()?;
+                Some(Action::Wait { ms })
+            }
         }
     }
 }

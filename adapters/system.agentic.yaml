@@ -19,5 +19,5 @@ flow: []
 params:
   target_package: com.android.settings
   max_steps: 30
-  allowed_actions: ["tap", "scroll", "set_text", "back", "close_dialog"]
+  allowed_actions: ["tap", "tap_xy", "scroll", "swipe_xy", "set_text", "back", "close_dialog", "wait"]
   challenge_texts: ["验证", "安全检测", "人机验证", "unusual activity", "Verify you are human", "captcha"]

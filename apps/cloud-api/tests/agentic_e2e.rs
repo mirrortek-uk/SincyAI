@@ -170,6 +170,64 @@ async fn agentic_e2e() {
     agentic_challenge_screen_parks_waiting_user().await;
     agentic_missing_goal_rejected().await;
     agentic_identical_decision_loop_fails_fast().await;
+    agentic_coordinate_actions_pass_through().await;
+}
+
+/// 视觉动作: tap_xy/swipe_xy/wait 决策应被接受并执行 (白名单内), 最终 done => COMPLETED
+async fn agentic_coordinate_actions_pass_through() {
+    let Some((pool, agency, port, user_token)) = setup().await else {
+        eprintln!("skip: {TEST_URL_ENV} not set");
+        return;
+    };
+    let (device_id, device_token) = register_device(&pool, agency).await;
+
+    let resp = dispatch(port, &user_token, "按坐标点击屏幕中央然后滑动").await;
+    let task_id: Uuid = resp["task_id"].as_str().unwrap().parse().unwrap();
+
+    let mut io = ScriptedIo::new(vec![
+        MockSnapshot::new(vec![], vec!["桌面".into()]),
+        MockSnapshot::new(vec![], vec!["桌面".into()]),
+        MockSnapshot::new(vec![], vec!["桌面".into()]),
+        MockSnapshot::new(vec![], vec!["设置".into()]),
+    ]);
+    io.llm_script
+        .push_back(Ok(json!({"action": "tap_xy", "x": 540, "y": 1200})));
+    io.llm_script.push_back(Ok(
+        json!({"action": "swipe_xy", "x1": 540, "y1": 1600, "x2": 540, "y2": 600, "ms": 300}),
+    ));
+    io.llm_script
+        .push_back(Ok(json!({"action": "wait", "ms": 500})));
+    io.llm_script.push_back(Ok(json!({"action": "done"})));
+    let handle = tokio::spawn({
+        let pool = pool.clone();
+        let device_token = device_token.clone();
+        async move { run_agent(&pool, agency, port, &device_token, device_id, io).await }
+    });
+
+    wait_task_state(&pool, task_id, "COMPLETED", 20).await;
+    let events: Vec<String> = sqlx::query_scalar(
+        "SELECT coalesce(detail::text, '') FROM task_events WHERE task_id = $1 ORDER BY at",
+    )
+    .bind(task_id)
+    .fetch_all(&pool)
+    .await
+    .expect("events");
+    let joined = events.join("\n");
+    assert!(
+        joined.contains("tap_xy"),
+        "events missing tap_xy:\n{joined}"
+    );
+    assert!(
+        joined.contains("swipe_xy"),
+        "events missing swipe_xy:\n{joined}"
+    );
+    assert!(joined.contains("wait"), "events missing wait:\n{joined}");
+    let exec = handle.await.expect("join");
+    assert!(
+        matches!(exec.outcome, sincy_agent::TaskOutcome::Success),
+        "outcome: {:?}",
+        exec.outcome
+    );
 }
 
 /// LLM 连续 3 次返回完全相同的决策 => 立即 FAILED (loop detected), 不烧完 max_steps

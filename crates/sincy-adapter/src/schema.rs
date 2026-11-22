@@ -77,6 +77,12 @@ pub enum ActionKind {
     Scroll,
     Back,
     CloseDialog,
+    /// 视觉/坐标点击: value 携带 {"x":..,"y":..} (屏幕像素坐标)
+    TapAt,
+    /// 视觉/坐标滑动: value 携带 {"x1":..,"y1":..,"x2":..,"y2":..,"ms":..}
+    SwipePath,
+    /// 等待: value 携带毫秒数 (如 "1500")
+    Wait,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,6 +153,15 @@ impl AdapterDefinition {
                     }
                 }
                 ActionKind::Scroll | ActionKind::Back | ActionKind::CloseDialog => {}
+                // coordinate/vision actions carry coords in value
+                ActionKind::TapAt | ActionKind::SwipePath | ActionKind::Wait => {
+                    if step.value.is_none() {
+                        return Err(AdapterError::Invalid(format!(
+                            "action {:?} requires value (coords json / ms)",
+                            step.action
+                        )));
+                    }
+                }
             }
         }
         // at least one screen must be the challenge detector

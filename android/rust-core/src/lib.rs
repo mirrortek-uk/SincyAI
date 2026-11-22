@@ -224,6 +224,9 @@ mod jni {
                 })
                 .unwrap_or(false)
         }
+        fn image_base64(&self) -> Option<String> {
+            self.value()["screenshot"].as_str().map(String::from)
+        }
         fn describe(&self) -> String {
             let v = self.value();
             let ids = v["ids"]
@@ -442,6 +445,37 @@ mod jni {
                 json!({"kind": "close_dialog", "pre_ms": rng.range(120.0, 450.0) as u64})
                     .to_string()
             }
+            // 视觉/坐标动作: 以坐标为中心造一个小包围盒, 走同样的人性化 tap 规划
+            Action::TapAt { x, y } => {
+                let b = (x - 8, y - 8, x + 8, y + 8);
+                let plan = plan_tap(b, p, rng);
+                json!({
+                    "kind": "tap",
+                    "x": plan.x, "y": plan.y,
+                    "hold_ms": plan.hold_ms,
+                    "pre_ms": plan.pre_ms, "post_ms": plan.post_ms,
+                })
+                .to_string()
+            }
+            Action::SwipePath { x1, y1, x2, y2, ms } => {
+                let plan = plan_swipe(*x1, *y1, *x2, *y2, p, rng);
+                let mut segs = plan.segments;
+                // respect requested duration roughly by scaling segment ms
+                let total: u64 = segs.iter().map(|s| s.ms).sum();
+                if total > 0 && *ms > 0 {
+                    let scale = *ms as f64 / total as f64;
+                    for s in segs.iter_mut() {
+                        s.ms = ((s.ms as f64) * scale).max(16.0) as u64;
+                    }
+                }
+                json!({
+                    "kind": "swipe",
+                    "segments": segs,
+                    "post_ms": rng.range(250.0, 700.0) as u64,
+                })
+                .to_string()
+            }
+            Action::Wait { ms } => json!({"kind": "wait", "ms": ms}).to_string(),
         }
     }
 

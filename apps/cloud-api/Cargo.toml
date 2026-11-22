@@ -25,6 +25,7 @@ rust_decimal = { version = "1", features = ["db-postgres", "serde"] }
 futures-util = "0.3"
 async-trait = "0.1"
 sha2 = { workspace = true }
+base64 = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }

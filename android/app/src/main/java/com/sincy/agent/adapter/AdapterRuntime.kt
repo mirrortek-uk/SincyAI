@@ -62,43 +62,51 @@ object AdapterRuntime {
         val maxSteps = req.optInt("max_steps", 30)
         val allowed = req.optJSONArray("allowed_actions")?.let { a ->
             (0 until a.length()).map { a.getString(it) }.joinToString(",")
-        } ?: "tap,scroll,set_text,back,close_dialog"
+        } ?: "tap,tap_xy,scroll,swipe_xy,set_text,back,close_dialog,wait"
         val screen = req.optString("screen")
+        val hasImage = req.optString("image").isNotEmpty()
+        val model = req.optString("model")
         val historyArr = req.optJSONArray("history")
         val history = historyArr?.let { a ->
             (0 until a.length()).map { a.getString(it) }.joinToString("; ")
         } ?: ""
         val prompt = buildString {
-            append("You control an Android phone through accessibility gestures to accomplish a user goal. ")
+            append("You are a vision-capable Android phone agent (like DroidRun). You control the phone through touch gestures to accomplish the user's goal. ")
             append("Decide the SINGLE next action.\n")
+            if (hasImage) append("A SCREENSHOT of the current phone screen is attached — use it to see icons, positions and layout. Coordinates are in the screenshot's pixel space (screen width/height are in SCREEN header).\n")
             append("GOAL: ").append(goal).append('\n')
             append("STEP: ").append(step).append('/').append(maxSteps).append('\n')
             append("ALLOWED ACTIONS: ").append(allowed).append(", done, challenge\n")
-            append("SCREEN (ids|texts|nodes with bounds): ").append(screen).append('\n')
+            append("SCREEN (a11y tree ids|texts|nodes with bounds): ").append(screen).append('\n')
             if (history.isNotEmpty()) append("HISTORY: ").append(history).append('\n')
             append("Reply with EXACTLY ONE JSON object and nothing else, one of:\n")
-            append("""{"action":"tap","target":{"id":"<node id>"}} or {"action":"tap","target":{"text":"<visible text>"}}""")
+            append("""{"action":"tap_xy","x":540,"y":1200}  — tap raw screenshot coordinates (preferred when you can see the target in the image)""")
             append('\n')
-            append("""{"action":"scroll"} | {"action":"set_text","target":{"text":"<field text>"},"value":"<text>"}""")
+            append("""{"action":"tap","target":{"id":"<resource-id>"}} or {"action":"tap","target":{"text":"<visible text>"}}  — tap by a11y node""")
+            append('\n')
+            append("""{"action":"swipe_xy","x1":540,"y1":1600,"x2":540,"y2":600,"ms":350} | {"action":"scroll"}  — scroll/swipe""")
+            append('\n')
+            append("""{"action":"set_text","target":{"text":"<field text>"},"value":"<text>"} | {"action":"wait","ms":1000}""")
             append('\n')
             append("""{"action":"back"} | {"action":"close_dialog"} | {"action":"done"} | {"action":"challenge","reason":"..."}""")
             append('\n')
-            append("Pick tap targets from ids/texts actually visible on the SCREEN. Never invent actions outside ALLOWED ACTIONS.\n")
             append("RULES: (1) If a HISTORY line says screen UNCHANGED, do NOT repeat that action — scroll or pick a different target. ")
-            append("(2) When the GOAL is visibly achieved on the SCREEN, reply {\"action\":\"done\"}. ")
-            append("(3) Prefer tapping by id (resource-id) over text when both exist. ")
-            append("(4) If stuck after a few steps, reply {\"action\":\"challenge\",\"reason\":\"stuck: ...\"} instead of looping.")
+            append("(2) When the GOAL is visibly achieved, reply {\"action\":\"done\"}. ")
+            append("(3) Prefer tap_xy with coordinates from the SCREENSHOT when the target is visible but has no reliable id/text. ")
+            append("(4) If stuck after a few steps, reply {\"action\":\"challenge\",\"reason\":\"stuck: ...\"} instead of looping. ")
+            append("(5) Never invent actions outside ALLOWED ACTIONS — no installs, no posts, no payments; those are refused by policy.")
         }
         val base = cloudBase.ifEmpty { "http://127.0.0.1:18081" }
         val token = deviceToken
         val body = org.json.JSONObject()
             .put("prompt", prompt)
-            .put("max_tokens", 256)
-            .toString()
+            .put("max_tokens", 384)
+        if (model.isNotEmpty()) body.put("model", model)
+        if (hasImage) body.put("images", org.json.JSONArray().put(req.getString("image")))
         val request = okhttp3.Request.Builder()
             .url("$base/api/v1/ai/generate")
             .header("Authorization", "Bearer $token")
-            .post(okhttp3.RequestBody.create("application/json; charset=utf-8".toMediaType(), body))
+            .post(okhttp3.RequestBody.create("application/json; charset=utf-8".toMediaType(), body.toString()))
             .build()
         llmHttp.newCall(request).execute().use { resp ->
             val respBody = resp.body?.string() ?: ""

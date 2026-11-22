@@ -100,6 +100,10 @@ class SincyAccessibilityService : AccessibilityService() {
                     sleepQuiet(pre)
                     svc.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
                 }
+                "wait" -> {
+                    sleepQuiet(a.optLong("ms", 500))
+                    true
+                }
                 // 系统级 op (签名 system.* adapter): 下载/安装/轮询/验签/启动, 不走屏幕解释器
                 "system_op" -> com.sincy.agent.setup.SetupOps.execute(svc, a.optJSONObject("op"))
                 else -> false
@@ -267,12 +271,15 @@ class SincyAccessibilityService : AccessibilityService() {
                 }
             }
             walk(root, 0)
+            // 视觉通道: 若已授权录屏, 附带当前帧截图 (base64 jpeg), 喂给 VLM
+            val shot = try { ScreenCapture.captureBase64Jpeg() } catch (_: Exception) { null }
             return JSONObject()
                 .put("ids", ids)
                 .put("texts", texts)
                 .put("nodes", nodes)
                 .put("width", width)
                 .put("height", height)
+                .put("screenshot", shot ?: JSONObject.NULL)
                 .toString()
         }
     }

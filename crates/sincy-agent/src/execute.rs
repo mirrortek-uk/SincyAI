@@ -303,10 +303,13 @@ fn run_agentic_loop(
         .unwrap_or_else(|| {
             vec![
                 "tap".into(),
+                "tap_xy".into(),
                 "scroll".into(),
+                "swipe_xy".into(),
                 "set_text".into(),
                 "back".into(),
                 "close_dialog".into(),
+                "wait".into(),
             ]
         });
     let challenge_texts: Vec<String> = params
@@ -368,7 +371,7 @@ fn run_agentic_loop(
                 step - 1
             ));
         }
-        let req = serde_json::json!({
+        let mut req = serde_json::json!({
             "goal": goal,
             "step": step,
             "max_steps": max_steps,
@@ -376,6 +379,16 @@ fn run_agentic_loop(
             "screen": describe,
             "history": history,
         });
+        if let Some(img) = snap.image_base64() {
+            req["image"] = serde_json::Value::String(img);
+        }
+        if let Some(m) = params
+            .get("model")
+            .and_then(|v| v.as_str())
+            .filter(|m| !m.is_empty())
+        {
+            req["model"] = serde_json::Value::String(m.to_string());
+        }
         let decision = match io.llm_decide(&req) {
             Ok(d) => d,
             Err(e) => {
@@ -437,22 +450,67 @@ fn run_agentic_loop(
                 });
             }
             a if allowed.iter().any(|x| x == a) => {
-                let kind = match a {
-                    "tap" => ActionKind::Tap,
-                    "set_text" => ActionKind::SetText,
-                    "scroll" => ActionKind::Scroll,
-                    "back" => ActionKind::Back,
-                    "close_dialog" => ActionKind::CloseDialog,
-                    _ => ActionKind::Back,
+                let (kind, target, value) = match a {
+                    "tap" => (
+                        ActionKind::Tap,
+                        decision
+                            .get("target")
+                            .cloned()
+                            .and_then(|t| serde_json::from_value::<Anchor>(t).ok()),
+                        None,
+                    ),
+                    "tap_xy" => (
+                        ActionKind::TapAt,
+                        None,
+                        Some(
+                            serde_json::json!({
+                                "x": decision.get("x").and_then(|v| v.as_i64()).unwrap_or(0),
+                                "y": decision.get("y").and_then(|v| v.as_i64()).unwrap_or(0),
+                            })
+                            .to_string(),
+                        ),
+                    ),
+                    "swipe_xy" => (
+                        ActionKind::SwipePath,
+                        None,
+                        Some(
+                            serde_json::json!({
+                                "x1": decision.get("x1").and_then(|v| v.as_i64()).unwrap_or(0),
+                                "y1": decision.get("y1").and_then(|v| v.as_i64()).unwrap_or(0),
+                                "x2": decision.get("x2").and_then(|v| v.as_i64()).unwrap_or(0),
+                                "y2": decision.get("y2").and_then(|v| v.as_i64()).unwrap_or(0),
+                                "ms": decision.get("ms").and_then(|v| v.as_u64()).unwrap_or(350),
+                            })
+                            .to_string(),
+                        ),
+                    ),
+                    "wait" => (
+                        ActionKind::Wait,
+                        None,
+                        Some(
+                            decision
+                                .get("ms")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(500)
+                                .to_string(),
+                        ),
+                    ),
+                    "set_text" => (
+                        ActionKind::SetText,
+                        decision
+                            .get("target")
+                            .cloned()
+                            .and_then(|t| serde_json::from_value::<Anchor>(t).ok()),
+                        decision
+                            .get("value")
+                            .and_then(|v| v.as_str())
+                            .map(String::from),
+                    ),
+                    "scroll" => (ActionKind::Scroll, None, None),
+                    "back" => (ActionKind::Back, None, None),
+                    "close_dialog" => (ActionKind::CloseDialog, None, None),
+                    _ => (ActionKind::Back, None, None),
                 };
-                let target = decision
-                    .get("target")
-                    .cloned()
-                    .and_then(|t| serde_json::from_value::<Anchor>(t).ok());
-                let value = decision
-                    .get("value")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
                 let step_def = FlowStep {
                     expect: "agentic".into(),
                     action: kind,

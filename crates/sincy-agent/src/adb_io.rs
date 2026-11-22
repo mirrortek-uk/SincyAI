@@ -458,6 +458,48 @@ impl PlatformIo for AdbIo {
                 Self::sleep_ms(self.rng.range(120.0, 450.0) as u64);
                 let _ = self.shell("input keyevent KEYCODE_BACK");
             }
+            Action::TapAt { x, y } => {
+                let plan = plan_tap(
+                    (*x - 8, *y - 8, *x + 8, *y + 8),
+                    &self.profile,
+                    &mut self.rng,
+                );
+                Self::sleep_ms(plan.pre_ms);
+                let o = self.shell(&format!("input tap {} {}", plan.x, plan.y));
+                if !o.status.success() {
+                    return Err(format!(
+                        "input tap failed: {}",
+                        String::from_utf8_lossy(&o.stderr)
+                    ));
+                }
+                Self::sleep_ms(plan.post_ms);
+            }
+            Action::SwipePath { x1, y1, x2, y2, ms } => {
+                let mut plan = plan_swipe(*x1, *y1, *x2, *y2, &self.profile, &mut self.rng);
+                let total: u64 = plan.segments.iter().map(|s| s.ms).sum();
+                if total > 0 && *ms > 0 {
+                    let scale = *ms as f64 / total as f64;
+                    for s in plan.segments.iter_mut() {
+                        s.ms = ((s.ms as f64) * scale).max(16.0) as u64;
+                    }
+                }
+                for seg in &plan.segments {
+                    let o = self.shell(&format!(
+                        "input swipe {} {} {} {} {}",
+                        seg.x1, seg.y1, seg.x2, seg.y2, seg.ms
+                    ));
+                    if !o.status.success() {
+                        return Err(format!(
+                            "input swipe failed: {}",
+                            String::from_utf8_lossy(&o.stderr)
+                        ));
+                    }
+                }
+                Self::sleep_ms(self.rng.range(250.0, 700.0) as u64);
+            }
+            Action::Wait { ms } => {
+                Self::sleep_ms(*ms);
+            }
         }
         self.performed.push(desc);
         Ok(())
