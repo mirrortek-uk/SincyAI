@@ -430,7 +430,13 @@ fn run_agentic_loop(
             .unwrap_or("");
         // 连续 3 次完全相同的决策 => 死循环, 立即失败而不是烧完 max_steps
         let decision_str = decision.to_string();
-        if decision_str == last_decision && action != "done" && action != "challenge" {
+        // 只有"决策相同 + 屏幕也没变化"才算死循环; 屏幕在动说明动作有效, 重置计数
+        let screen_changed = !prev_describe.is_empty() && describe != prev_describe;
+        if decision_str == last_decision
+            && !screen_changed
+            && action != "done"
+            && action != "challenge"
+        {
             repeat_count += 1;
             if repeat_count >= 3 {
                 return Ok(AdapterExecution {
