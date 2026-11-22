@@ -34,7 +34,7 @@ async fn setup() -> Option<(sqlx::PgPool, AgencyId, u16, String)> {
         .run(&pool)
         .await
         .expect("migrate");
-    sqlx::query("TRUNCATE task_events, execution_routes, device_tasks, device_sessions, devices, channel_capabilities, app_adapter_versions, app_adapters, agency_members, agencies RESTART IDENTITY CASCADE")
+    sqlx::query("TRUNCATE task_events, execution_routes, device_tasks, device_sessions, devices, channel_capabilities, app_adapter_versions, app_adapters, setup_app_catalog, agency_members, agencies RESTART IDENTITY CASCADE")
         .execute(&pool).await.expect("clean");
 
     let agency = AgencyId::new();
@@ -67,6 +67,31 @@ async fn setup() -> Option<(sqlx::PgPool, AgencyId, u16, String)> {
     )
     .bind(&canonical).bind(&sig)
     .execute(&pool).await.expect("adapter version");
+
+    // 目录 + app 专属 adapter: system.setup_install.x
+    sqlx::query(
+        "INSERT INTO setup_app_catalog (app_key, display_name, target_package, download_url, sha256)
+         VALUES ('x', 'X (Twitter)', 'com.twitter.android', 'https://cdn.example/x.apk', 'abc123')",
+    )
+    .execute(&pool).await.expect("catalog");
+    let mut app_def = def.clone();
+    app_def.adapter = "system.setup_install.x".to_string();
+    app_def.params = Some(serde_json::json!({
+        "target_package": "com.twitter.android",
+        "download_url": "https://cdn.example/x.apk",
+        "sha256": "abc123",
+        "signer_cert_sha256": "",
+    }));
+    let app_canonical = serde_json::to_string(&app_def).expect("canonical");
+    let app_sig = sign_definition(DEV_SIGNING_KEY, &app_canonical);
+    sqlx::query("INSERT INTO app_adapters (id, app_package, description) VALUES ('system.setup_install.x', 'com.twitter.android', 'setup x')")
+        .execute(&pool).await.expect("adapter row x");
+    sqlx::query(
+        "INSERT INTO app_adapter_versions (adapter_id, version, version_range, definition, signature, sha256, state)
+         VALUES ('system.setup_install.x', 1, '>=0', $1::jsonb, $2, 'x', 'active')",
+    )
+    .bind(&app_canonical).bind(&app_sig)
+    .execute(&pool).await.expect("adapter version x");
 
     let state = cloud_api::state_for_test::test_state(Some(pool.clone()));
     let app = axum::Router::new()
@@ -131,6 +156,71 @@ async fn wait_task_state(pool: &sqlx::PgPool, task_id: Uuid, want: &str, secs: u
 async fn setup_install_e2e() {
     setup_install_runs_signed_op_sequence_to_completed().await;
     setup_install_aborts_on_sha256_mismatch().await;
+    setup_install_app_specific_adapter_is_resolved().await;
+}
+
+/// app 指定时 action=setup_install:x, 简报里应拿到 system.setup_install.x 的签名定义
+async fn setup_install_app_specific_adapter_is_resolved() {
+    let Some((pool, agency, port, user_token)) = setup().await else {
+        eprintln!("skip: {TEST_URL_ENV} not set");
+        return;
+    };
+    let (_device_id, device_token) = register_device(&pool, agency).await;
+    let client = reqwest::Client::new();
+
+    let apps = client
+        .get(format!("http://127.0.0.1:{port}/api/v1/setup/apps"))
+        .bearer_auth(&user_token)
+        .send()
+        .await
+        .expect("apps")
+        .json::<serde_json::Value>()
+        .await
+        .expect("apps json");
+    assert_eq!(apps["items"][0]["app_key"], "x");
+
+    let bad = client
+        .post(format!("http://127.0.0.1:{port}/api/v1/setup/run"))
+        .bearer_auth(&user_token)
+        .json(&json!({"action": "setup_install", "app": "nope"}))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(bad.status(), 400, "未登记 app 必须拒绝");
+
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/api/v1/setup/run"))
+        .bearer_auth(&user_token)
+        .json(&json!({"action": "setup_install", "app": "x"}))
+        .send()
+        .await
+        .expect("setup/run")
+        .json::<serde_json::Value>()
+        .await
+        .expect("json");
+    assert_eq!(resp["adapter"], "system.setup_install.x", "{resp}");
+    assert_eq!(resp["action"], "setup_install:x");
+    let task_id: Uuid = resp["task_id"].as_str().unwrap().parse().unwrap();
+
+    let brief = client
+        .get(format!(
+            "http://127.0.0.1:{port}/api/v1/agent/tasks/{task_id}?token={device_token}"
+        ))
+        .bearer_auth(&device_token)
+        .send()
+        .await
+        .expect("brief")
+        .json::<serde_json::Value>()
+        .await
+        .expect("brief json");
+    assert_eq!(brief["adapter_id"], "system.setup_install.x", "{brief}");
+    assert!(
+        brief["adapter_yaml"]
+            .as_str()
+            .unwrap()
+            .contains("cdn.example/x.apk"),
+        "params 应来自目录: {brief}"
+    );
 }
 
 async fn setup_install_runs_signed_op_sequence_to_completed() {

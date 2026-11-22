@@ -53,6 +53,7 @@ pub fn routes() -> Router<AppState> {
         .route("/devices/pairing-codes", post(create_pairing_code))
         .route("/devices/pair", post(pair_with_code))
         .route("/setup/run", post(run_setup))
+        .route("/setup/apps", get(list_setup_apps))
         .route(
             "/devices/register/complete",
             post(complete_device_registration),
@@ -977,18 +978,30 @@ async fn get_agent_task(
     let platform: String = task.get("platform");
     let action: String = task.get("action");
 
-    // adapter named by the device-route capability constraints
-    let cap = sqlx::query(
-        "SELECT constraints FROM channel_capabilities
-         WHERE platform = $1 AND action = $2 AND route = 'device'",
-    )
-    .bind(&platform)
-    .bind(&action)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
-    let adapter_id = cap
-        .and_then(|c| {
+    // adapter 选择: system 平台按 action 推导 (setup_install[:app] -> system.setup_install[.app]);
+    // 其他平台仍由 device 路由 capability 的 constraints 指定
+    let adapter_id = if platform == "system" {
+        if action == "setup_install" {
+            "system.setup_install".to_string()
+        } else if let Some(app) = action.strip_prefix("setup_install:") {
+            format!("system.setup_install.{app}")
+        } else {
+            return Err(app_error_response(AppError::non_retryable(
+                "no_adapter",
+                format!("未知 system action: {action}"),
+            )));
+        }
+    } else {
+        let cap = sqlx::query(
+            "SELECT constraints FROM channel_capabilities
+             WHERE platform = $1 AND action = $2 AND route = 'device'",
+        )
+        .bind(&platform)
+        .bind(&action)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
+        cap.and_then(|c| {
             c.get::<serde_json::Value, _>("constraints")["adapter"]
                 .as_str()
                 .map(String::from)
@@ -998,7 +1011,8 @@ async fn get_agent_task(
                 "no_adapter",
                 "device route has no signed adapter bound",
             ))
-        })?;
+        })?
+    };
 
     // latest active signed version of that adapter (platform-level registry)
     let av = sqlx::query(
@@ -1155,12 +1169,39 @@ async fn pair_with_code(
     ))
 }
 
+/// GET /setup/apps (JWT) — 可引导安装的应用目录 (setup_app_catalog)。
+async fn list_setup_apps(
+    State(state): State<AppState>,
+    axum::extract::Extension(_auth): axum::extract::Extension<crate::auth::AuthCtx>,
+) -> Result<Json<Value>, Response> {
+    let pool = state.pool().map_err(app_error_response)?;
+    let rows = sqlx::query(
+        "SELECT app_key, display_name, target_package FROM setup_app_catalog WHERE active ORDER BY app_key",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
+    let items: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            json!({
+                "app_key": r.get::<String, _>("app_key"),
+                "display_name": r.get::<String, _>("display_name"),
+                "target_package": r.get::<String, _>("target_package"),
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "items": items })))
+}
+
 /// POST /setup/run (JWT) — 设备引导任务: 创建一条 platform=system 的 device 路由任务,
 /// 由在线 agent 通过签名 system.* adapter 原生执行 (如下载安装 X)。
 /// 与内容发布同样受急停开关约束; 不需要内容包。
 #[derive(Debug, Deserialize)]
 struct SetupRunBody {
     action: String, // e.g. "setup_install"
+    /// 目标应用目录 key (setup_app_catalog.app_key), 如 "x"; 缺省走通用 system.setup_install
+    app: Option<String>,
 }
 
 async fn run_setup(
@@ -1187,33 +1228,45 @@ async fn run_setup(
             ),
         )));
     }
-    // capability 必须存在且绑定了签名 adapter
+    // system 平台: adapter_id 由 action + app 推导 (system.setup_install[.app]),
+    // 目录条目见 setup_app_catalog; 仍要求存在 device 路由 capability 兜底
     let cap = sqlx::query(
-        "SELECT constraints, priority FROM channel_capabilities
-         WHERE platform = 'system' AND action = $1 AND route = 'device'",
+        "SELECT priority FROM channel_capabilities
+         WHERE platform = 'system' AND action = 'setup_install' AND route = 'device'",
     )
-    .bind(&body.action)
     .fetch_optional(pool)
     .await
     .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?
     .ok_or_else(|| {
         app_error_response(AppError::non_retryable(
             "no_capability",
-            format!(
-                "system.{action} 没有 device 路由 capability",
-                action = body.action
-            ),
+            "system.setup_install 没有 device 路由 capability",
         ))
     })?;
-    let adapter_id = cap.get::<serde_json::Value, _>("constraints")["adapter"]
-        .as_str()
-        .map(String::from)
-        .ok_or_else(|| {
-            app_error_response(AppError::non_retryable(
-                "no_adapter",
-                "capability 未绑定 adapter",
-            ))
-        })?;
+    if body.action != "setup_install" {
+        return Err(app_error_response(AppError::non_retryable(
+            "unknown_setup_action",
+            format!("不支持的 setup action: {}", body.action),
+        )));
+    }
+    let adapter_id = match &body.app {
+        Some(app) => format!("system.setup_install.{app}"),
+        None => "system.setup_install".to_string(),
+    };
+    // app 指定时必须在目录里登记
+    if let Some(app) = &body.app {
+        let row = sqlx::query("SELECT 1 FROM setup_app_catalog WHERE app_key = $1 AND active")
+            .bind(app)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
+        if row.is_none() {
+            return Err(app_error_response(AppError::non_retryable(
+                "app_not_in_catalog",
+                format!("应用 {app} 未登记到 setup_app_catalog"),
+            )));
+        }
+    }
     let av = sqlx::query(
         "SELECT v.version FROM app_adapter_versions v WHERE v.adapter_id = $1 AND v.state = 'active' ORDER BY v.version DESC LIMIT 1",
     )
@@ -1230,7 +1283,11 @@ async fn run_setup(
 
     let task_id = Uuid::new_v4();
     let route_id = Uuid::new_v4();
-    let idem = format!("setup-{}-{}", body.action, task_id);
+    let route_action = match &body.app {
+        Some(app) => format!("setup_install:{app}"),
+        None => body.action.clone(),
+    };
+    let idem = format!("setup-{}-{}", route_action, task_id);
     let mut tx = pool
         .begin()
         .await
@@ -1242,7 +1299,7 @@ async fn run_setup(
     .bind(route_id)
     .bind(agency.as_uuid())
     .bind(task_id)
-    .bind(&body.action)
+    .bind(&route_action)
     .bind(cap.get::<i32, _>("priority"))
     .execute(&mut *tx)
     .await
@@ -1263,7 +1320,7 @@ async fn run_setup(
         .await
         .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
     Ok(Json(
-        json!({ "task_id": task_id, "action": body.action, "state": "QUEUED", "route": "device" }),
+        json!({ "task_id": task_id, "action": route_action, "adapter": adapter_id, "state": "QUEUED", "route": "device" }),
     ))
 }
 

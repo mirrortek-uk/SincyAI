@@ -3,6 +3,8 @@
 import { useEffect, useState } from "react";
 import { api, getToken, type DeviceItem } from "@/lib/api";
 
+type SetupApp = { app_key: string; display_name: string; target_package: string };
+
 // 设备页: 本租户注册的 Agent 设备及在线状态 (心跳 120s 内视为在线)。
 export default function DevicesPage() {
   const [items, setItems] = useState<DeviceItem[]>([]);
@@ -13,11 +15,17 @@ export default function DevicesPage() {
   } | null>(null);
   const [codeError, setCodeError] = useState<string | null>(null);
   const [setupMsg, setSetupMsg] = useState<string | null>(null);
+  const [setupApps, setSetupApps] = useState<SetupApp[]>([]);
 
-  const runSetupInstall = () => {
+  useEffect(() => {
+    if (!getToken()) return;
+    api.listSetupApps().then((r) => setSetupApps(r.items)).catch(() => {});
+  }, []);
+
+  const runSetupInstall = (app?: string) => {
     setSetupMsg(null);
     api
-      .runSetup("setup_install")
+      .runSetup("setup_install", app)
       .then((r) => setSetupMsg(`已派发引导安装任务 ${r.task_id.slice(0, 8)} (${r.state}) — 看手机通知栏/任务页`))
       .catch((e) => setSetupMsg(`派发失败: ${e}`));
   };
@@ -51,9 +59,16 @@ export default function DevicesPage() {
         </p>
         {codeError && <p style={{ color: "#e06c5a" }}>生成失败: {codeError}</p>}
         <p>
-          <button onClick={runSetupInstall}>引导安装 X（agent 自动下载安装）</button>{" "}
+          {setupApps.map((a) => (
+            <button key={a.app_key} style={{ marginRight: 8 }} onClick={() => runSetupInstall(a.app_key)}>
+              引导安装 {a.display_name}
+            </button>
+          ))}
+          {setupApps.length === 0 && (
+            <button onClick={() => runSetupInstall()}>引导安装（通用）</button>
+          )}{" "}
           <span className="muted">
-            手机 agent 会下载 X 安装包、校验 SHA-256、调起系统安装器（需你手点「安装」），完成后到 X 登录页等你输入账号密码
+            手机 agent 会下载安装包、校验 SHA-256、调起系统安装器（需你手点「安装」），完成后到登录页等你输入账号密码
           </span>
         </p>
         {setupMsg && <p className="muted">{setupMsg}</p>}

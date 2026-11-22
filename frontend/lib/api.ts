@@ -444,11 +444,13 @@ export const api = {
   me: () => req<Me>("/agencies/me"),
   listTasks: () => req<{ items: TaskItem[] }>("/tasks"),
   listDevices: () => req<{ items: DeviceItem[] }>("/devices"),
-  runSetup: (action: string) =>
-    req<{ task_id: string; state: string; route: string }>("/setup/run", {
+  runSetup: (action: string, app?: string) =>
+    req<{ task_id: string; state: string; route: string; adapter?: string }>("/setup/run", {
       method: "POST",
-      body: JSON.stringify({ action }),
+      body: JSON.stringify(app ? { action, app } : { action }),
     }),
+  listSetupApps: () =>
+    req<{ items: { app_key: string; display_name: string; target_package: string }[] }>("/setup/apps"),
   createPairingCode: (ttlMinutes?: number) =>
     req<{ code: string; expires_at: string }>("/devices/pairing-codes", {
       method: "POST",
