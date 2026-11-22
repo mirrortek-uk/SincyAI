@@ -10,7 +10,7 @@
 #  - goal 来自任务上下文 device_tasks.context.goal (服务端下发), 不在签名内,
 #    因为 goal 是数据不是策略 —— 危险动作由上面的白名单卡住。
 adapter: system.agentic
-version: 2
+version: 3
 app:
   package: com.android.settings
   version_range: ">=0"
@@ -20,4 +20,4 @@ params:
   target_package: com.android.settings
   max_steps: 30
   allowed_actions: ["tap", "tap_element", "tap_xy", "scroll", "swipe_xy", "set_text", "back", "close_dialog", "wait", "launch_app"]
-  challenge_texts: ["验证", "安全检测", "人机验证", "unusual activity", "Verify you are human", "captcha"]
+  challenge_texts: ["安全检测", "人机验证", "unusual activity", "Verify you are human", "captcha", "are you a robot", "行为异常"]

@@ -90,7 +90,7 @@ object AdapterRuntime {
             append('\n')
             append("""{"action":"swipe_xy","x1":540,"y1":1600,"x2":540,"y2":600,"ms":350} | {"action":"scroll"}  — scroll/swipe""")
             append('\n')
-            append("""{"action":"set_text","target":{"text":"<field text>"},"value":"<text>"} | {"action":"wait","ms":1000}""")
+            append("""{"action":"set_text","target":{"text":"<field placeholder text>"},"value":"<text>"} — device writes into the focused input even if target only matches the placeholder | {"action":"wait","ms":1000}""")
             append('\n')
             append("""{"action":"back"} | {"action":"close_dialog"} | {"action":"launch_app"} | {"action":"done"} | {"action":"challenge","reason":"..."}""")
             append('\n')

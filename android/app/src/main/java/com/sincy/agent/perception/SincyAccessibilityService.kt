@@ -228,6 +228,12 @@ class SincyAccessibilityService : AccessibilityService() {
         private fun setText(svc: SincyAccessibilityService, target: JSONObject?, value: String): Boolean {
             val root = svc.rootInActiveWindow ?: return false
             var node = findNode(root, target)
+            if (node != null && node.className?.toString()?.endsWith("EditText") != true) {
+                // target matched a label/placeholder (e.g. 发布你的回复), not the input itself —
+                // use the focused editable node instead
+                node.recycle()
+                node = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            }
             if (node == null) {
                 // fall back to the currently focused editable node
                 node = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
