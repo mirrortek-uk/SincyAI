@@ -1,5 +1,7 @@
 package com.sincy.agent.adapter
 
+import okhttp3.MediaType.Companion.toMediaType
+
 /**
  * Kotlin facade over the Rust agent core (android/rust-core, JNI).
  *
@@ -34,11 +36,76 @@ object AdapterRuntime {
     }
 
     /**
-     * @param adapterJson  signed adapter definition (canonical JSON from the cloud)
-     * @param signature    platform HMAC signature over that JSON
-     * @param appVersion   installed versionName of the target app
+     * @param adapterJson     signed adapter definition (canonical JSON from the cloud)
+     * @param signature       platform HMAC signature over that JSON
+     * @param appVersion      installed versionName of the target app
+     * @param taskContextJson task context JSON (e.g. {"goal": "..."} for agentic tasks); "" = none
      */
-    external fun runAdapter(adapterJson: String, signature: String, appVersion: String): String
+    external fun runAdapter(adapterJson: String, signature: String, appVersion: String, taskContextJson: String): String
+
+    /** Cloud base URL + device token, set by AgentForegroundService on connect; used by llmDecide. */
+    @Volatile var cloudBase: String = ""
+    @Volatile var deviceToken: String = ""
+
+    private val llmHttp = okhttp3.OkHttpClient()
+
+    /**
+     * Called by the Rust core (agentic loop) to ask the cloud LLM for the next
+     * action. Builds a compact screen+goal prompt and POSTs /api/v1/ai/generate
+     * with the device token; returns the raw reply text (Rust extracts the JSON).
+     */
+    @Suppress("unused")
+    fun llmDecide(reqJson: String): String {
+        val req = org.json.JSONObject(reqJson)
+        val goal = req.optString("goal")
+        val step = req.optInt("step", 1)
+        val maxSteps = req.optInt("max_steps", 30)
+        val allowed = req.optJSONArray("allowed_actions")?.let { a ->
+            (0 until a.length()).map { a.getString(it) }.joinToString(",")
+        } ?: "tap,scroll,set_text,back,close_dialog"
+        val screen = req.optString("screen")
+        val historyArr = req.optJSONArray("history")
+        val history = historyArr?.let { a ->
+            (0 until a.length()).map { a.getString(it) }.joinToString("; ")
+        } ?: ""
+        val prompt = buildString {
+            append("You control an Android phone through accessibility gestures to accomplish a user goal. ")
+            append("Decide the SINGLE next action.\n")
+            append("GOAL: ").append(goal).append('\n')
+            append("STEP: ").append(step).append('/').append(maxSteps).append('\n')
+            append("ALLOWED ACTIONS: ").append(allowed).append(", done, challenge\n")
+            append("SCREEN (ids|texts|nodes with bounds): ").append(screen).append('\n')
+            if (history.isNotEmpty()) append("HISTORY: ").append(history).append('\n')
+            append("Reply with EXACTLY ONE JSON object and nothing else, one of:\n")
+            append("""{"action":"tap","target":{"id":"<node id>"}} or {"action":"tap","target":{"text":"<visible text>"}}""")
+            append('\n')
+            append("""{"action":"scroll"} | {"action":"set_text","target":{"text":"<field text>"},"value":"<text>"}""")
+            append('\n')
+            append("""{"action":"back"} | {"action":"close_dialog"} | {"action":"done"} | {"action":"challenge","reason":"..."}""")
+            append('\n')
+            append("Pick tap targets from ids/texts actually visible on the SCREEN. Never invent actions outside ALLOWED ACTIONS.")
+        }
+        val base = cloudBase.ifEmpty { "http://127.0.0.1:18081" }
+        val token = deviceToken
+        val body = org.json.JSONObject()
+            .put("prompt", prompt)
+            .put("max_tokens", 256)
+            .toString()
+        val request = okhttp3.Request.Builder()
+            .url("$base/api/v1/ai/generate")
+            .header("Authorization", "Bearer $token")
+            .post(okhttp3.RequestBody.create("application/json; charset=utf-8".toMediaType(), body))
+            .build()
+        llmHttp.newCall(request).execute().use { resp ->
+            val respBody = resp.body?.string() ?: ""
+            if (!resp.isSuccessful) return "{\"action\":\"challenge\",\"reason\":\"llm http ${resp.code}: ${respBody.take(120)}\"}"
+            return try {
+                org.json.JSONObject(respBody).optString("text", "")
+            } catch (e: Exception) {
+                "{\"action\":\"challenge\",\"reason\":\"bad llm response: ${e.message}\"}"
+            }
+        }
+    }
 
     /** Called by the Rust core before each interpreter step: current screen summary. */
     fun snapshotJson(): String =

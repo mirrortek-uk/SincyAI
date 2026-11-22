@@ -69,6 +69,9 @@ class AgentForegroundService : Service() {
         val token = prefs().getString("device_token", null)
         if (token.isNullOrEmpty()) { notify("未配对 — 请先在 app 里用配对码配对"); return stopSelf() }
         val baseUrl = prefs().getString("cloud_url", "http://127.0.0.1:18081")!!
+        // agentic loop 的 LLM 决策回调用 (AdapterRuntime.llmDecide)
+        AdapterRuntime.cloudBase = baseUrl
+        AdapterRuntime.deviceToken = token
         notify("连接中 $baseUrl …")
         val gateway = AgentGateway(baseUrl)
         ws = gateway.connect(token, object : WebSocketListener() {
@@ -127,10 +130,13 @@ class AgentForegroundService : Service() {
         // run the signed adapter through the Rust core; the accessibility service
         // supplies the live node tree, the interpreter decides every action
         val appVersion = SincyAccessibilityService.installedVersion(brief.getString("app_package")) ?: "0"
+        // agentic 任务的 goal 在 task_context 里 (数据, 非签名参数)
+        val taskContext = brief.optJSONObject("task_context")?.toString() ?: "{}"
         val resultJson = AdapterRuntime.runAdapter(
             brief.getString("adapter_yaml"),
             brief.getString("signature"),
             appVersion,
+            taskContext,
         )
         val result = JSONObject(resultJson)
 

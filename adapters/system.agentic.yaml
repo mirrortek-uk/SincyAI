@@ -1,0 +1,23 @@
+# system.agentic: LLM 驱动的设备端闭环 ("真人员工"模式)。
+# 与屏幕解释器 adapter 的区别: 不按固定 flow 走, 每步把屏幕摘要发给云端 LLM,
+# 由 LLM 决定下一步动作; 设备只执行白名单内的安全动作。
+#
+# 安全护栏 (全部随签名覆盖, 设备端不可改):
+#  - allowed_actions 白名单: 只有 tap/scroll/set_text/back/close_dialog;
+#    安装/发布/付款等 side-effect 动作不在此列, 只能走对应签名 adapter;
+#  - challenge_texts 命中屏幕文本 => 直接 WAITING_USER 转人工, LLM 无权跳过;
+#  - max_steps 上限防死循环; 每步证据写入 task_events 可审计回放;
+#  - goal 来自任务上下文 device_tasks.context.goal (服务端下发), 不在签名内,
+#    因为 goal 是数据不是策略 —— 危险动作由上面的白名单卡住。
+adapter: system.agentic
+version: 1
+app:
+  package: com.android.settings
+  version_range: ">=0"
+screens: {}
+flow: []
+params:
+  target_package: com.android.settings
+  max_steps: 30
+  allowed_actions: ["tap", "scroll", "set_text", "back", "close_dialog"]
+  challenge_texts: ["验证", "安全检测", "人机验证", "unusual activity", "Verify you are human", "captcha"]

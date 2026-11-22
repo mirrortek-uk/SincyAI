@@ -81,6 +81,27 @@ pub fn execute_signed_adapter(
     io: &mut dyn PlatformIo,
     media_count: usize,
 ) -> Result<AdapterExecution, ExecuteError> {
+    execute_signed_adapter_ctx(
+        adapter_yaml,
+        signature,
+        signing_key,
+        app_version,
+        io,
+        media_count,
+        None,
+    )
+}
+
+/// Same as execute_signed_adapter, but allows a task context (e.g. agentic goal).
+pub fn execute_signed_adapter_ctx(
+    adapter_yaml: &str,
+    signature: &str,
+    signing_key: &[u8],
+    app_version: &str,
+    io: &mut dyn PlatformIo,
+    media_count: usize,
+    task_context: Option<serde_json::Value>,
+) -> Result<AdapterExecution, ExecuteError> {
     let def = AdapterDefinition::from_yaml(adapter_yaml)
         .map_err(|e| ExecuteError::InvalidDefinition(e.to_string()))?;
     let canonical =
@@ -95,7 +116,7 @@ pub fn execute_signed_adapter(
     // screen interpreter; the version guard is skipped because the target app
     // may legitimately be absent (that is the point of a setup task).
     if adapter_id.starts_with("system.") {
-        return run_system_adapter(&def, io);
+        return run_system_adapter(&def, io, task_context);
     }
 
     // version guard BEFORE any interaction with the target app
@@ -147,8 +168,12 @@ pub fn execute_signed_adapter(
 pub fn run_system_adapter(
     def: &AdapterDefinition,
     io: &mut dyn PlatformIo,
+    task_context: Option<serde_json::Value>,
 ) -> Result<AdapterExecution, ExecuteError> {
     use sincy_adapter::interpreter::SystemOp;
+    if def.adapter == "system.agentic" {
+        return run_agentic_loop(def, io, task_context);
+    }
     let params = def
         .params
         .clone()
@@ -251,6 +276,208 @@ pub fn run_system_adapter(
     })
 }
 
+/// system.agentic: device-side loop — every step sends a screen summary to the
+/// cloud LLM for a decision; actions are restricted to the signed whitelist in
+/// params; challenge screens always park as WAITING_USER.
+fn run_agentic_loop(
+    def: &AdapterDefinition,
+    io: &mut dyn PlatformIo,
+    task_context: Option<serde_json::Value>,
+) -> Result<AdapterExecution, ExecuteError> {
+    use sincy_adapter::schema::{ActionKind, Anchor, FlowStep};
+    let params = def.params.clone().unwrap_or_default();
+    let max_steps = params
+        .get("max_steps")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(30) as usize;
+    let allowed: Vec<String> = params
+        .get("allowed_actions")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_else(|| {
+            vec![
+                "tap".into(),
+                "scroll".into(),
+                "set_text".into(),
+                "back".into(),
+                "close_dialog".into(),
+            ]
+        });
+    let challenge_texts: Vec<String> = params
+        .get("challenge_texts")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_else(|| {
+            vec![
+                "验证".into(),
+                "安全检测".into(),
+                "unusual activity".into(),
+                "Verify you are human".into(),
+            ]
+        });
+    let goal = task_context
+        .as_ref()
+        .and_then(|c| c.get("goal").and_then(|g| g.as_str()).map(String::from))
+        .or_else(|| {
+            params
+                .get("goal")
+                .and_then(|g| g.as_str())
+                .map(String::from)
+        })
+        .unwrap_or_default();
+    if goal.is_empty() {
+        return Err(ExecuteError::InvalidDefinition(
+            "agentic task missing goal".into(),
+        ));
+    }
+
+    let mut events: Vec<ExecEvent> = vec![];
+    let mut history: Vec<String> = vec![];
+    for step in 1..=max_steps {
+        let snap = io.snapshot();
+        // challenge screens park for a human without relying on the LLM
+        for ct in &challenge_texts {
+            if snap.has_text(ct) {
+                return Ok(AdapterExecution {
+                    outcome: TaskOutcome::WaitingUser(format!("challenge screen detected: {ct}")),
+                    side_effect_done: false,
+                    events,
+                    adapter_id: def.adapter.clone(),
+                    adapter_version: def.version as i32,
+                });
+            }
+        }
+        let req = serde_json::json!({
+            "goal": goal,
+            "step": step,
+            "max_steps": max_steps,
+            "allowed_actions": allowed,
+            "screen": snap.describe(),
+            "history": history,
+        });
+        let decision = match io.llm_decide(&req) {
+            Ok(d) => d,
+            Err(e) => {
+                return Ok(AdapterExecution {
+                    outcome: TaskOutcome::NoSideEffectFailure(format!("llm_decide failed: {e}")),
+                    side_effect_done: false,
+                    events,
+                    adapter_id: def.adapter.clone(),
+                    adapter_version: def.version as i32,
+                });
+            }
+        };
+        let action = decision
+            .get("action")
+            .and_then(|a| a.as_str())
+            .unwrap_or("");
+        match action {
+            "done" => {
+                events.push(ExecEvent::Completed);
+                return Ok(AdapterExecution {
+                    outcome: TaskOutcome::Success,
+                    side_effect_done: false,
+                    events,
+                    adapter_id: def.adapter.clone(),
+                    adapter_version: def.version as i32,
+                });
+            }
+            "challenge" => {
+                let reason = decision
+                    .get("reason")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("challenge")
+                    .to_string();
+                return Ok(AdapterExecution {
+                    outcome: TaskOutcome::WaitingUser(reason),
+                    side_effect_done: false,
+                    events,
+                    adapter_id: def.adapter.clone(),
+                    adapter_version: def.version as i32,
+                });
+            }
+            a if allowed.iter().any(|x| x == a) => {
+                let kind = match a {
+                    "tap" => ActionKind::Tap,
+                    "set_text" => ActionKind::SetText,
+                    "scroll" => ActionKind::Scroll,
+                    "back" => ActionKind::Back,
+                    "close_dialog" => ActionKind::CloseDialog,
+                    _ => ActionKind::Back,
+                };
+                let target = decision
+                    .get("target")
+                    .cloned()
+                    .and_then(|t| serde_json::from_value::<Anchor>(t).ok());
+                let value = decision
+                    .get("value")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let step_def = FlowStep {
+                    expect: "agentic".into(),
+                    action: kind,
+                    target,
+                    value,
+                    side_effect: false,
+                    verify: false,
+                };
+                match io.perform(&step_def) {
+                    Ok(()) => {
+                        let desc = format!("step {step}: {a} {}", decision);
+                        history.push(desc.clone());
+                        events.push(ExecEvent::Step(StepOutcome {
+                            step_index: step,
+                            screen_id: "agentic".into(),
+                            action: None,
+                            side_effect: false,
+                            evidence: desc,
+                        }));
+                    }
+                    Err(e) => {
+                        return Ok(AdapterExecution {
+                            outcome: TaskOutcome::NoSideEffectFailure(format!(
+                                "step {step} {a} failed: {e}"
+                            )),
+                            side_effect_done: false,
+                            events,
+                            adapter_id: def.adapter.clone(),
+                            adapter_version: def.version as i32,
+                        });
+                    }
+                }
+            }
+            other => {
+                return Ok(AdapterExecution {
+                    outcome: TaskOutcome::NoSideEffectFailure(format!(
+                        "LLM action '{other}' not in signed whitelist {allowed:?}"
+                    )),
+                    side_effect_done: false,
+                    events,
+                    adapter_id: def.adapter.clone(),
+                    adapter_version: def.version as i32,
+                });
+            }
+        }
+    }
+    Ok(AdapterExecution {
+        outcome: TaskOutcome::NoSideEffectFailure(format!(
+            "agentic loop exceeded max_steps={max_steps}"
+        )),
+        side_effect_done: false,
+        events,
+        adapter_id: def.adapter.clone(),
+        adapter_version: def.version as i32,
+    })
+}
+
 fn op_name(op: &sincy_adapter::interpreter::SystemOp) -> &'static str {
     use sincy_adapter::interpreter::SystemOp;
     match op {
@@ -271,6 +498,8 @@ pub struct ScriptedIo {
     pub system_ops: Vec<String>,
     /// scripted results for system ops; empty => all Ok("ok")
     pub system_results: VecDeque<Result<String, String>>,
+    /// scripted LLM decisions for system.agentic; empty => immediate done
+    pub llm_script: VecDeque<Result<serde_json::Value, String>>,
 }
 
 impl ScriptedIo {
@@ -280,6 +509,7 @@ impl ScriptedIo {
             performed: vec![],
             system_ops: vec![],
             system_results: VecDeque::new(),
+            llm_script: VecDeque::new(),
         }
     }
 }
@@ -294,6 +524,12 @@ impl PlatformIo for ScriptedIo {
         self.system_results
             .pop_front()
             .unwrap_or_else(|| Ok("ok".to_string()))
+    }
+
+    fn llm_decide(&mut self, _req: &serde_json::Value) -> Result<serde_json::Value, String> {
+        self.llm_script
+            .pop_front()
+            .unwrap_or_else(|| Ok(serde_json::json!({"action": "done"})))
     }
 
     fn snapshot(&mut self) -> Box<dyn ScreenSnapshot> {

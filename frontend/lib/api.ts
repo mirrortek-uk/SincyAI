@@ -444,10 +444,10 @@ export const api = {
   me: () => req<Me>("/agencies/me"),
   listTasks: () => req<{ items: TaskItem[] }>("/tasks"),
   listDevices: () => req<{ items: DeviceItem[] }>("/devices"),
-  runSetup: (action: string, app?: string) =>
+  runSetup: (action: string, app?: string, goal?: string) =>
     req<{ task_id: string; state: string; route: string; adapter?: string }>("/setup/run", {
       method: "POST",
-      body: JSON.stringify(app ? { action, app } : { action }),
+      body: JSON.stringify({ action, ...(app ? { app } : {}), ...(goal ? { goal } : {}) }),
     }),
   listSetupApps: () =>
     req<{ items: { app_key: string; display_name: string; target_package: string }[] }>("/setup/apps"),

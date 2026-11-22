@@ -16,6 +16,7 @@ export default function DevicesPage() {
   const [codeError, setCodeError] = useState<string | null>(null);
   const [setupMsg, setSetupMsg] = useState<string | null>(null);
   const [setupApps, setSetupApps] = useState<SetupApp[]>([]);
+  const [goal, setGoal] = useState("");
 
   useEffect(() => {
     if (!getToken()) return;
@@ -27,6 +28,23 @@ export default function DevicesPage() {
     api
       .runSetup("setup_install", app)
       .then((r) => setSetupMsg(`已派发引导安装任务 ${r.task_id.slice(0, 8)} (${r.state}) — 看手机通知栏/任务页`))
+      .catch((e) => setSetupMsg(`派发失败: ${e}`));
+  };
+
+  const runAgentic = () => {
+    const g = goal.trim();
+    if (!g) {
+      setSetupMsg("请先输入目标 (goal)，例如: 打开设置里的电池页面并截图每一步操作");
+      return;
+    }
+    setSetupMsg(null);
+    api
+      .runSetup("agentic", undefined, g)
+      .then((r) =>
+        setSetupMsg(
+          `已派发 agentic 任务 ${r.task_id.slice(0, 8)} (${r.state}, adapter=${r.adapter ?? "?"}) — 手机 agent 会逐屏发给云端 LLM 决策执行; 任务页可看每步证据`,
+        ),
+      )
       .catch((e) => setSetupMsg(`派发失败: ${e}`));
   };
 
@@ -69,6 +87,18 @@ export default function DevicesPage() {
           )}{" "}
           <span className="muted">
             手机 agent 会下载安装包、校验 SHA-256、调起系统安装器（需你手点「安装」），完成后到登录页等你输入账号密码
+          </span>
+        </p>
+        <p>
+          <input
+            value={goal}
+            onChange={(e) => setGoal(e.target.value)}
+            placeholder="agentic 目标 (自然语言), 如: 帮我在设置里打开开发者选项"
+            style={{ width: 420, marginRight: 8 }}
+          />
+          <button onClick={runAgentic}>派发 agentic 任务</button>{" "}
+          <span className="muted">
+            「真人模式」: 手机每步截屏发给云端 LLM 决定下一步点击/滑动/输入 (只允许安全动作, 安装/发布仍走签名 adapter; 遇到验证页自动转人工)
           </span>
         </p>
         {setupMsg && <p className="muted">{setupMsg}</p>}

@@ -959,7 +959,7 @@ async fn get_agent_task(
     })?;
 
     let task = sqlx::query(
-        "SELECT t.id, t.state, t.package_id, t.package_version, r.platform, r.action
+        "SELECT t.id, t.state, t.package_id, t.package_version, t.context, r.platform, r.action
          FROM device_tasks t LEFT JOIN execution_routes r ON r.task_id = t.id
          WHERE t.id = $1 AND t.agency_id = $2",
     )
@@ -985,6 +985,8 @@ async fn get_agent_task(
             "system.setup_install".to_string()
         } else if let Some(app) = action.strip_prefix("setup_install:") {
             format!("system.setup_install.{app}")
+        } else if action == "agentic" {
+            "system.agentic".to_string()
         } else {
             return Err(app_error_response(AppError::non_retryable(
                 "no_adapter",
@@ -1066,6 +1068,7 @@ async fn get_agent_task(
         "adapter_version": av.get::<i32, _>("version"),
         "adapter_yaml": adapter_yaml,
         "signature": av.get::<String, _>("signature"),
+        "task_context": task.try_get::<serde_json::Value, _>("context").unwrap_or(serde_json::Value::Null),
     })))
 }
 
@@ -1199,9 +1202,11 @@ async fn list_setup_apps(
 /// 与内容发布同样受急停开关约束; 不需要内容包。
 #[derive(Debug, Deserialize)]
 struct SetupRunBody {
-    action: String, // e.g. "setup_install"
+    action: String, // "setup_install" | "agentic"
     /// 目标应用目录 key (setup_app_catalog.app_key), 如 "x"; 缺省走通用 system.setup_install
     app: Option<String>,
+    /// action=agentic 时必填: 自然语言目标 (如 "打开设置确认版本号"), 由设备端 LLM 闭环执行
+    goal: Option<String>,
 }
 
 async fn run_setup(
@@ -1243,15 +1248,25 @@ async fn run_setup(
             "system.setup_install 没有 device 路由 capability",
         ))
     })?;
-    if body.action != "setup_install" {
+    if body.action != "setup_install" && body.action != "agentic" {
         return Err(app_error_response(AppError::non_retryable(
             "unknown_setup_action",
             format!("不支持的 setup action: {}", body.action),
         )));
     }
-    let adapter_id = match &body.app {
-        Some(app) => format!("system.setup_install.{app}"),
-        None => "system.setup_install".to_string(),
+    if body.action == "agentic" && body.goal.as_deref().map(str::is_empty).unwrap_or(true) {
+        return Err(app_error_response(AppError::non_retryable(
+            "missing_goal",
+            "agentic 任务必须带 goal",
+        )));
+    }
+    let adapter_id = if body.action == "agentic" {
+        "system.agentic".to_string()
+    } else {
+        match &body.app {
+            Some(app) => format!("system.setup_install.{app}"),
+            None => "system.setup_install".to_string(),
+        }
     };
     // app 指定时必须在目录里登记
     if let Some(app) = &body.app {
@@ -1284,8 +1299,13 @@ async fn run_setup(
     let task_id = Uuid::new_v4();
     let route_id = Uuid::new_v4();
     let route_action = match &body.app {
-        Some(app) => format!("setup_install:{app}"),
-        None => body.action.clone(),
+        Some(app) if body.action == "setup_install" => format!("setup_install:{app}"),
+        _ => body.action.clone(),
+    };
+    let task_context = if body.action == "agentic" {
+        serde_json::json!({ "goal": body.goal.clone().unwrap_or_default() })
+    } else {
+        serde_json::json!({})
     };
     let idem = format!("setup-{}-{}", route_action, task_id);
     let mut tx = pool
@@ -1305,14 +1325,15 @@ async fn run_setup(
     .await
     .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
     sqlx::query(
-        "INSERT INTO device_tasks (id, agency_id, idempotency_key, state, route_id, adapter_version)
-         VALUES ($1, $2, $3, 'QUEUED', $4, $5)",
+        "INSERT INTO device_tasks (id, agency_id, idempotency_key, state, route_id, adapter_version, context)
+         VALUES ($1, $2, $3, 'QUEUED', $4, $5, $6)",
     )
     .bind(task_id)
     .bind(agency.as_uuid())
     .bind(idem)
     .bind(route_id)
     .bind(av.get::<i32, _>("version"))
+    .bind(&task_context)
     .execute(&mut *tx)
     .await
     .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;

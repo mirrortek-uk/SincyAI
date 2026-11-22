@@ -21,4 +21,6 @@ pub mod execute;
 
 pub use adb_io::AdbIo;
 pub use client::{AgentClient, AgentError, TaskBrief};
-pub use execute::{AdapterExecution, ScriptedIo, TaskOutcome, execute_signed_adapter};
+pub use execute::{
+    AdapterExecution, ScriptedIo, TaskOutcome, execute_signed_adapter, execute_signed_adapter_ctx,
+};

@@ -9,7 +9,7 @@ use sincy_protocol::{Envelope, MessageType};
 use thiserror::Error;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
-use crate::execute::{AdapterExecution, TaskOutcome, execute_signed_adapter};
+use crate::execute::{AdapterExecution, TaskOutcome, execute_signed_adapter_ctx};
 
 #[derive(Debug, Error)]
 pub enum AgentError {
@@ -37,6 +37,9 @@ pub struct TaskBrief {
     pub adapter_version: i32,
     pub adapter_yaml: String,
     pub signature: String,
+    /// free-form task context (e.g. agentic goal) from device_tasks.context
+    #[serde(default)]
+    pub task_context: serde_json::Value,
 }
 
 pub struct AgentClient {
@@ -137,13 +140,19 @@ impl AgentClient {
         .map_err(|e| AgentError::Ws(e.to_string()))?;
 
         let mut io = io_factory();
-        let result = execute_signed_adapter(
+        let ctx = if brief.task_context.is_null() {
+            None
+        } else {
+            Some(brief.task_context.clone())
+        };
+        let result = execute_signed_adapter_ctx(
             &brief.adapter_yaml,
             &brief.signature,
             &self.signing_key,
             app_version,
             &mut *io,
             0,
+            ctx,
         )
         .map_err(|e| AgentError::Execute(e.to_string()))?;
 

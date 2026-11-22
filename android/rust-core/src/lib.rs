@@ -10,7 +10,7 @@
 //! screens are never auto-solved (WAITING_USER).
 
 use sincy_adapter::interpreter::PlatformIo;
-use sincy_agent::{execute_signed_adapter, AdapterExecution, TaskOutcome};
+use sincy_agent::{execute_signed_adapter_ctx, AdapterExecution, TaskOutcome};
 
 /// Pinned platform adapter-signing key. In production builds this is compiled
 /// in from a build-time secret (not from network config); the dev build uses
@@ -62,14 +62,16 @@ pub fn run_adapter(
     app_version: &str,
     io: &mut dyn PlatformIo,
     media_count: usize,
+    task_context: Option<serde_json::Value>,
 ) -> Result<RunResult, String> {
-    let ex = execute_signed_adapter(
+    let ex = execute_signed_adapter_ctx(
         adapter_yaml,
         signature,
         signing_key,
         app_version,
         io,
         media_count,
+        task_context,
     )
     .map_err(|e| e.to_string())?;
     Ok(RunResult::from(ex))
@@ -106,7 +108,7 @@ mod tests {
             MockSnapshot::new(vec![], vec!["Your post was sent".into()]),
         ];
         let mut io = ScriptedIo::new(screens);
-        let res = run_adapter(yaml, &sig, PINNED_SIGNING_KEY, "10.5.0", &mut io, 0).unwrap();
+        let res = run_adapter(yaml, &sig, PINNED_SIGNING_KEY, "10.5.0", &mut io, 0, None).unwrap();
         assert_eq!(res.outcome, "success");
         assert!(res.side_effect_done);
     }
@@ -115,7 +117,16 @@ mod tests {
     fn jni_core_refuses_tampered_signature() {
         let yaml = include_str!("../../../adapters/x.publish_post.yaml");
         let mut io = ScriptedIo::new(vec![]);
-        assert!(run_adapter(yaml, "forged", PINNED_SIGNING_KEY, "10.5.0", &mut io, 0).is_err());
+        assert!(run_adapter(
+            yaml,
+            "forged",
+            PINNED_SIGNING_KEY,
+            "10.5.0",
+            &mut io,
+            0,
+            None
+        )
+        .is_err());
     }
 }
 
@@ -213,6 +224,48 @@ mod jni {
                 })
                 .unwrap_or(false)
         }
+        fn describe(&self) -> String {
+            let v = self.value();
+            let ids = v["ids"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .unwrap_or_default();
+            let texts = v["texts"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .unwrap_or_default();
+            let nodes = v["nodes"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|n| {
+                            let id = n["id"].as_str().unwrap_or("");
+                            let text = n["text"].as_str().unwrap_or("");
+                            let desc = n["desc"].as_str().unwrap_or("");
+                            let b = n["bounds"].as_array()?;
+                            let bb = b.iter().filter_map(|x| x.as_i64()).collect::<Vec<_>>();
+                            Some(format!("{id}|{text}|{desc}|{bb:?}"))
+                        })
+                        .collect::<Vec<_>>()
+                        .join(";")
+                })
+                .unwrap_or_default();
+            format!(
+                "screen {}x{} ids=[{ids}] texts=[{texts}] nodes=[{nodes}]",
+                v["width"].as_i64().unwrap_or(0),
+                v["height"].as_i64().unwrap_or(0)
+            )
+        }
     }
 
     /// Bridge that calls BACK into Kotlin: AdapterRuntime.snapshotJson() before each
@@ -279,6 +332,36 @@ mod jni {
                 })
                 .unwrap_or_else(|| "ok".into());
             Ok(r)
+        }
+
+        fn llm_decide(&mut self, req: &serde_json::Value) -> Result<serde_json::Value, String> {
+            // LLM decision via Kotlin callback: POST {cloud}/api/v1/ai/generate with
+            // the device token; the reply text may wrap the JSON, so extract the
+            // first balanced {...} block.
+            let payload = req.to_string();
+            let js = self.env.new_string(&payload).map_err(|e| e.to_string())?;
+            let raw = self
+                .env
+                .call_method(
+                    &self.thiz,
+                    "llmDecide",
+                    "(Ljava/lang/String;)Ljava/lang/String;",
+                    &[JValue::Object(&js)],
+                )
+                .and_then(|v| v.l())
+                .ok()
+                .and_then(|o| {
+                    let js = JString::from(o);
+                    self.env
+                        .get_string(&js)
+                        .ok()
+                        .map(|s| s.to_string_lossy().into_owned())
+                })
+                .ok_or("llmDecide returned null")?;
+            let start = raw.find('{').ok_or("no json object in llm reply")?;
+            let end = raw.rfind('}').ok_or("no json object end in llm reply")?;
+            serde_json::from_str(&raw[start..=end])
+                .map_err(|e| format!("bad llm json: {e}: {}", &raw[..raw.len().min(300)]))
         }
 
         fn perform(&mut self, step: &FlowStep) -> Result<(), String> {
@@ -372,6 +455,7 @@ mod jni {
         adapter_json: JString,
         signature: JString,
         app_version: JString,
+        task_context: JString,
     ) -> jstring {
         let adapter_json: String = env
             .get_string(&adapter_json)
@@ -385,6 +469,15 @@ mod jni {
             .get_string(&app_version)
             .map(|s| s.into())
             .unwrap_or_default();
+        let task_context_json: String = env
+            .get_string(&task_context)
+            .map(|s| s.into())
+            .unwrap_or_default();
+        let task_context: Option<serde_json::Value> = if task_context_json.is_empty() {
+            None
+        } else {
+            serde_json::from_str(&task_context_json).ok()
+        };
         let mut bridge = JniBridge {
             env,
             thiz,
@@ -399,6 +492,7 @@ mod jni {
             &app_version,
             &mut bridge,
             0,
+            task_context,
         ) {
             Ok(r) => serde_json::to_string(&r).unwrap_or_else(|_| "{\"outcome\":\"error\"}".into()),
             Err(e) => serde_json::to_string(&RunResult {

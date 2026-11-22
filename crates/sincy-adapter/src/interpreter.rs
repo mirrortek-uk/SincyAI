@@ -17,6 +17,10 @@ use crate::version_range::VersionRange;
 pub trait ScreenSnapshot {
     fn has_node_with_id(&self, id: &str) -> bool;
     fn has_text(&self, text: &str) -> bool;
+    /// Human/LLM-readable summary of the current screen (ids/texts/bounds), redacted.
+    fn describe(&self) -> String {
+        String::new()
+    }
 }
 
 /// Test/mock snapshot.
@@ -38,6 +42,9 @@ impl ScreenSnapshot for MockSnapshot {
     fn has_text(&self, text: &str) -> bool {
         self.texts.iter().any(|t| t == text)
     }
+    fn describe(&self) -> String {
+        format!("ids={:?} texts={:?}", self.node_ids, self.texts)
+    }
 }
 
 /// Platform I/O the device runtime provides.
@@ -52,6 +59,13 @@ pub trait PlatformIo {
     fn perform_system_op(&mut self, op: &SystemOp) -> Result<String, String> {
         let _ = op;
         Err("system ops unsupported on this io".into())
+    }
+    /// LLM 决策回调 (system.agentic 闭环): 输入 {goal, step, max_steps, allowed_actions,
+    /// screen, history}, 输出 {"action": "tap"|"set_text"|"scroll"|"back"|"close_dialog"|"done"|"challenge", ...}
+    /// 默认拒绝, 防止无 LLM 能力的运行时误入 agentic 模式。
+    fn llm_decide(&mut self, req: &serde_json::Value) -> Result<serde_json::Value, String> {
+        let _ = req;
+        Err("llm_decide unsupported on this io".into())
     }
 }
 
