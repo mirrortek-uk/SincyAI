@@ -109,6 +109,20 @@ pub fn execute_signed_adapter_ctx(
     verify_definition(signing_key, &canonical, signature)
         .map_err(|e| ExecuteError::BadSignature(e.to_string()))?;
 
+    // 验签之后才注入内容包文本: flow 里 value == "package.text" 的占位符
+    // 替换为 task_context.package_text (数据, 不参与签名)
+    let mut def = def;
+    if let Some(pkg) = task_context
+        .as_ref()
+        .and_then(|c| c.get("package_text").and_then(|v| v.as_str()))
+    {
+        for step in def.flow.iter_mut() {
+            if step.value.as_deref() == Some("package.text") {
+                step.value = Some(pkg.to_string());
+            }
+        }
+    }
+
     let adapter_id = def.adapter.clone();
     let adapter_version = def.version as i32;
 
@@ -144,6 +158,10 @@ pub fn execute_signed_adapter_ctx(
         Some(ExecStatus::Completed) => TaskOutcome::Success,
         Some(ExecStatus::VerificationPending(e)) => TaskOutcome::Uncertain(e),
         Some(ExecStatus::WaitingUser(e)) => TaskOutcome::WaitingUser(e),
+        // 副作用已发生后再漂移 => 不能当干净失败, 必须人工核验
+        Some(ExecStatus::UiDrift(e)) if rt.side_effect_done => {
+            TaskOutcome::Uncertain(format!("ui_drift after side effect: {e:?}"))
+        }
         Some(ExecStatus::UiDrift(e)) => TaskOutcome::UiDrift(format!("{e:?}")),
         Some(ExecStatus::Failed(e)) => {
             if rt.side_effect_done {
@@ -286,6 +304,7 @@ fn run_agentic_loop(
     io: &mut dyn PlatformIo,
     task_context: Option<serde_json::Value>,
 ) -> Result<AdapterExecution, ExecuteError> {
+    use sincy_adapter::interpreter::SystemOp;
     use sincy_adapter::schema::{ActionKind, Anchor, FlowStep};
     let params = def.params.clone().unwrap_or_default();
     let max_steps = params
@@ -303,6 +322,7 @@ fn run_agentic_loop(
         .unwrap_or_else(|| {
             vec![
                 "tap".into(),
+                "tap_element".into(),
                 "tap_xy".into(),
                 "scroll".into(),
                 "swipe_xy".into(),
@@ -310,6 +330,7 @@ fn run_agentic_loop(
                 "back".into(),
                 "close_dialog".into(),
                 "wait".into(),
+                "launch_app".into(),
             ]
         });
     let challenge_texts: Vec<String> = params
@@ -371,12 +392,14 @@ fn run_agentic_loop(
                 step - 1
             ));
         }
+        let elements = snap.elements_summary();
         let mut req = serde_json::json!({
             "goal": goal,
             "step": step,
             "max_steps": max_steps,
             "allowed_actions": allowed,
             "screen": describe,
+            "elements": elements,
             "history": history,
         });
         if let Some(img) = snap.image_base64() {
@@ -450,6 +473,93 @@ fn run_agentic_loop(
                 });
             }
             a if allowed.iter().any(|x| x == a) => {
+                // launch_app: recover when the OS dropped the target app to the launcher
+                if a == "launch_app" {
+                    let pkg = task_context
+                        .as_ref()
+                        .and_then(|c| c.get("app_package").and_then(|p| p.as_str()))
+                        .or_else(|| params.get("target_package").and_then(|p| p.as_str()))
+                        .unwrap_or("")
+                        .to_string();
+                    if pkg.is_empty() {
+                        history.push(format!(
+                            "step {step}: launch_app skipped: no target_package"
+                        ));
+                        continue;
+                    }
+                    match io.perform_system_op(&SystemOp::LaunchApp {
+                        package: pkg.clone(),
+                    }) {
+                        Ok(_) => {
+                            let _ = io.perform_system_op(&SystemOp::WaitMs { ms: 4000 });
+                            let desc = format!("step {step}: launch_app {a} {pkg}");
+                            history.push(desc.clone());
+                            events.push(ExecEvent::Step(StepOutcome {
+                                step_index: step,
+                                screen_id: "agentic".into(),
+                                action: None,
+                                side_effect: false,
+                                evidence: desc,
+                            }));
+                        }
+                        Err(e) => {
+                            history.push(format!("step {step}: launch_app failed: {e}"));
+                        }
+                    }
+                    continue;
+                }
+                // tap_element: Mobilerun-style tap by numbered interactive element
+                if a == "tap_element" {
+                    let idx = decision
+                        .get("element")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let snap2 = io.snapshot();
+                    match snap2.element_bounds(idx as u32) {
+                        Some((l, t, r, b)) => {
+                            let step_def = FlowStep {
+                                expect: "agentic".into(),
+                                action: ActionKind::TapAt,
+                                target: None,
+                                value: Some(
+                                    serde_json::json!({"x": (l + r) / 2, "y": (t + b) / 2})
+                                        .to_string(),
+                                ),
+                                side_effect: false,
+                                verify: false,
+                            };
+                            match io.perform(&step_def) {
+                                Ok(()) => {
+                                    let desc = format!(
+                                        "step {step}: tap_element idx={idx} @ ({},{})",
+                                        (l + r) / 2,
+                                        (t + b) / 2
+                                    );
+                                    history.push(desc.clone());
+                                    prev_describe = describe.clone();
+                                    events.push(ExecEvent::Step(StepOutcome {
+                                        step_index: step,
+                                        screen_id: "agentic".into(),
+                                        action: None,
+                                        side_effect: false,
+                                        evidence: desc,
+                                    }));
+                                }
+                                Err(e) => {
+                                    history.push(format!(
+                                        "step {step}: tap_element idx={idx} failed: {e}"
+                                    ));
+                                }
+                            }
+                        }
+                        None => {
+                            history.push(format!(
+                                "step {step}: tap_element idx={idx} not found in elements list — pick a valid idx or use tap_xy"
+                            ));
+                        }
+                    }
+                    continue;
+                }
                 let (kind, target, value) = match a {
                     "tap" => (
                         ActionKind::Tap,
@@ -695,7 +805,7 @@ mod tests {
     fn version_out_of_range_is_drift_zero_side_effects() {
         let (_, sig) = signed();
         let mut io = ScriptedIo::new(screens());
-        let ex = execute_signed_adapter(YAML, &sig, KEY, "11.9.0", &mut io, 0).unwrap();
+        let ex = execute_signed_adapter(YAML, &sig, KEY, "9.9.9", &mut io, 0).unwrap();
         assert!(matches!(ex.outcome, TaskOutcome::UiDrift(_)));
         assert!(!ex.side_effect_done);
         assert!(io.performed.is_empty());

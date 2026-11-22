@@ -12,7 +12,7 @@ export default function TasksPage() {
   const [brandId, setBrandId] = useState("");
   const [packageId, setPackageId] = useState("");
   const [platform, setPlatform] = useState("x");
-  const actions = platform === "x" ? ["publish_post", "read_metrics"] : platform === "youtube" ? ["publish_video", "publish_image", "read_metrics"] : ["publish_video"];
+  const actions = platform === "x" ? ["publish_post", "reply_comment", "read_metrics"] : platform === "youtube" ? ["publish_video", "publish_image", "read_metrics"] : ["publish_video"];
   const [action, setAction] = useState("publish_post");
   const [result, setResult] = useState<PublishTaskResponse | null>(null);
   const [error, setError] = useState<string | null>(null);

@@ -31,17 +31,19 @@ pub struct RunResult {
     pub adapter_id: String,
     pub adapter_version: i32,
     pub events: Vec<String>,
+    /// 失败/漂移原因 (诊断用), 成功时为空
+    pub reason: String,
 }
 
 impl From<AdapterExecution> for RunResult {
     fn from(ex: AdapterExecution) -> Self {
-        let outcome = match ex.outcome {
-            TaskOutcome::Success => "success",
-            TaskOutcome::NoSideEffectFailure(_) => "no_side_effect_failure",
-            TaskOutcome::Uncertain(_) => "uncertain",
-            TaskOutcome::WaitingUser(_) => "waiting_user",
-            TaskOutcome::UiDrift(_) => "ui_drift",
-            TaskOutcome::Refused(_) => "refused",
+        let (outcome, reason) = match ex.outcome {
+            TaskOutcome::Success => ("success", String::new()),
+            TaskOutcome::NoSideEffectFailure(m) => ("no_side_effect_failure", m),
+            TaskOutcome::Uncertain(m) => ("uncertain", m),
+            TaskOutcome::WaitingUser(m) => ("waiting_user", m),
+            TaskOutcome::UiDrift(m) => ("ui_drift", m),
+            TaskOutcome::Refused(m) => ("refused", m),
         };
         Self {
             outcome: outcome.to_string(),
@@ -49,6 +51,7 @@ impl From<AdapterExecution> for RunResult {
             adapter_id: ex.adapter_id,
             adapter_version: ex.adapter_version,
             events: ex.events.iter().map(|e| format!("{e:?}")).collect(),
+            reason,
         }
     }
 }
@@ -164,6 +167,10 @@ mod jni {
                 .as_array()
                 .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
                 .unwrap_or_default();
+            // Tap targets must intersect the visible screen: hidden ViewPager pages
+            // (e.g. the inactive home tab) carry duplicate nodes shifted off-screen,
+            // and a gesture at those coordinates is a silent no-op.
+            let (sw, sh) = self.screen_size();
             for n in nodes {
                 let nid = n["id"].as_str().unwrap_or("");
                 let ntext = n["text"].as_str().unwrap_or("");
@@ -180,12 +187,16 @@ mod jni {
                 if id_ok || text_ok || any_ok {
                     let b = n["bounds"].as_array()?;
                     if b.len() == 4 {
-                        return Some((
+                        let (l, t, r, bo) = (
                             b[0].as_i64()? as i32,
                             b[1].as_i64()? as i32,
                             b[2].as_i64()? as i32,
                             b[3].as_i64()? as i32,
-                        ));
+                        );
+                        if r <= l || bo <= t || r <= 0 || l >= sw || bo <= 0 || t >= sh {
+                            continue; // zero-area or off-screen node
+                        }
+                        return Some((l, t, r, bo));
                     }
                 }
             }
@@ -255,9 +266,14 @@ mod jni {
                             let id = n["id"].as_str().unwrap_or("");
                             let text = n["text"].as_str().unwrap_or("");
                             let desc = n["desc"].as_str().unwrap_or("");
+                            let idx = n["idx"].as_u64().unwrap_or(0);
                             let b = n["bounds"].as_array()?;
                             let bb = b.iter().filter_map(|x| x.as_i64()).collect::<Vec<_>>();
-                            Some(format!("{id}|{text}|{desc}|{bb:?}"))
+                            let mut s = format!("{id}|{text}|{desc}|{bb:?}");
+                            if idx > 0 {
+                                s.push_str(&format!("|idx={idx}"));
+                            }
+                            Some(s)
                         })
                         .collect::<Vec<_>>()
                         .join(";")
@@ -268,6 +284,62 @@ mod jni {
                 v["width"].as_i64().unwrap_or(0),
                 v["height"].as_i64().unwrap_or(0)
             )
+        }
+        fn elements_summary(&self) -> String {
+            let v = self.value();
+            let mut out = String::new();
+            if let Some(nodes) = v["nodes"].as_array() {
+                for n in nodes {
+                    let idx = n["idx"].as_u64().unwrap_or(0);
+                    if idx == 0 {
+                        continue;
+                    }
+                    let id = n["id"].as_str().unwrap_or("");
+                    let text = n["text"].as_str().unwrap_or("");
+                    let desc = n["desc"].as_str().unwrap_or("");
+                    let label = if !text.is_empty() {
+                        text
+                    } else if !desc.is_empty() {
+                        desc
+                    } else {
+                        id.rsplit('/').next().unwrap_or(id)
+                    };
+                    let b: Option<Vec<i64>> = n["bounds"]
+                        .as_array()
+                        .map(|a| a.iter().filter_map(|x| x.as_i64()).collect::<Vec<_>>());
+                    if let Some(b) = b.filter(|b| b.len() == 4) {
+                        use std::fmt::Write as _;
+                        let _ = writeln!(
+                            out,
+                            "idx={idx} {} @ [{},{},{},{}]",
+                            label.chars().take(60).collect::<String>(),
+                            b[0],
+                            b[1],
+                            b[2],
+                            b[3]
+                        );
+                    }
+                }
+            }
+            out
+        }
+        fn element_bounds(&self, idx: u32) -> Option<(i32, i32, i32, i32)> {
+            let v = self.value();
+            let nodes = v["nodes"].as_array()?;
+            for n in nodes {
+                if n["idx"].as_u64() == Some(idx as u64) {
+                    let b = n["bounds"].as_array()?;
+                    if b.len() == 4 {
+                        return Some((
+                            b[0].as_i64()? as i32,
+                            b[1].as_i64()? as i32,
+                            b[2].as_i64()? as i32,
+                            b[3].as_i64()? as i32,
+                        ));
+                    }
+                }
+            }
+            None
         }
     }
 
@@ -519,25 +591,58 @@ mod jni {
             rng: Rng::from_time(),
             last_snapshot: "{\"ids\":[],\"texts\":[],\"nodes\":[]}".into(),
         };
-        let result = match run_adapter(
-            &adapter_json,
-            &signature,
-            PINNED_SIGNING_KEY,
-            &app_version,
-            &mut bridge,
-            0,
-            task_context,
-        ) {
-            Ok(r) => serde_json::to_string(&r).unwrap_or_else(|_| "{\"outcome\":\"error\"}".into()),
-            Err(e) => serde_json::to_string(&RunResult {
+        // catch_unwind: 任何 Rust panic 都不能穿过 JNI abort 掉整个进程
+        // (进程一死, MIUI 会把无障碍服务标记为 crashed, 任务全部卡死)
+        // 同时用 panic hook 把 panic 信息存下来, 随结果回传便于诊断
+        static PANIC_MSG: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|info| {
+            let msg = format!("{info}");
+            if let Ok(mut g) = PANIC_MSG.lock() {
+                *g = Some(msg);
+            }
+        }));
+        let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_adapter(
+                &adapter_json,
+                &signature,
+                PINNED_SIGNING_KEY,
+                &app_version,
+                &mut bridge,
+                0,
+                task_context,
+            )
+        })) {
+            Ok(Ok(r)) => {
+                serde_json::to_string(&r).unwrap_or_else(|_| "{\"outcome\":\"error\"}".into())
+            }
+            Ok(Err(e)) => serde_json::to_string(&RunResult {
                 outcome: "refused".into(),
+                reason: e.clone(),
                 side_effect_done: false,
                 adapter_id: String::new(),
                 adapter_version: 0,
                 events: vec![e],
             })
             .unwrap_or_else(|_| "{\"outcome\":\"refused\"}".into()),
+            Err(_) => {
+                let msg = PANIC_MSG
+                    .lock()
+                    .ok()
+                    .and_then(|mut g| g.take())
+                    .unwrap_or_else(|| "unknown panic".into());
+                serde_json::to_string(&RunResult {
+                    outcome: "no_side_effect_failure".into(),
+                    reason: format!("rust panic caught at JNI boundary: {msg}"),
+                    side_effect_done: false,
+                    adapter_id: String::new(),
+                    adapter_version: 0,
+                    events: vec!["panic".to_string()],
+                })
+                .unwrap_or_else(|_| "{\"outcome\":\"error\"}".into())
+            }
         };
+        std::panic::set_hook(prev_hook);
         let env = bridge.env;
         let out = env.new_string(result).unwrap_or_default();
         out.into_raw()

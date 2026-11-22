@@ -157,7 +157,22 @@ class AgentForegroundService : Service() {
             override fun onMessage(webSocket: WebSocket, text: String) {
                 val env = JSONObject(text)
                 when (env.optString("message_type")) {
-                    "device.task.assign" -> scope.launch { handleAssign(webSocket, baseUrl, token, env.getJSONObject("payload").getString("task_id")) }
+                    "device.task.assign" -> scope.launch {
+                        // 任何未捕获异常都不能崩掉整个进程 (崩溃会让无障碍服务被系统标记 crashed)
+                        try {
+                            handleAssign(webSocket, baseUrl, token, env.getJSONObject("payload").getString("task_id"))
+                        } catch (e: Exception) {
+                            android.util.Log.e("SincyAgent", "handleAssign crashed: ${e.stackTraceToString().take(800)}")
+                            try {
+                                send(webSocket, "device.task.result", JSONObject()
+                                    .put("task_id", env.getJSONObject("payload").getString("task_id"))
+                                    .put("outcome", "no_side_effect_failure")
+                                    .put("reason", "agent internal error: ${e.message}")
+                                    .put("side_effect_done", false))
+                            } catch (_: Exception) {
+                            }
+                        }
+                    }
                     "device.session.revoke" -> stopSelf()
                 }
             }
@@ -207,10 +222,50 @@ class AgentForegroundService : Service() {
         send(webSocket, "device.task.ack", JSONObject().put("task_id", taskId).put("state", "EXECUTING"))
 
         // run the signed adapter through the Rust core; the accessibility service
-        // supplies the live node tree, the interpreter decides every action
-        val appVersion = SincyAccessibilityService.installedVersion(brief.getString("app_package")) ?: "0"
+        // supplies the live node tree, the interpreter decides every action.
+        // 版本号用本服务自己的 packageManager 查, 不依赖无障碍服务是否已连接
+        val appVersion = try {
+            packageManager.getPackageInfo(brief.getString("app_package"), 0).versionName ?: "0"
+        } catch (e: Exception) {
+            android.util.Log.e("SincyAgent", "getPackageInfo failed: ${e.message}")
+            "0"
+        }
+        // 诊断: 始终上报一次版本号证据, 方便云端判断 ui_drift 根因
+        send(webSocket, "device.step.evidence", JSONObject()
+            .put("task_id", taskId)
+            .put("event", "app_version=" + appVersion + " app_package=" + brief.optString("app_package")))
+        if (SincyAccessibilityService.instance == null) {
+            // 无障碍服务没开 => 屏幕感知/手势都不可用, 明确报失败而不是静默 ui_drift
+            send(webSocket, "device.task.result", JSONObject()
+                .put("task_id", taskId)
+                .put("outcome", "no_side_effect_failure")
+                .put("reason", "accessibility service not enabled — 请在系统设置里打开 Sincy Agent 无障碍服务"))
+            return
+        }
         // agentic 任务的 goal 在 task_context 里 (数据, 非签名参数)
         val taskContext = brief.optJSONObject("task_context")?.toString() ?: "{}"
+
+        // app adapter 假定目标 app 已在前台; 这里先把它拉起来 (幂等), 再等它稳定。
+        // system.* adapter (如 system.agentic) 自己决定操作哪个 app, 不在这里预启动。
+        val adapterId = brief.optString("adapter_id")
+        if (!adapterId.startsWith("system.")) {
+            val pkg = brief.getString("app_package")
+            // 优先让前台 Activity 代劳启动 (绕过后台 startActivity 的 BAL 限制);
+            // Activity 不在前台时退回服务内直接 startActivity
+            val launched = com.sincy.agent.MainActivity.launchAppViaActivity(pkg)
+            if (!launched) {
+                try {
+                    val launch = packageManager.getLaunchIntentForPackage(pkg)
+                    if (launch != null) {
+                        launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                        startActivity(launch)
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("SincyAgent", "service launch failed: ${e.message}")
+                }
+            }
+            Thread.sleep(4000)
+        }
         val resultJson = AdapterRuntime.runAdapter(
             brief.getString("adapter_yaml"),
             brief.getString("signature"),
@@ -235,11 +290,12 @@ class AgentForegroundService : Service() {
                 .put("task_id", taskId)
                 .put("platform", brief.getString("platform"))
                 .put("action", brief.getString("action"))
-                .put("reason", "adapter/app version mismatch"))
+                .put("reason", "adapter/app version mismatch (appVersion=$appVersion)"))
         }
         send(webSocket, "device.task.result", JSONObject()
             .put("task_id", taskId)
             .put("outcome", result.getString("outcome"))
+            .put("reason", result.optString("reason"))
             .put("side_effect_done", result.optBoolean("side_effect_done")))
     }
 

@@ -20,7 +20,15 @@ fn parse_version(s: &str) -> Result<Vec<u32>, VersionRangeError> {
     s.trim()
         .split('.')
         .map(|p| {
-            p.parse::<u32>()
+            // 容忍后缀: "0-prod" / "1rc1" 只取前导数字部分
+            let digits: String = p.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if digits.is_empty() {
+                return Err(VersionRangeError::Invalid(format!(
+                    "bad version component {p:?}"
+                )));
+            }
+            digits
+                .parse::<u32>()
                 .map_err(|_| VersionRangeError::Invalid(format!("bad version component {p:?}")))
         })
         .collect()

@@ -35,6 +35,26 @@ import java.security.MessageDigest
  */
 class MainActivity : AppCompatActivity() {
 
+    companion object {
+        @Volatile
+        var instance: MainActivity? = null
+
+        /** 前台 Activity 代劳启动目标 app (绕过后台 startActivity 的 BAL 限制) */
+        fun launchAppViaActivity(pkg: String): Boolean {
+            val act = instance ?: return false
+            val intent = act.packageManager.getLaunchIntentForPackage(pkg) ?: return false
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+            return try {
+                act.startActivity(intent)
+                true
+            } catch (e: Exception) {
+                android.util.Log.e("SincyAgent", "activity launch failed: ${e.message}")
+                false
+            }
+        }
+    }
+
+
     private val http = OkHttpClient()
 
     private val screenCapLauncher = registerForActivityResult(
@@ -108,9 +128,28 @@ class MainActivity : AppCompatActivity() {
                 screenCapLauncher.launch(mpm.createScreenCaptureIntent())
             }
         }
+        val miuiPerms = Button(this).apply {
+            text = "打开 MIUI 后台权限 (省电无限制+自启动)"
+            setOnClickListener {
+                // 依次尝试 MIUI 安全中心的各个入口, 找不到就落到应用详情页
+                val candidates = listOf(
+                    Intent().setClassName("com.miui.securitycenter", "com.miui.permcenter.autostart.AutoStartManagementActivity"),
+                    Intent().setClassName("com.miui.securitycenter", "com.miui.securitycenter.MainActivity"),
+                    Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, android.net.Uri.parse("package:$packageName")),
+                )
+                for (i in candidates) {
+                    try {
+                        startActivity(i)
+                        break
+                    } catch (_: Exception) {
+                    }
+                }
+                Toast.makeText(this@MainActivity, "请在手机管家里把 Sincy Agent 设为自启动允许、省电策略无限制", Toast.LENGTH_LONG).show()
+            }
+        }
         root.addView(version); root.addView(server); root.addView(code)
         root.addView(pair); root.addView(openA11y); root.addView(start)
-        root.addView(antilock); root.addView(grantSettings); root.addView(grantScreen)
+        root.addView(antilock); root.addView(grantSettings); root.addView(grantScreen); root.addView(miuiPerms)
         setContentView(root)
 
         pair.setOnClickListener {
@@ -167,6 +206,11 @@ class MainActivity : AppCompatActivity() {
             } catch (_: Exception) {
             }
         }
+        // 无障碍服务被系统关闭 (常见于重装后) 时, 自动跳到系统无障碍设置页让用户一键打开
+        if (!a11yEnabled()) {
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            Toast.makeText(this, "请打开 Sincy Agent 的无障碍服务 (重装后系统会断开)", Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun startAgentService() {
@@ -178,12 +222,27 @@ class MainActivity : AppCompatActivity() {
         startForegroundService(Intent(this, AgentForegroundService::class.java))
     }
 
+    override fun onPause() {
+        super.onPause()
+        if (instance === this) instance = null
+    }
+
     override fun onResume() {
         super.onResume()
+        instance = this
+        // 每次回到前台都确保 agent 服务在跑 (服务被系统杀掉后手机会"假离线")
+        if (!prefs().getString("device_token", null).isNullOrEmpty()) {
+            try {
+                startAgentService()
+            } catch (_: Exception) {
+            }
+        }
         // 从系统设置授权页回来后, 立即生效防锁屏
         if (prefs().getBoolean("antilock", true)) {
             AgentForegroundService.setAntilock(true)
         }
+        // MIUI 在 force-stop / 重装后会断开无障碍服务 — 仅在冷启动(onCreate)时自动跳一次设置页,
+        // onResume 里不再跳, 避免任务执行中被系统切回设置页打断
     }
 
     private fun prefs() = Prefs.get(this)

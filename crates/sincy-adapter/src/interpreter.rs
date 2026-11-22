@@ -25,6 +25,14 @@ pub trait ScreenSnapshot {
     fn image_base64(&self) -> Option<String> {
         None
     }
+    /// Mobilerun-style numbered interactive elements: "idx=3 id=... text=... bounds=[l,t,r,b]" lines.
+    fn elements_summary(&self) -> String {
+        String::new()
+    }
+    /// Bounds of the interactive element with the given 1-based index.
+    fn element_bounds(&self, _idx: u32) -> Option<(i32, i32, i32, i32)> {
+        None
+    }
 }
 
 /// Test/mock snapshot.
@@ -197,6 +205,8 @@ pub enum ExecEvent {
     UnknownScreen {
         screen_id: String,
         recoveries_left: u32,
+        /// 诊断用: 当前屏幕的 describe() 摘要 (ids/texts), 便于云端核验锚点
+        screen: String,
     },
     UiDrift(DriftVerdict),
     Completed,
@@ -340,16 +350,32 @@ impl<'a> Interpreter<'a> {
                     )));
                     return rt;
                 }
-                if m.screen_id == step.expect {
+                // 期望屏幕的锚点全匹配即视为到达 (避免多个屏幕锚点重叠时 identify 选错 winner)
+                let expect_full_match = self
+                    .def
+                    .screens
+                    .get(&step.expect)
+                    .map(|d| !d.anchors.is_empty() && anchor_match_rate(&d.anchors, &*snap) >= 1.0)
+                    .unwrap_or(false);
+                if m.screen_id == step.expect || expect_full_match {
                     break m;
                 }
                 if m.screen_id == "UNKNOWN" {
                     // whitelisted safe recovery first: only Back / CloseDialog
                     if recoveries_left > 0 {
                         recoveries_left -= 1;
+                        let mut desc = snap.describe();
+                        if desc.len() > 600 {
+                            let mut end = 600;
+                            while !desc.is_char_boundary(end) {
+                                end -= 1;
+                            }
+                            desc.truncate(end);
+                        }
                         rt.events.push(ExecEvent::UnknownScreen {
                             screen_id: m.screen_id.clone(),
                             recoveries_left,
+                            screen: desc,
                         });
                         let back = FlowStep {
                             expect: step.expect.clone(),
@@ -400,7 +426,34 @@ impl<'a> Interpreter<'a> {
                     let _ = io.perform(&fake);
                     continue; // re-observe within the SAME step
                 }
-                // recognized but unexpected screen: block, no blind taps
+                // recognized but unexpected screen: 可能是上一步导航的转场延迟。
+                // 只做"观察 + 等待" (绝不盲点), 消耗一次 recovery 后重试; 不得已才 block。
+                if recoveries_left > 0 {
+                    recoveries_left -= 1;
+                    let mut desc = snap.describe();
+                    if desc.len() > 600 {
+                        let mut end = 600;
+                        while !desc.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        desc.truncate(end);
+                    }
+                    rt.events.push(ExecEvent::UnknownScreen {
+                        screen_id: m.screen_id.clone(),
+                        recoveries_left,
+                        screen: desc,
+                    });
+                    let wait = FlowStep {
+                        expect: step.expect.clone(),
+                        action: ActionKind::Wait,
+                        target: None,
+                        value: Some("800".into()),
+                        side_effect: false,
+                        verify: false,
+                    };
+                    let _ = io.perform(&wait);
+                    continue; // re-observe within the SAME step
+                }
                 rt.status = Some(ExecStatus::Failed(format!(
                     "expected screen {} but identified {} at step {i}",
                     step.expect, m.screen_id
@@ -424,12 +477,21 @@ impl<'a> Interpreter<'a> {
                     rt.status = Some(ExecStatus::Failed(format!("step {i} failed: {e}")));
                     return rt;
                 }
+                // set_text 的证据带上替换后的文本 (审计: 设备到底输入了什么);
+                // tap 只带锚点摘要, 不带原始坐标
+                let evidence = match &action {
+                    Action::SetText { target, value } => format!(
+                        "step={i} screen={} se={} set_text target={:?} value={:?}",
+                        m.screen_id, step.side_effect, target, value
+                    ),
+                    _ => format!("step={i} screen={} se={}", m.screen_id, step.side_effect),
+                };
                 rt.events.push(ExecEvent::Step(StepOutcome {
                     step_index: i,
                     screen_id: m.screen_id.clone(),
                     action: Some(action),
                     side_effect: step.side_effect,
-                    evidence: format!("step={i} screen={} se={}", m.screen_id, step.side_effect),
+                    evidence,
                 }));
             }
 

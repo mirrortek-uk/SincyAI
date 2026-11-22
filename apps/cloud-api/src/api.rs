@@ -1096,6 +1096,17 @@ async fn get_agent_task(
     let adapter_yaml = serde_json::to_string_pretty(&definition)
         .map_err(|e| app_error_response(AppError::retryable("serde", e.to_string())))?;
 
+    // package_text 并入 task_context (数据, 非签名): 设备端验签后才把
+    // flow 里的 "package.text" 占位符替换成它, 签名完整性不受影响
+    let mut task_context = task
+        .try_get::<serde_json::Value, _>("context")
+        .unwrap_or(serde_json::Value::Null);
+    if let Some(obj) = task_context.as_object_mut() {
+        obj.insert(
+            "package_text".into(),
+            serde_json::Value::String(text.clone()),
+        );
+    }
     Ok(Json(json!({
         "task_id": task.get::<Uuid, _>("id"),
         "state": task.get::<String, _>("state"),
@@ -1107,7 +1118,7 @@ async fn get_agent_task(
         "adapter_version": av.get::<i32, _>("version"),
         "adapter_yaml": adapter_yaml,
         "signature": av.get::<String, _>("signature"),
-        "task_context": task.try_get::<serde_json::Value, _>("context").unwrap_or(serde_json::Value::Null),
+        "task_context": task_context,
     })))
 }
 
@@ -1418,8 +1429,25 @@ async fn run_setup(
         Some(app) if body.action == "setup_install" => format!("setup_install:{app}"),
         _ => body.action.clone(),
     };
+    // agentic 任务把目标 app 的包名放进 context, 设备端 launch_app 恢复前台时用
+    let catalog_pkg = match &body.app {
+        Some(app) => sqlx::query(
+            "SELECT target_package FROM setup_app_catalog WHERE app_key = $1 AND active",
+        )
+        .bind(app)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|r| r.try_get::<String, _>("target_package").ok()),
+        None => None,
+    };
     let task_context = if body.action == "agentic" {
-        serde_json::json!({ "goal": body.goal.clone().unwrap_or_default() })
+        let mut ctx = serde_json::json!({ "goal": body.goal.clone().unwrap_or_default() });
+        if let Some(pkg) = catalog_pkg {
+            ctx["app_package"] = serde_json::Value::String(pkg);
+        }
+        ctx
     } else {
         serde_json::json!({})
     };

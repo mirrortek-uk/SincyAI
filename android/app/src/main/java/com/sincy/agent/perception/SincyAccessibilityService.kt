@@ -121,15 +121,25 @@ class SincyAccessibilityService : AccessibilityService() {
             val textAny = target.optJSONArray("text_any")?.let { arr ->
                 (0 until arr.length()).map { arr.getString(it) }
             }
+            // Tap targets must be on-screen: hidden ViewPager pages (e.g. the other home
+            // tab) also carry timeline_post nodes with bounds shifted off-screen; tapping
+            // those coordinates is a no-op, so skip any node that does not intersect the display.
+            val dm = instance?.resources?.displayMetrics
+            val sw = dm?.widthPixels ?: 1080
+            val sh = dm?.heightPixels ?: 2400
+            val bounds = android.graphics.Rect()
             fun walk(node: AccessibilityNodeInfo, depth: Int): AccessibilityNodeInfo? {
                 if (depth > 14) return null
+                node.getBoundsInScreen(bounds)
+                val onScreen = bounds.width() > 0 && bounds.height() > 0 &&
+                    bounds.right > 0 && bounds.left < sw && bounds.bottom > 0 && bounds.top < sh
                 val rid = node.viewIdResourceName
                 val hay = listOfNotNull(rid, node.text?.toString(), node.contentDescription?.toString()).joinToString(" ")
                 val idOk = id != null && rid != null &&
                     (rid == id || rid.endsWith("/$id") || rid.endsWith(":$id"))
                 val textOk = text != null && (node.text?.toString() == text || node.contentDescription?.toString() == text)
                 val anyOk = textAny != null && textAny.any { hay.contains(it) }
-                if (idOk || textOk || anyOk || (id == null && text == null && textAny == null && node.isClickable)) {
+                if (onScreen && (idOk || textOk || anyOk || (id == null && text == null && textAny == null && node.isClickable))) {
                     return node
                 }
                 for (i in 0 until node.childCount) {
@@ -142,28 +152,61 @@ class SincyAccessibilityService : AccessibilityService() {
             return walk(root, 0)
         }
 
-        /** Real injected touch: dispatchGesture click at the node center. */
+        /** Real tap: 优先人性化手势点击节点中心 (真实触摸, canPerformGestures=true 时可用),
+         *  手势失败再退回对可点击祖先做语义 ACTION_CLICK。 */
         private fun tap(svc: SincyAccessibilityService, target: JSONObject?): Boolean {
-            val root = svc.rootInActiveWindow ?: return false
-            val node = findNode(root, target)
-            if (node != null) {
-                val r = android.graphics.Rect()
-                node.getBoundsInScreen(r)
-                val cx = r.centerX().toFloat()
-                val cy = r.centerY().toFloat()
-                root.recycle()
-                return tapAt(svc, cx.toInt(), cy.toInt(), 80)
+            val root = svc.rootInActiveWindow
+            if (root == null) {
+                android.util.Log.e("SincyAgent", "tap: rootInActiveWindow=null")
+                return false
             }
+            val node = findNode(root, target)
+            if (node == null) {
+                android.util.Log.e("SincyAgent", "tap: node not found for $target")
+                root.recycle()
+                return false
+            }
+            val r = android.graphics.Rect()
+            node.getBoundsInScreen(r)
+            val cx = r.centerX()
+            val cy = r.centerY()
+            android.util.Log.e("SincyAgent", "tap: target=$target at ($cx,$cy) bounds=$r")
+            node.recycle()
             root.recycle()
-            return false
+            if (tapAt(svc, cx, cy, 80)) return true
+            android.util.Log.e("SincyAgent", "tap: gesture failed at ($cx,$cy), fallback click")
+            // 手势失败: 退回语义 click
+            val root2 = svc.rootInActiveWindow ?: return false
+            val node2 = findNode(root2, target) ?: run { root2.recycle(); return false }
+            var n: AccessibilityNodeInfo? = node2
+            var clickable: AccessibilityNodeInfo? = null
+            while (n != null) {
+                if (n.isClickable) { clickable = n; break }
+                n = n.parent
+            }
+            val ok = clickable != null && clickable.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            android.util.Log.e("SincyAgent", "tap: fallback click ok=$ok clickable=${clickable != null}")
+            node2.recycle()
+            root2.recycle()
+            return ok
         }
 
         /** dispatchGesture click at an exact (already humanized) point, with a hold. */
         private fun tapAt(svc: SincyAccessibilityService, x: Int, y: Int, holdMs: Long): Boolean {
-            val path = Path().apply { moveTo(x.toFloat(), y.toFloat()); lineTo(x + 0.1f, y.toFloat()) }
-            val stroke = GestureDescription.StrokeDescription(path, 0, holdMs.coerceAtLeast(30))
-            val gesture = GestureDescription.Builder().addStroke(stroke).build()
-            if (svc.dispatchGesture(gesture, null, null)) return true
+            repeat(2) { attempt ->
+                if (attempt == 1) sleepQuiet(400) // 第一次失败可能是页面转场中, 稍作等待重试
+                val path = Path().apply { moveTo(x.toFloat(), y.toFloat()); lineTo(x + 0.1f, y.toFloat()) }
+                val stroke = GestureDescription.StrokeDescription(path, 0, holdMs.coerceAtLeast(30))
+                val gesture = GestureDescription.Builder().addStroke(stroke).build()
+                val dispatched = try {
+                    svc.dispatchGesture(gesture, null, null)
+                } catch (e: Exception) {
+                    android.util.Log.e("SincyAgent", "dispatchGesture threw: ${e.message}")
+                    false
+                }
+                if (dispatched) return true
+            }
+            android.util.Log.e("SincyAgent", "tapAt: gesture rejected at ($x,$y), fallback click")
             // fallback: semantic click on the deepest clickable node containing the point
             val root = svc.rootInActiveWindow ?: return false
             val hit = findClickableAt(root, x, y)
@@ -249,6 +292,7 @@ class SincyAccessibilityService : AccessibilityService() {
             val dm = instance?.resources?.displayMetrics
             val width = dm?.widthPixels ?: 1080
             val height = dm?.heightPixels ?: 2400
+            var elementIdx = 0
             fun walk(node: AccessibilityNodeInfo, depth: Int) {
                 if (depth > 14) return
                 val r = android.graphics.Rect()
@@ -256,6 +300,14 @@ class SincyAccessibilityService : AccessibilityService() {
                 node.viewIdResourceName?.let { ids.put(it) }
                 val t = node.text?.toString() ?: node.contentDescription?.toString()
                 t?.let { texts.put(it) }
+                val editable = node.className?.toString()?.endsWith("EditText") == true
+                // Mobilerun-style element indexing: on-screen interactive nodes get a
+                // stable 1-based idx so the LLM can tap by index instead of raw coords.
+                val onScreen = r.width() > 0 && r.height() > 0 &&
+                    r.right > 0 && r.left < width && r.bottom > 0 && r.top < height
+                val idx = if (onScreen && (node.isClickable || editable) && elementIdx < 120) {
+                    ++elementIdx
+                } else 0
                 nodes.put(
                     JSONObject()
                         .put("id", node.viewIdResourceName ?: "")
@@ -264,7 +316,8 @@ class SincyAccessibilityService : AccessibilityService() {
                         .put("bounds", JSONArray(intArrayOf(r.left, r.top, r.right, r.bottom)))
                         .put("clickable", node.isClickable)
                         .put("focused", node.isFocused)
-                        .put("editable", node.className?.toString()?.endsWith("EditText") == true)
+                        .put("editable", editable)
+                        .put("idx", idx)
                 )
                 for (i in 0 until node.childCount) {
                     node.getChild(i)?.let { walk(it, depth + 1) }

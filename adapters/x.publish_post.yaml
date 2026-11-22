@@ -7,7 +7,7 @@ adapter: x.publish_post
 version: 1
 app:
   package: com.twitter.android
-  version_range: ">=10.0 <11.0"
+  version_range: ">=10.0"
 screens:
   home:
     anchors:
