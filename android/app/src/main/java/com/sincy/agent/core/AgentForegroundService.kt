@@ -42,6 +42,9 @@ class AgentForegroundService : Service() {
     private var ws: WebSocket? = null
     private var heartbeatJob: Job? = null
     private val http = OkHttpClient()
+    // 同一时刻只跑一个任务: gateway 会把多条 QUEUED 一次性派发, 串行执行避免
+    // 两个 agentic 闭环同时抢屏幕/同时调 LLM 互相干扰
+    private val taskMutex = kotlinx.coroutines.sync.Mutex()
 
     override fun onCreate() {
         super.onCreate()
@@ -107,6 +110,15 @@ class AgentForegroundService : Service() {
     }
 
     private suspend fun handleAssign(webSocket: WebSocket, baseUrl: String, token: String, taskId: String) {
+        taskMutex.lock()
+        try {
+            handleAssignLocked(webSocket, baseUrl, token, taskId)
+        } finally {
+            taskMutex.unlock()
+        }
+    }
+
+    private suspend fun handleAssignLocked(webSocket: WebSocket, baseUrl: String, token: String, taskId: String) {
         // fetch the signed task brief (package text + adapter + signature) over HTTP.
         // 注意必须同时带 ?token= (handler 设备鉴权) 和 Authorization: Bearer 头 (auth middleware),
         // 参考 crates/sincy-agent/src/client.rs

@@ -98,11 +98,13 @@ object AdapterRuntime {
             .build()
         llmHttp.newCall(request).execute().use { resp ->
             val respBody = resp.body?.string() ?: ""
-            if (!resp.isSuccessful) return "{\"action\":\"challenge\",\"reason\":\"llm http ${resp.code}: ${respBody.take(120)}\"}"
+            // 传输/鉴权/预算错误不是人机挑战: 用白名单外的 action 让 Rust 侧判 FAILED,
+            // 避免基础设施故障被误判为 WAITING_USER 挂起
+            if (!resp.isSuccessful) return "{\"action\":\"llm_error\",\"reason\":\"llm http ${resp.code}: ${respBody.take(120)}\"}"
             return try {
                 org.json.JSONObject(respBody).optString("text", "")
             } catch (e: Exception) {
-                "{\"action\":\"challenge\",\"reason\":\"bad llm response: ${e.message}\"}"
+                "{\"action\":\"llm_error\",\"reason\":\"bad llm response: ${e.message}\"}"
             }
         }
     }

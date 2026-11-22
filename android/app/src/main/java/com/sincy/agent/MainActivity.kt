@@ -102,12 +102,30 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "建议先点上方按钮开启无障碍服务，否则 agent 看不到屏幕", Toast.LENGTH_LONG).show()
             }
             try {
-                startForegroundService(Intent(this, AgentForegroundService::class.java))
+                startAgentService()
                 Toast.makeText(this, "Agent 已启动 — 连接状态看通知栏 (WSS ${server.text})", Toast.LENGTH_LONG).show()
             } catch (e: Exception) {
                 Toast.makeText(this, "启动失败: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
+
+        // 已配对过的设备每次打开 app 都自动拉起 agent 服务,
+        // 免得服务被系统杀掉后手机"假在线" (任务一直 QUEUED 无人接手)
+        if (!prefs().getString("device_token", null).isNullOrEmpty()) {
+            try {
+                startAgentService()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun startAgentService() {
+        if (android.os.Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+        }
+        startForegroundService(Intent(this, AgentForegroundService::class.java))
     }
 
     private fun prefs() = Prefs.get(this)
