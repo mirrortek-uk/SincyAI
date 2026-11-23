@@ -456,6 +456,18 @@ fn run_agentic_loop(
         match action {
             "done" => {
                 events.push(ExecEvent::Completed);
+                // done 可带 answer: 找帖/读帖任务用它把结果(帖子全文等)回传云端
+                if let Some(ans) = decision.get("answer").and_then(|a| a.as_str())
+                    && !ans.is_empty()
+                {
+                    events.push(ExecEvent::Step(StepOutcome {
+                        step_index: step,
+                        screen_id: "agentic".into(),
+                        action: None,
+                        side_effect: false,
+                        evidence: format!("ANSWER: {ans}"),
+                    }));
+                }
                 return Ok(AdapterExecution {
                     outcome: TaskOutcome::Success,
                     side_effect_done: false,

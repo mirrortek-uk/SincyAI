@@ -226,12 +226,28 @@ mod jni {
                 .unwrap_or(false)
         }
         fn has_text(&self, text: &str) -> bool {
+            // Challenge phrases must match a UI control (clickable/editable node) or a
+            // short label — never a long post body, otherwise tweet content quoting
+            // "captcha"/"unusual activity" would falsely park the task as WAITING_USER.
             serde_json::from_str::<serde_json::Value>(&self.0)
                 .ok()
-                .and_then(|v| v["texts"].as_array().cloned())
+                .and_then(|v| v["nodes"].as_array().cloned())
                 .map(|a| {
-                    a.iter()
-                        .any(|x| x.as_str().map(|t| t.trim() == text.trim()).unwrap_or(false))
+                    a.iter().any(|n| {
+                        let matches = ["text", "desc"].iter().any(|k| {
+                            n[k].as_str()
+                                .map(|t| t.trim() == text.trim())
+                                .unwrap_or(false)
+                        });
+                        if !matches {
+                            return false;
+                        }
+                        let clickable = n["clickable"].as_bool().unwrap_or(false);
+                        let editable = n["editable"].as_bool().unwrap_or(false);
+                        let short = n["text"].as_str().map(|t| t.len() <= 48).unwrap_or(false)
+                            || n["desc"].as_str().map(|t| t.len() <= 48).unwrap_or(false);
+                        clickable || editable || short
+                    })
                 })
                 .unwrap_or(false)
         }

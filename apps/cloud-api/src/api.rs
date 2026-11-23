@@ -54,6 +54,7 @@ pub fn routes() -> Router<AppState> {
         .route("/devices/pairing-codes", post(create_pairing_code))
         .route("/devices/pair", post(pair_with_code))
         .route("/setup/run", post(run_setup))
+        .route("/setup/reply_auto", post(reply_auto))
         .route("/setup/apps", get(list_setup_apps))
         .route("/setup/apps/{app_key}", patch(update_setup_app))
         .route(
@@ -1507,6 +1508,346 @@ async fn complete_device_registration(
     Ok(Json(
         json!({ "device_id": body.device_id, "token": session.token }),
     ))
+}
+
+#[derive(Debug, Deserialize)]
+struct ReplyAutoBody {
+    /// 目标应用目录 key, 如 "x"
+    app: Option<String>,
+    /// 找帖主题 (来自 opportunity / 手工输入)
+    topic: String,
+    brand_id: Uuid,
+}
+
+/// POST /setup/reply_auto (JWT) — 自动回帖流水线:
+/// ① agentic 找帖 (X 搜索主题 → 打开最相关帖子详情页 → done 时把帖子全文带回 ANSWER)
+/// ② 云端 LLM 读帖子全文 + 品牌语气 生成人类口吻回复 (回帖免人工审核, package 直接 approved)
+/// ③ 签名 adapter x.reply_open_post 在已打开的详情页上发送回复
+/// 立即返回 find_task_id, 后台异步跑全程; 最终发布任务出现在 tasks 列表。
+async fn reply_auto(
+    State(state): State<AppState>,
+    axum::extract::Extension(auth): axum::extract::Extension<crate::auth::AuthCtx>,
+    Json(body): Json<ReplyAutoBody>,
+) -> Result<Json<Value>, Response> {
+    let pool = state.pool().map_err(app_error_response)?;
+    let agency = auth.agency_id;
+    let topic = body.topic.trim().to_string();
+    if topic.is_empty() || topic.chars().count() > 120 {
+        return Err(app_error_response(AppError::non_retryable(
+            "bad_topic",
+            "topic required, <=120 chars",
+        )));
+    }
+    // brand 归属检查
+    let owns = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM brands WHERE id = $1 AND agency_id = $2)",
+    )
+    .bind(body.brand_id)
+    .bind(agency.as_uuid())
+    .fetch_one(pool)
+    .await
+    .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
+    if !owns {
+        return Err(app_error_response(AppError::non_retryable(
+            "brand_not_found",
+            "brand does not belong to this agency",
+        )));
+    }
+    // 急停检查
+    let ks = sqlx::query(
+        "SELECT reason FROM kill_switches WHERE active AND (agency_id IS NULL OR agency_id = $1) LIMIT 1",
+    )
+    .bind(agency.as_uuid())
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
+    if let Some(r) = ks {
+        return Err(app_error_response(AppError::needs_user(
+            "kill_switch_active",
+            format!(
+                "被急停: {}",
+                r.get::<Option<String>, _>("reason").unwrap_or_default()
+            ),
+        )));
+    }
+    let find_task_id = create_agentic_find_task(pool, agency, &body.app, &topic).await?;
+    let pool2 = pool.clone();
+    let agency2 = agency;
+    let brand2 = body.brand_id;
+    let topic2 = topic.clone();
+    let allow_mock = state.allow_mock_adapters;
+    tokio::spawn(async move {
+        if let Err(e) =
+            run_reply_auto(pool2, agency2, brand2, topic2, find_task_id, allow_mock).await
+        {
+            tracing::warn!("reply_auto pipeline failed: {e}");
+        }
+    });
+    Ok(Json(json!({
+        "find_task_id": find_task_id,
+        "topic": topic,
+        "state": "RUNNING",
+        "note": "找帖 agentic 任务已下发; 完成后自动生成回复并通过 x.reply_open_post 发布, 最终任务见 tasks 列表",
+    })))
+}
+
+/// 创建 system.agentic 找帖任务 (与 run_setup 的 agentic 分支同构)
+async fn create_agentic_find_task(
+    pool: &sqlx::PgPool,
+    agency: AgencyId,
+    app: &Option<String>,
+    topic: &str,
+) -> Result<Uuid, Response> {
+    let task_id = Uuid::new_v4();
+    let route_id = Uuid::new_v4();
+    let cap = sqlx::query(
+        "SELECT priority FROM channel_capabilities
+         WHERE platform = 'system' AND action = 'setup_install' AND route = 'device'",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?
+    .ok_or_else(|| {
+        app_error_response(AppError::non_retryable(
+            "no_capability",
+            "system.setup_install 没有 device 路由 capability",
+        ))
+    })?;
+    let av = sqlx::query(
+        "SELECT v.version FROM app_adapter_versions v WHERE v.adapter_id = 'system.agentic' AND v.state = 'active' ORDER BY v.version DESC LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?
+    .ok_or_else(|| {
+        app_error_response(AppError::non_retryable(
+            "no_adapter",
+            "system.agentic 没有 active 版本",
+        ))
+    })?;
+    let catalog_pkg = match app {
+        Some(a) => sqlx::query(
+            "SELECT target_package FROM setup_app_catalog WHERE app_key = $1 AND active",
+        )
+        .bind(a)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|r| r.try_get::<String, _>("target_package").ok()),
+        None => None,
+    };
+    let goal = format!(
+        "Find ONE post on X (Twitter) about this topic: \"{topic}\"\n\
+         Steps: tap the search magnifier icon at the top-right of the Home screen (tap_xy around 851,99). \
+         Type \"{topic}\" into the search box and submit. In the results, prefer the 最新/Latest or 帖子/Top tab. \
+         Scan results (screenshot + text) and tap the TEXT of the first clearly relevant post to open its detail page. \
+         Do NOT tap ads. Do NOT reply, post, like, repost, or follow anyone — this task only FINDS and OPENS the post.\n\
+         When the post detail page is open, reply {{\"action\":\"done\",\"answer\":\"AUTHOR: <author handle>\\nPOST: <the full post text copied exactly>\"}}.\n\
+         If after ~20 steps no relevant post is found, reply {{\"action\":\"done\",\"answer\":\"NOTFOUND\"}}. Max 30 steps."
+    );
+    let mut ctx = serde_json::json!({ "goal": goal });
+    if let Some(pkg) = catalog_pkg {
+        ctx["app_package"] = serde_json::Value::String(pkg);
+    }
+    let idem = format!("reply-auto-find-{task_id}");
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
+    sqlx::query(
+        "INSERT INTO execution_routes (id, agency_id, task_id, platform, action, selected_route, capability_status, priority)
+         VALUES ($1, $2, $3, 'system', 'agentic', 'device', 'verified', $4)",
+    )
+    .bind(route_id)
+    .bind(agency.as_uuid())
+    .bind(task_id)
+    .bind(cap.get::<i32, _>("priority"))
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
+    sqlx::query(
+        "INSERT INTO device_tasks (id, agency_id, idempotency_key, state, route_id, adapter_version, context)
+         VALUES ($1, $2, $3, 'QUEUED', $4, $5, $6)",
+    )
+    .bind(task_id)
+    .bind(agency.as_uuid())
+    .bind(idem)
+    .bind(route_id)
+    .bind(av.get::<i32, _>("version"))
+    .bind(&ctx)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
+    tx.commit()
+        .await
+        .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
+    Ok(task_id)
+}
+
+/// 后台流水线: 等找帖任务结束 → 取帖子全文 → LLM 生成人类口吻回复 → approved package → 签名发布
+const REPLY_AUTO_TERMINAL: [&str; 5] = [
+    "COMPLETED",
+    "FAILED",
+    "VERIFICATIONPENDING",
+    "WAITING_USER",
+    "CANCELLED",
+];
+
+async fn run_reply_auto(
+    pool: sqlx::PgPool,
+    agency: AgencyId,
+    brand_id: Uuid,
+    topic: String,
+    find_task_id: Uuid,
+    allow_mock: bool,
+) -> Result<(), String> {
+    // 1. 等找帖任务终态 (最多 240s)
+    let mut final_state = String::new();
+    for _ in 0..48 {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        let st: Option<String> = sqlx::query_scalar("SELECT state FROM device_tasks WHERE id = $1")
+            .bind(find_task_id)
+            .fetch_optional(&pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        if let Some(s) = st
+            && REPLY_AUTO_TERMINAL.contains(&s.as_str())
+        {
+            final_state = s;
+            break;
+        }
+    }
+    if final_state != "COMPLETED" {
+        return Err(format!("find task ended as {final_state}"));
+    }
+    // 2. 取帖子全文 (ANSWER 事件)
+    let ev: Option<String> = sqlx::query_scalar(
+        "SELECT detail::text FROM task_events WHERE task_id = $1 AND detail::text LIKE '%ANSWER: %' ORDER BY id DESC LIMIT 1",
+    )
+    .bind(find_task_id)
+    .fetch_optional(&pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    let raw = ev.ok_or("no ANSWER event from find task")?;
+    let answer = raw
+        .split("ANSWER: ")
+        .last()
+        .unwrap_or("")
+        .trim_matches('"')
+        .trim()
+        .to_string();
+    if answer.is_empty() || answer == "NOTFOUND" {
+        return Err("find task found no relevant post".into());
+    }
+    tracing::info!(task = %find_task_id, "reply_auto found post: {}", &answer[..answer.len().min(200)]);
+
+    // 3. 品牌语气 + no_go
+    let brand = sqlx::query("SELECT name, language, config FROM brands WHERE id = $1")
+        .bind(brand_id)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("brand not found")?;
+    let bname: String = brand.get("name");
+    let blang: Option<String> = brand.get("language");
+    let bcfg: serde_json::Value = brand.get::<serde_json::Value, _>("config");
+    let voice = bcfg
+        .get("voice")
+        .and_then(|v| v.as_str())
+        .unwrap_or("casual, human");
+    let audience = bcfg
+        .get("audience")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    let no_go = bcfg
+        .get("no_go")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let no_go_hit = no_go.iter().any(|ng| {
+        let ng = ng.to_lowercase();
+        topic.to_lowercase().contains(&ng) || answer.to_lowercase().contains(&ng)
+    });
+    if no_go_hit {
+        return Err(format!("topic/post hits brand no_go list: {no_go:?}"));
+    }
+
+    // 4. LLM 生成人类口吻回复
+    let blang = blang.unwrap_or_else(|| "en".into());
+    let reply_prompt = format!(
+        "You are the social media account \"{bname}\" (language: {blang}). Voice: {voice}. Audience: {audience}.\n\
+         Topic we care about: {topic}\n\n\
+         Here is a real post on X that we want to reply to:\n\"\"\"\n{answer}\n\"\"\"\n\n\
+         Write a SHORT reply (1-2 sentences, max 240 characters) that a real human would write in the comments. \
+         Requirements: sound like a genuine person, not marketing; reference a SPECIFIC detail from the post above; \
+         agree, add a sharp observation, or ask a real question; NO hashtags, NO \"Great post!\", NO self-promotion, NO links. \
+         ALWAYS reply in the account's configured language: {blang}.\n\
+         Output ONLY the reply text, nothing else."
+    );
+    let gw = sincy_ai::gateway_from_env(allow_mock).map_err(|e| e.to_string())?;
+    let req = sincy_ai::GenerationRequest {
+        prompt: reply_prompt,
+        model: std::env::var("SINCY_LLM_MODEL").unwrap_or_else(|_| "mistral-medium-latest".into()),
+        max_tokens: 192,
+        content_item_id: None,
+        images: vec![],
+    };
+    let gen_out = gw.generate(&req).await.map_err(|e| e.to_string())?;
+    let reply_text = gen_out.text.trim().trim_matches('"').to_string();
+    if reply_text.is_empty() || reply_text.chars().count() > 280 {
+        return Err(format!(
+            "generated reply invalid (len {}): {reply_text}",
+            reply_text.chars().count()
+        ));
+    }
+    tracing::info!(task = %find_task_id, "reply_auto generated reply: {reply_text}");
+
+    // 5. 自动 approved package (回帖免人工审核) + 签名发布
+    let pid = insert_package(
+        &pool,
+        agency,
+        NewPackage {
+            brand_id,
+            platform: "x",
+            action: "reply_open_post",
+            text: &reply_text,
+            source: "agent_reply",
+            provenance: serde_json::json!({
+                "origin": "reply_auto_pipeline",
+                "topic": topic,
+                "find_task_id": find_task_id,
+                "target_post": &answer[..answer.len().min(500)],
+            }),
+            approval_status: "approved",
+        },
+    )
+    .await
+    .map_err(|e| format!("insert_package: {e:?}"))?;
+    let pub_out = publish_core(
+        &pool,
+        agency,
+        PublishTaskBody {
+            agency_id: None,
+            brand_id,
+            platform: "x".into(),
+            action: "reply_open_post".into(),
+            package_id: pid,
+            package_version: 1,
+            idempotency_key: format!("reply-auto-{find_task_id}"),
+        },
+        allow_mock,
+    )
+    .await
+    .map_err(|e| format!("publish_core: {e:?}"))?;
+    tracing::info!(task = %find_task_id, package = %pid, publish_task = %pub_out.task_id, "reply_auto published");
+    Ok(())
 }
 
 async fn list_devices(

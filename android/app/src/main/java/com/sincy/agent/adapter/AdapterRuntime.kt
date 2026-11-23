@@ -92,7 +92,7 @@ object AdapterRuntime {
             append('\n')
             append("""{"action":"set_text","target":{"text":"<field placeholder text>"},"value":"<text>"} — device writes into the focused input even if target only matches the placeholder | {"action":"wait","ms":1000}""")
             append('\n')
-            append("""{"action":"back"} | {"action":"close_dialog"} | {"action":"launch_app"} | {"action":"done"} | {"action":"challenge","reason":"..."}""")
+            append("""{"action":"back"} | {"action":"close_dialog"} | {"action":"launch_app"} | {"action":"done"} | {"action":"done","answer":"..."} (report findings: e.g. the full text of a post you were asked to read) | {"action":"challenge","reason":"..."}""")
             append('\n')
             append("RULES: (1) If a HISTORY line says screen UNCHANGED, do NOT repeat that action — scroll or pick a different target. ")
             append("(2) When the GOAL is visibly achieved, reply {\"action\":\"done\"}. ")

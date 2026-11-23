@@ -1,0 +1,48 @@
+# X (Twitter) 回复"当前已打开的帖子"设备自动化 adapter (v1)。
+# 与 x.reply_comment 的区别: 不自己选帖 —— 假定目标帖子的详情页已经打开
+# (由 agentic 找帖任务打开), 直接在详情页点"回复"回复它。
+# 回复内容来自内容包 (value: "package.text" —— 设备端验签后由
+# task_context.package_text 替换, 不参与签名)。
+# 真机核验 (X 12.44.0-prod.01, 中文 locale, 1080x2184):
+#   详情页操作栏: 回复/转帖/喜欢/展示量/书签/分享
+#   点"回复" -> 全屏编辑页: 左上"关闭", 输入框占位"发布你的回复", 右上"回复"按钮 bounds 880,124,1048,227 (中心 964,175)
+adapter: x.reply_open_post
+version: 1
+app:
+  package: com.twitter.android
+  version_range: ">=10.0"
+screens:
+  main_nav:
+    anchors:
+      - { text_any: ["主页", "Home"] }
+      - { text_any: ["通知标签", "Notifications", "私信", "Messages"] }
+  tweet_detail:
+    anchors:
+      - { text_any: ["回复", "Reply"] }
+      - { text_any: ["转帖", "Repost", "喜欢", "Like", "书签", "Bookmark"] }
+  composer:
+    anchors:
+      - { text_any: ["关闭", "Close"] }
+      - { text_any: ["回复", "Reply", "发布", "Post"] }
+  challenge:
+    anchors:
+      - { text_any: ["Verify you are human", "unusual activity", "安全验证", "人机验证", "保存帖子", "Save post", "草稿"] }
+  update_dialog:
+    anchors:
+      - { text_any: ["Update now", "立即更新"] }
+flow:
+  # 详情页已打开: 直接点操作栏"回复" -> 全屏编辑页
+  - { expect: tweet_detail, action: wait, value: "1500" }
+  - { expect: tweet_detail, action: tap, target: { text_any: ["回复", "Reply"] } }
+  - { expect: composer, action: wait, value: "2500" }
+  # 点输入框占位区确保聚焦
+  - { expect: composer, action: tap, target: { text_any: ["发布你的回复", "Post your reply"] } }
+  # set_text: target 用不存在的 id -> Kotlin 落回 FOCUS_INPUT 写入
+  - { expect: composer, action: set_text, target: { id: "composer_text_field" }, value: "package.text" }
+  - { expect: composer, action: wait, value: "800" }
+  # 点右上角"回复"发布按钮 (中心 964,175); side_effect: 之后失败一律 uncertain 不重试
+  - { expect: composer, action: tap_at, target: { text_any: ["回复", "Reply", "发布", "Post"] }, value: "{\"x\":964,\"y\":175}", side_effect: true }
+  # 发布成功后回到信息流/详情 (verify: 副作用后置条件; 失败 -> VERIFICATIONPENDING 转人工)
+  - { expect: main_nav, action: wait, value: "3000", verify: true }
+known_interrupts:
+  - { screen: update_dialog, action: tap, target: { text_any: ["Not now", "以后再说", "暂不", "取消"] } }
