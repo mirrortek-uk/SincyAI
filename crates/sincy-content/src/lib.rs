@@ -6,9 +6,15 @@
 //! `PackageEditor`, never mutate an existing one (FR-009 / DoD: 包生成后不可原地篡改).
 
 pub mod ai_label;
+pub mod factory;
 pub mod gate;
 pub mod package;
 
 pub use ai_label::{AiLabel, PlatformLabelRequirement};
+pub use factory::{
+    Brief, CommandProvider, Learning, LocalStubProvider, MediaJob, MediaOutput, MediaProvider,
+    MetricEvent, PlatformAdapter, PlatformSpec, SimpleAdapter, TriggerSource, default_adapters,
+    learn,
+};
 pub use gate::{GateVerdict, QualityGate, QualityIssue};
 pub use package::{MediaAsset, PackageEditor, PackageError, PublishingPackage};

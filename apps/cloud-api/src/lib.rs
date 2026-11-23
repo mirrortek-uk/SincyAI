@@ -5,6 +5,7 @@ pub mod architecture;
 pub mod auth;
 pub mod bootstrap;
 pub mod employees;
+pub mod factory;
 pub mod gateway;
 pub mod industry;
 pub mod intel;

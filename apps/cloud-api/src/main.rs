@@ -70,6 +70,8 @@ async fn main() {
         // Sincy Pulse: 种子内置 provider + manifest 驱动调度
         cloud_api::pulse::seed_providers(&pool).await;
         tokio::spawn(cloud_api::pulse::run_scheduler(pool.clone()));
+        // Connector 调度器 (Sincy-05): manifest 驱动的可抓取连接器, 与 collector 双写
+        tokio::spawn(cloud_api::pipeline::connectors::run_scheduler(pool.clone()));
     }
 
     // Digital Employee scheduler (DE §cadence): auto-runs operating cycles for

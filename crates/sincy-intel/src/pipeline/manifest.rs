@@ -71,6 +71,7 @@ fn src_off(source_id: &str, label: &str, url: &str, kind: &str) -> SourceRef {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn manifest(
     id: &str,
     name: &str,

@@ -105,6 +105,12 @@ async fn architecture(
                      "超限且规则为 thread 时, 内容拆成多帖写入 publishing_packages.thread_chunks; publish_core 按 chunk 扇出多个 device_tasks(幂等键 :tN), agent brief 按 thread_index 取对应分块文本"),
                 node("wi", "世界情报 sincy-intel", "registry · router · opportunity · adapter",
                      "信源/Provider 注册表(28 个注册源, 支持 enable-all/单源 toggle); 路由打分 健康.45+可靠.30+限流.15+成本.10 + 降级链; ingest 按 dedup_key 去重; 机会引擎 0.35 支柱匹配+0.25 动量+0.15 量+0.15 稀缺+0.10 新鲜度, 过滤阈值 0.45, 周期行动阈值 0.30; wikipedia-rc 独占话题 ×0.5 防噪; DE 适配器(只给建议不改策略)"),
+                node("triggers", "触发三入口 → 工序0", "①机会驱动(默认) ②计划驱动 ③人工驱动 · POST /factory/briefs",
+                     "三种入口都从信号库取已筛好的信号/机会, 不全网扫描; 断点①已接通: Opportunity 命中阈值 → Brief(工序0)"),
+                node("factory", "内容工厂 Content Factory 工序0–7", "sincy-content::factory · Brief/Master Asset/平台适配器/媒体端口",
+                     "工序0 Brief(目标/平台/角度/受众/CTA) → 工序1 策略选题 → 工序2 核心创作(grounding+事实核查) → Master Content Asset → 工序3 平台适配(每平台一个 adapter, x/小红书/抖音/IG/TikTok/YouTube/LinkedIn/FB, GET /factory/adapters) → 工序4 媒体生产(统一 Generator 端口: Faster-Whisper转写/MoneyPrinterTurbo/Pixelle-Video/Kling/Runway/Veo 可互换) → 工序5 质量门(已有 gate) → 工序6 审批 → 工序7 打包不可变 PublishingPackage"),
+                node("learn", "工序9 回流&学习 Learn", "POST /factory/learn · sincy-content::factory::learn",
+                     "指标采集+归因到具体变体 → learn() 形成学习结论 → 回写策略/品牌记忆; 断点②已接通闭环 Learn → Content Strategy"),
                 node("pub", "发布管线 routing/execution/platform/content", "publish_core",
                      "急停 → 审批门(pending 包)→ 路由选择(device@10/api@50/assisted@90, device 路由按实时健康度选设备: 在线窗口 120s > 积压少 > 1h 失败率低, 并写回 assigned_device_id)→ 配额 → 幂等键 → 审计; thread 包按 chunk 扇出多任务; 任务租约/到期回收; side_effect 完成后失败记 FAILED_FINAL 且重试需 force=true, 不允许盲重试"),
                 node("adapter", "Adapter 引擎 sincy-adapter", "YAML 定义 · 解释器 · 漂移检测 · HMAC-SHA256 + Ed25519 双签名方案(signature_scheme)",
@@ -127,7 +133,7 @@ async fn architecture(
         },
         {
             "id": "pipeflow",
-            "title": "情报管线内部 sincy-intel::pipeline (Sincy-05)",
+            "title": "采集层 Connectors + 摄取 Ingestion (sincy-intel::pipeline)",
             "nodes": [
                 node("pipe_conn", "① Connector 只负责采集 (点击展开清单)", "Connector SPI · RSS / HTTP JSON / HTML / 无头浏览器 · cursor 幂等 · GET /intel/connectors",
                      "每个源一个 Connector: 认证/翻页/限流/重试/解析, 只产出统一信封不做判断; 新增数据源 = 只写一个新连接器, 零管道改动; 前端点击本节点可展开查看全部已注册 Connector (名称/功能/内容源/record_type, 见 GET /intel/connectors)"),
@@ -306,7 +312,12 @@ async fn architecture(
             "raw_records / entities / signals / trend_series / ranking_snapshots",
             "data"
         ),
-        edge("pipe_sig", "wi", "signals → 机会引擎 → Content Factory", "signal"),
+        edge("pipe_sig", "wi", "signals → 机会引擎", "signal"),
+        edge("wi", "triggers", "opportunity 命中阈值 → 三入口之一", "signal"),
+        edge("triggers", "factory", "三入口汇入 → 工序0 Brief", "internal"),
+        edge("factory", "pub", "工序7 打包 → 工序8 发布执行", "internal"),
+        edge("pub", "learn", "工序9 指标/归因回流", "data"),
+        edge("learn", "factory", "Learn → 策略 闭环 (断点②已接)", "internal"),
         edge("api", "db", "全部业务读写 (RLS 按 agency 隔离)", "data"),
         edge("wi", "wisrc", "只读采集/搜索/趋势", "external"),
         edge(
@@ -450,6 +461,10 @@ async fn architecture(
         {
             "id": "F13", "title": "情报管线: Source → Connector → RawRecord → 路由 → Pipeline → 实体/行业标签 → Signals",
             "steps": "Source(wisrc / pulse / collector) → Connector 只采集, 产出统一信封 RawRecord(record_type + dedup_key + provenance, cursor 幂等) → Type Router 按 record_type 发布 bus intel.raw.* → 专属 pipeline 跑类型 processor + universal 富化(行业/主题/语言/去重/质量/相关性) → 统一 IntelEntity 落四层存储(raw_records/entities/trend_series+ranking_snapshots/signals) → 生成 Intelligence Signals → Opportunity Engine → Content Factory; 新增数据源只写一个 Connector, 真正的新内容形状才新增一种 pipeline"
+        },
+        {
+            "id": "F14", "title": "内容工厂全链路: 三入口 → 工序0 Brief → … → 工序9 Learn 闭环",
+            "steps": "①机会驱动(Opportunity命中阈值)/②计划驱动(日历到点检索信号库)/③人工驱动(指定选题) → 都产出一条已相关信号 → 工序0 Brief(POST /factory/briefs) → 工序1策略选题 → 工序2核心创作(grounding+事实核查) → Master Content Asset → 工序3平台适配(GET /factory/adapters, 每平台一个 adapter) → 工序4媒体生产(统一 Generator 端口, Faster-Whisper/MoneyPrinterTurbo/Pixelle-Video 可换) → 工序5质量门 → 工序6审批 → 工序7打包 PublishingPackage → 工序8发布执行(scheduler/router/verification) → 工序9指标归因 → POST /factory/learn → 回写策略/品牌记忆 → 闭环"
         },
         {
             "id": "F9", "title": "生产化路径 (SINCY_ENV=production)",
@@ -698,6 +713,7 @@ async fn architecture(
                 "wisrc", "pipe_conn", "pipe_raw", "pipe_router", "pipe_pl", "pipe_ent", "pipe_sig", "wi",
             ],
         ),
+        ("F14", vec!["pipe_sig", "wi", "triggers", "factory", "pub", "learn", "factory"]),
     ];
     let flows = {
         let mut v = flows;

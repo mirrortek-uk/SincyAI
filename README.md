@@ -10,6 +10,34 @@ Content Factory 生产多模态内容，经质量与合规门禁后封装为不�
 - `Sincy-02_TDD_系统技术架构与详细设计书_V1.1.docx`（ADR-001…ADR-015）
 - `Sincy-03_项目开发与实施指导书_V1.1.docx`（WP-01…WP-16）
 
+## 全链路情报与内容管线 (Sincy-架构示意.html 落地)
+
+```
+世界信息源 → 采集层 Connectors → 摄取 Ingestion → 情报管线 Pipelines → 通用处理器
+→ Intelligence Signals → Opportunity Engine → 三入口 → 内容工厂(工序0–7)
+→ 工序8 发布执行 → 工序9 指标回流/Learn → 闭环回写策略
+```
+
+- **采集层 Connectors (可插拔)**: `crates/sincy-intel/src/pipeline/manifest.rs` 声明 15 个内置
+  Connector（44 个内容源，含 GDELT/RSSHub/SearXNG 可选扩展），`apps/cloud-api/src/pipeline/connectors.rs`
+  的 `HttpConnector` 实现真正抓取（RSS/JSON/HTML，cursor 幂等），`GET /intel/connectors` 查询、
+  `POST /intel/connectors/{id}/run` 手动触发，另有 30min 调度器。开源工具按架构落位为端口:
+  MediaCrawler→SocialProvider、TrendRadar→热榜、RSSAggregatorforWeb3→RSS 清单（均为适配层，红线内只走公开只读）
+- **摄取 Ingestion**: 统一 `RawRecord` 信封 + `RecordType`，归一化/跨源去重/dedup_key 幂等后按类型路由
+  （bus 主题 `intel.raw.{record_type}`，现进程内、可换 NATS）
+- **情报管线 (按内容形状可插拔)**: 12 条 pipeline（article/social_post/social_account/trend/ranking/
+  research/video/search/…）+ 13 个可注册 processor；通用处理器（实体解析/行业分类/主题分类/趋势爆款检测）
+  在所有管线末端共用，输出统一 `intelligence_entities` + `intelligence_signals`
+  （migration 0035/0036 四层存储；旧 `intel_items` 保留双写）
+- **内容工厂 (工序0–7)**: `crates/sincy-content/src/factory.rs` —— 工序0 `Brief`
+  （`POST /factory/briefs`，三入口: 机会驱动/计划驱动/人工驱动，断点①已接通）、工序3 平台适配器注册表
+  （x/小红书/抖音/IG/TikTok/YouTube/LinkedIn/FB，`GET /factory/adapters`，加新平台=加一个 adapter）、
+  工序4 媒体生产统一 `MediaProvider` 端口（Faster-Whisper 转写 / MoneyPrinterTurbo / Pixelle-Video /
+  Kling/Runway/Veo 可互换，`CommandProvider` 用环境变量接外部开源工具）
+- **工序9 Learn (断点②已接通)**: `POST /factory/learn` 把指标/归因汇总成学习结论，回写策略与品牌记忆，闭环
+- 架构图: 控制台 `/architecture` 实时渲染全链路分层图（数据来自 `GET /api/v1/architecture`，
+  修改 `apps/cloud-api/src/architecture.rs` 同步节点/边/流 F1–F14）
+
 ## 产品愿景与当前状态
 
 Sincy 不是"AI 生成一段文案"的工具，而是 **AI Digital Employee（数字员工）**：

@@ -5,6 +5,8 @@
 //!
 //! 现有 intel_items 保持不变 (legacy), 双写并行。
 
+pub mod connectors;
+
 use axum::{
     Json, Router,
     extract::{Query, State},
@@ -247,6 +249,19 @@ pub fn routes() -> Router<AppState> {
         .route("/intel/pipelines", get(list_pipelines))
         .route("/intel/connectors", get(list_connectors))
         .route("/intel/connectors/{id}", get(get_connector))
+        .route("/intel/connectors/{id}/run", axum::routing::post(run_connector_handler))
+}
+
+/// 手动触发一个 Connector 抓取并入管线
+async fn run_connector_handler(
+    axum::extract::Path(id): axum::extract::Path<String>,
+    State(state): State<AppState>,
+) -> Result<Json<Value>, Response> {
+    let pool = state.pool().map_err(app_error_response)?;
+    let (fetched, processed) = connectors::run_connector(pool, &id)
+        .await
+        .map_err(|e| app_error_response(sincy_common::AppError::retryable("connector", e)))?;
+    Ok(Json(json!({ "connector_id": id, "fetched": fetched, "processed": processed })))
 }
 
 /// 把代码里的内置 Connector 清单幂等同步进 connector_manifests (migration 0036)
