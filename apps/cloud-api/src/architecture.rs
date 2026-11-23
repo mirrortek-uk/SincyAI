@@ -70,7 +70,7 @@ async fn architecture(
             "title": "客户端 Client",
             "nodes": [
                 node("console", "Web Console", "Next.js 15 · localhost:3000",
-                     "登录/总览/任务/设备/AI 生成/急停/指标/数字员工/世界情报(信源健康审计+趋势情报)/架构图; JWT 存 localStorage"),
+                     "登录/总览/任务/设备/AI 生成/急停/指标/数字员工(插件清单: 6 agents + 绑定 skills 的 what_it_does)/世界情报(信源健康审计+一键启用全部信源+趋势情报)/设置(平台审核门可编辑)/架构图; JWT 存 localStorage"),
                 node("agent", "Android Agent (手机 APK)", "com.sincy.agent · Kotlin + Rust core(JNI) · WSS client",
                      "配对后连 /agent/connect, 拉取签名任务简报, 无障碍服务感知节点树, dispatchGesture 多段连续 stroke 注入真实触摸执行 adapter, 挑战屏停 WAITING_USER, 上报结果与证据"),
                 node("adbio", "PC 端 adb 模拟触屏", "sincy-agent-sim --io adb [--adb-device X] [--seed N] · AdbIo",
@@ -84,7 +84,7 @@ async fn architecture(
             "title": "接入层 cloud-api (Axum)",
             "nodes": [
                 node("api", "REST API /api/v1", "apps/cloud-api",
-                     "auth · agencies · clients/brands(语言设置) · packages · tasks/publish · devices 配对 · kill-switches · analytics/metrics · ai/generate · employees(周期/调度) · skills · intel(sources/providers/route/ingest/items/opportunities/jobs/collect/stats/health/trends) · architecture"),
+                     "auth · agencies · clients/brands(语言设置) · packages · tasks/publish(含 thread 扇出) · devices 配对/revoke/rotate(60 天会话) · kill-switches · analytics/metrics · ai/generate · employees(周期/调度/plugins 插件清单) · skills · intel(sources enable-all/toggle/providers/route/ingest/items/opportunities/jobs resume-all/collect/stats/health/trends) · settings/platform-review-rules(审核门读写) · architecture"),
                 node("wss", "Agent WSS Gateway", "/api/v1/agent/connect",
                      "设备 token 鉴权; 每 2s 派发最多 5 个 QUEUED 任务(最老优先); 接收执行结果"),
                 node("mw", "Middleware", "auth_middleware · CORS · request_id",
@@ -95,16 +95,22 @@ async fn architecture(
             "id": "domain",
             "title": "业务域 crates",
             "nodes": [
-                node("de", "数字员工 sincy-employee", "lifecycle · cycle · agents(6) · 9 技能域/77 skills · memory",
-                     "状态机 CREATED→READY→RUNNING→PAUSED→STOPPED; 10 步运营周期(可恢复, 步级幂等, 每步记录调用的 agent+skills); 后台调度器按 strategy.cadence_per_week 自动触发 scheduled 周期; 6 核心 agent 按域动态调用 skill; 版本化身份/使命/策略/skill; 按品牌 language 设置生成内容; 结构化记忆+洞察"),
+                node("de", "数字员工 sincy-employee", "lifecycle · cycle · agents(6) · 9 技能域/77 skills(约 50 个带真 handler) · memory",
+                     "状态机 CREATED→READY→RUNNING→PAUSED→STOPPED; 10 步运营周期(可恢复, 步级幂等, 每步记录调用的 agent+skills); 后台调度器按 strategy.cadence_per_week 自动触发 scheduled 周期; 6 核心 agent 各有明确职责描述, GET /employees/{id}/plugins 输出插件清单(agents + 绑定 skills 的 what_it_does); 版本化身份/使命/策略/skill; 按品牌 language 生成内容; 结构化记忆+洞察; adapt 步把 strategy_optimization 假设写入 employee_experiments 形成学习闭环"),
+                node("plugins", "员工插件清单", "GET /employees/{id}/plugins",
+                     "每个员工 = 6 内置 agents(带 title/description 具体职责) + 绑定的 skills(带 title/what_it_does/tools/handler/enabled); 控制台数字员工页以卡片渲染, 人可读懂'这个员工到底能干什么'"),
+                node("rules", "平台审核门 (可配置)", "platform_review_rules 表 (migration 0028) · settings API · /settings 页",
+                     "每个平台: 加权字数上限(中文/CJK 算 2) + 超限行为 reject=打回 / thread=拆串行帖; 默认 x=280/thread, default=40000/reject, 控制台设置页可改; cycle review 门与合规/格式化 handlers 都读这张表, 不再硬编码 280"),
+                node("thread", "Thread 拆分", "split_thread (加权感知: 段落→句子→硬切)",
+                     "超限且规则为 thread 时, 内容拆成多帖写入 publishing_packages.thread_chunks; publish_core 按 chunk 扇出多个 device_tasks(幂等键 :tN), agent brief 按 thread_index 取对应分块文本"),
                 node("wi", "世界情报 sincy-intel", "registry · router · opportunity · adapter",
-                     "信源/Provider 注册表; 路由打分 健康.45+可靠.30+限流.15+成本.10 + 降级链; ingest 按 dedup_key 去重; 机会引擎; DE 适配器(只给建议不改策略)"),
+                     "信源/Provider 注册表(28 个注册源, 支持 enable-all/单源 toggle); 路由打分 健康.45+可靠.30+限流.15+成本.10 + 降级链; ingest 按 dedup_key 去重; 机会引擎 0.35 支柱匹配+0.25 动量+0.15 量+0.15 稀缺+0.10 新鲜度, 过滤阈值 0.45, 周期行动阈值 0.30; wikipedia-rc 独占话题 ×0.5 防噪; DE 适配器(只给建议不改策略)"),
                 node("pub", "发布管线 routing/execution/platform/content", "publish_core",
-                     "急停 → 审批门(pending 包)→ 路由选择(device@10/api@50/assisted@90)→ 配额 → 幂等键 → 审计; 任务租约/到期回收; side_effect 后禁止自动重试"),
-                node("adapter", "Adapter 引擎 sincy-adapter", "YAML 定义 · 解释器 · 漂移检测 · HMAC 签名",
-                     "x.publish_post v1: home→composer→set_text→Post(side effect)→posted_confirm 验证; 锚点匹配率判漂移 UiDrift"),
-                node("device", "设备管理 sincy-device", "配对 · 会话",
-                     "challenge-response: proof=sha256(sha256(secret)+nonce), secret 只存哈希; 长期 device token"),
+                     "急停 → 审批门(pending 包)→ 路由选择(device@10/api@50/assisted@90, device 路由按实时健康度选设备: 在线窗口 120s > 积压少 > 1h 失败率低, 并写回 assigned_device_id)→ 配额 → 幂等键 → 审计; thread 包按 chunk 扇出多任务; 任务租约/到期回收; side_effect 完成后失败记 FAILED_FINAL 且重试需 force=true, 不允许盲重试"),
+                node("adapter", "Adapter 引擎 sincy-adapter", "YAML 定义 · 解释器 · 漂移检测 · HMAC-SHA256 + Ed25519 双签名方案(signature_scheme)",
+                     "x.publish_post v18: home→composer→set_text→Post(side effect)→posted_confirm 验证; 锚点匹配率判漂移 UiDrift; Ed25519 私钥只在云端签名, 设备端只嵌公钥验签 (migration 0027)"),
+                node("device", "设备管理 sincy-device", "配对码(4 位数字) · 会话 60 天有效期 · revoke/rotate",
+                     "pairing code 配对换长期 device token, token 只存哈希; device_sessions.expires_at 60 天过期 (migration 0026), 支持吊销与轮换; 心跳保活, 超时判离线"),
                 node("collector", "情报采集器 intel_collector", "tokio 定时任务(默认 30min) · WI §9",
                      "32 条默认 feed: arXiv×5 / HN Algolia×3 / dev.to×4 / Wikipedia RC / GitHub 趋势×3 / YouTube×3 / IT之家/少数派/掘金/V2EX RSS / Google News×5(en+zh) / Product Hunt×2 / B站排行榜×2; 可选: GDELT(SINCY_INTEL_GDELT=1)、自托管 RSSHub 扩展×8(Reddit/知乎/微博/抖音/百度热榜/36氪)、SearXNG 自托管×2; 归一化 WI §11 入 intel_items(dedup_key 去重), jobs 记 last_fetched/last_new; 失败记 jobs 不强攻; 红线: 只走公开只读 API, 礼貌间隔, 不绕认证/验证码/限流"),
                 node("wihealth", "Source Health Audit", "GET /intel/health",
@@ -121,8 +127,8 @@ async fn architecture(
             "id": "data",
             "title": "数据层",
             "nodes": [
-                node("db", "PostgreSQL", "migrations 0001–0021 · sqlx",
-                     "agencies/members/clients/brands · publishing_packages · device_tasks/task_events/execution_routes · devices/sessions · kill_switches · quota · channel_capabilities/app_adapter_versions · digital_employees/cycles/tasks/memory/insights · skills/skill_versions/employee_skill_bindings · intelligence_sources/providers/items/opportunities; RLS 租户隔离"),
+                node("db", "PostgreSQL", "migrations 0001–0028 · sqlx",
+                     "agencies/members/clients/brands · publishing_packages(+thread_chunks) · device_tasks/task_events/execution_routes · devices/sessions(+expires_at/token revoke) · kill_switches · quota · channel_capabilities/app_adapter_versions(+signature_scheme) · digital_employees/cycles/tasks/memory/insights/experiments · skills/skill_versions/employee_skill_bindings · intelligence_sources/providers/items/jobs/opportunities · platform_review_rules; RLS 租户隔离"),
                 node("vault", "Vault (密钥)", "vault:// 引用",
                      "平台/情报源的 API key 只存引用, 不落库明文"),
             ]
@@ -206,7 +212,28 @@ async fn architecture(
             "POST /tasks/publish → publish_core",
             "internal"
         ),
-        edge("pub", "wss", "路由=device → 任务入队", "internal"),
+        edge(
+            "pub",
+            "wss",
+            "路由=device → 任务入队 (thread 按 chunk 多任务)",
+            "internal"
+        ),
+        edge("pub", "rules", "审核/发布读平台审核门规则", "data"),
+        edge(
+            "rules",
+            "thread",
+            "超限且 thread → split_thread 拆分",
+            "internal"
+        ),
+        edge("thread", "pub", "thread_chunks 写回包, 发布时扇出", "data"),
+        edge("api", "plugins", "GET /employees/{id}/plugins", "internal"),
+        edge(
+            "de",
+            "plugins",
+            "agents 职责 + skills what_it_does 汇总",
+            "internal"
+        ),
+        edge("console", "rules", "/settings 页编辑审核门 → PUT", "http"),
         edge(
             "agent",
             "adapter",
@@ -302,11 +329,19 @@ async fn architecture(
         },
         {
             "id": "F3", "title": "内容生产 → 审批 → 发布 → 设备执行 → 指标回流",
-            "steps": "AI 生成(/ai/generate 存包) 或数字员工产出 → publishing_packages(pending) → 人工 approve → POST /tasks/publish → publish_core: 急停检查 → 审批门 → 路由(device@10 优先已配对设备) → 配额检查 → 幂等键去重 → 写 device_tasks QUEUED → WSS 派发 → agent 执行 x.publish_post adapter(含 side effect 与 posted_confirm 验证) → COMPLETED → /analytics/metrics 回流指标"
+            "steps": "AI 生成(/ai/generate 存包) 或数字员工产出 → publishing_packages(pending) → 人工 approve → POST /tasks/publish → publish_core: 急停检查 → 审批门 → 路由(device@10 按设备实时健康度选: 在线>积压少>失败率低) → 配额检查 → 幂等键去重 → 写 device_tasks QUEUED(包带 thread_chunks 则按 chunk 扇出 :tN 多任务) → WSS 派发 → agent 按 thread_index 取分块文本执行 x.publish_post adapter(含 side effect 与 posted_confirm 验证) → COMPLETED → /analytics/metrics 回流指标"
         },
         {
             "id": "F4", "title": "数字员工运营周期 (10 步, 步级幂等可恢复)",
-            "steps": "POST /employees/{id}/cycles → observe → understand(WI 机会) → decide(score≥0.30 选最高) → plan → create(LLM 起草) → review(critic: 280 字/查重/边界) → execute(存包; auto_publish=false 则停 pending 待人审) → measure(查 task state, 不轻信点击) → learn(写 memory+insight) → adapt(策略调整建议, 需审批)"
+            "steps": "POST /employees/{id}/cycles → observe → understand(WI 机会) → decide(score≥0.30 选最高) → plan → create(LLM 起草, 字数上限读 platform_review_rules) → review(critic: 可配置审核门—超限 reject 打回 / thread 拆串行帖写 thread_chunks; 查重/合规/品牌) → execute(存包; auto_publish=false 则停 pending 待人审) → measure(查 task state, 不轻信点击) → learn(写 memory+insight) → adapt(strategy_optimization 假设写入 employee_experiments, 学习闭环)"
+        },
+        {
+            "id": "F10", "title": "平台审核门配置 (不写死 280)",
+            "steps": "控制台 /settings 页 → GET /settings/platform-review-rules 读 platform_review_rules(默认 x=280/thread, default=40000/reject) → 用户改上限/超限行为后 PUT 保存 → cycle review 门、platform_compliance/formatting handlers、生成 prompt 都读新规则 → 超限内容在 thread 平台被 split_thread 按加权长度(中文算 2)拆成多帖发布"
+        },
+        {
+            "id": "F11", "title": "员工插件清单 (agents + skills 可解释)",
+            "steps": "控制台数字员工页选中员工 → GET /employees/{id}/plugins → 6 内置 agents(带职责描述) + 绑定 skills(带 what_it_does/tools/handler/enabled) → 卡片渲染, 人可理解每个插件具体干什么; 启停 skill 走 /employees/{id}/skills"
         },
         {
             "id": "F5", "title": "世界情报采集 → 路由 → 机会",
@@ -464,20 +499,43 @@ async fn architecture(
             .await
             .ok()
             .unwrap_or(0);
+            let sources_enabled: i64 =
+                sqlx::query_scalar("SELECT count(*)::int8 FROM intelligence_sources WHERE enabled")
+                    .fetch_one(pool)
+                    .await
+                    .ok()
+                    .unwrap_or(0);
+            let review_rules: i64 =
+                sqlx::query_scalar("SELECT count(*)::int8 FROM platform_review_rules")
+                    .fetch_one(pool)
+                    .await
+                    .ok()
+                    .unwrap_or(0);
+            let thread_pkgs: i64 = sqlx::query_scalar(
+                "SELECT count(*)::int8 FROM publishing_packages WHERE agency_id = $1 AND jsonb_array_length(thread_chunks) > 1",
+            )
+            .bind(ag)
+            .fetch_one(pool)
+            .await
+            .ok()
+            .unwrap_or(0);
             json!({
                 "devices_online": devices,
                 "devices_total": devices_total,
                 "device_tasks_24h": tasks_24h,
                 "device_tasks_by_state": tasks_by_state.iter().map(|r| json!({"state": r.get::<String,_>("state"), "n": r.get::<i64,_>("n")})).collect::<Vec<_>>(),
                 "packages_pending_approval": pkgs_pending,
+                "packages_threaded": thread_pkgs,
                 "employees_by_state": employees.iter().map(|r| json!({"state": r.get::<String,_>("state"), "n": r.get::<i64,_>("n")})).collect::<Vec<_>>(),
                 "intel": {
                     "sources_registered": sources_total,
+                    "sources_enabled": sources_enabled,
                     "items_total": intel_items,
                     "jobs_ran_24h": jobs_ran,
                     "last_job_at": last_job,
                     "opportunities_new": opps_new,
                 },
+                "review_rules": review_rules,
                 "llm_provider": std::env::var("SINCY_LLM_PROVIDER").unwrap_or_else(|_| "mock".into()),
                 "env": std::env::var("SINCY_ENV").unwrap_or_else(|_| "local".into()),
             })
@@ -539,6 +597,8 @@ async fn architecture(
         ("F7", vec!["db", "witrend", "wi"]),
         ("F8", vec!["adapter", "humanize", "agent", "x"]),
         ("F9", vec!["vercel", "worker", "proddb", "devfarm", "x"]),
+        ("F10", vec!["console", "api", "rules", "thread", "pub"]),
+        ("F11", vec!["console", "api", "de", "plugins"]),
     ];
     let flows = {
         let mut v = flows;
@@ -591,7 +651,7 @@ async fn architecture(
     let animation = json!({
         "cycle_steps": cycle_steps_model(),
         "step_to_agent": step_to_agent,
-        "flow_ids": ["F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9"],
+        "flow_ids": ["F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11"],
         "hint": "F4 数字员工周期按 cycle_steps 顺序高亮 step_to_agent 里的 agent 节点; 每步证据见 runtime.steps",
     });
 
