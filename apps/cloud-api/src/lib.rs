@@ -6,6 +6,7 @@ pub mod auth;
 pub mod bootstrap;
 pub mod employees;
 pub mod gateway;
+pub mod industry;
 pub mod intel;
 pub mod intel_collector;
 pub mod metrics;

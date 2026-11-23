@@ -554,9 +554,21 @@ async fn collect_feed(
     let mut ins = 0usize;
     let mut dup = 0usize;
     for (dk, title, payload) in items {
+        // Sincy-04 §7: 入库时做行业分类, 写入 industries + tags
+        let text_for_cls = format!(
+            "{} {}",
+            title,
+            payload
+                .get("summary")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+        );
+        let inds = sincy_intel::industry::classify_industries(&text_for_cls);
+        let industries: Vec<String> = inds.iter().map(|(id, _)| id.clone()).collect();
+        let tags = json!({"industries_detail": inds, "source_kind": f.kind});
         let r = sqlx::query(
-            "INSERT INTO intel_items (id, source_id, kind, dedup_key, payload)
-             VALUES ($1, $2, $3, $4, $5) ON CONFLICT (dedup_key) DO NOTHING RETURNING id",
+            "INSERT INTO intel_items (id, source_id, kind, dedup_key, payload, industries, tags)
+             VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (dedup_key) DO NOTHING RETURNING id",
         )
         .bind(Uuid::new_v4())
         .bind(&f.source_id)
@@ -567,6 +579,8 @@ async fn collect_feed(
             p["title"] = json!(title);
             p
         })
+        .bind(serde_json::to_value(&industries).unwrap_or(json!([])))
+        .bind(&tags)
         .fetch_optional(pool)
         .await
         .map_err(|e| e.to_string())?;

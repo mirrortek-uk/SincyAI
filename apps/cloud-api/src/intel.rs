@@ -687,6 +687,8 @@ async fn ingest(
 struct ItemsQuery {
     kind: Option<String>,
     limit: Option<i64>,
+    /// Sincy-04: 按行业过滤 (命中 industries 数组)
+    industry: Option<String>,
 }
 
 async fn list_items(
@@ -694,22 +696,44 @@ async fn list_items(
     Query(q): Query<ItemsQuery>,
 ) -> Result<Json<Value>, axum::response::Response> {
     let pool = state.pool().map_err(app_error_response)?;
-    let rows = match &q.kind {
-        Some(k) => {
+    let limit = q.limit.unwrap_or(100);
+    let rows = match (&q.kind, &q.industry) {
+        (Some(k), Some(ind)) => {
             sqlx::query(
-                "SELECT id, source_id, provider_id, kind, dedup_key, payload, collected_at FROM intel_items WHERE kind = $1 ORDER BY collected_at DESC LIMIT $2",
+                "SELECT id, source_id, provider_id, kind, dedup_key, payload, collected_at, industries, tags FROM intel_items WHERE kind = $1 AND industries @> $2::jsonb ORDER BY collected_at DESC LIMIT $3",
             )
             .bind(k)
-            .bind(q.limit.unwrap_or(100))
+            .bind(json!([ind]))
+            .bind(limit)
             .fetch_all(pool)
             .await
             .map_err(err)?
         }
-        None => {
+        (Some(k), None) => {
             sqlx::query(
-                "SELECT id, source_id, provider_id, kind, dedup_key, payload, collected_at FROM intel_items ORDER BY collected_at DESC LIMIT $1",
+                "SELECT id, source_id, provider_id, kind, dedup_key, payload, collected_at, industries, tags FROM intel_items WHERE kind = $1 ORDER BY collected_at DESC LIMIT $2",
             )
-            .bind(q.limit.unwrap_or(100))
+            .bind(k)
+            .bind(limit)
+            .fetch_all(pool)
+            .await
+            .map_err(err)?
+        }
+        (None, Some(ind)) => {
+            sqlx::query(
+                "SELECT id, source_id, provider_id, kind, dedup_key, payload, collected_at, industries, tags FROM intel_items WHERE industries @> $1::jsonb ORDER BY collected_at DESC LIMIT $2",
+            )
+            .bind(json!([ind]))
+            .bind(limit)
+            .fetch_all(pool)
+            .await
+            .map_err(err)?
+        }
+        (None, None) => {
+            sqlx::query(
+                "SELECT id, source_id, provider_id, kind, dedup_key, payload, collected_at, industries, tags FROM intel_items ORDER BY collected_at DESC LIMIT $1",
+            )
+            .bind(limit)
             .fetch_all(pool)
             .await
             .map_err(err)?
@@ -726,6 +750,8 @@ async fn list_items(
                 "dedup_key": r.get::<String, _>("dedup_key"),
                 "payload": r.get::<Value, _>("payload"),
                 "collected_at": r.get::<chrono::DateTime<chrono::Utc>, _>("collected_at"),
+                "industries": r.get::<Value, _>("industries"),
+                "tags": r.get::<Value, _>("tags"),
             })
         })
         .collect();

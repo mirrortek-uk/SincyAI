@@ -10,6 +10,7 @@
 //! it only routes *requests* to registered providers and normalizes results.
 
 pub mod adapter;
+pub mod industry;
 pub mod model;
 pub mod opportunity;
 pub mod pulse;

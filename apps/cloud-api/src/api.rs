@@ -85,6 +85,7 @@ pub fn routes() -> Router<AppState> {
         .merge(crate::intel::routes())
         .merge(crate::employees::routes())
         .merge(crate::pulse::routes())
+        .merge(crate::industry::routes())
         .merge(crate::skills::routes())
         .layer(axum::middleware::from_fn(request_id_middleware))
         .layer(axum::middleware::from_fn(crate::auth::auth_middleware))
@@ -2358,10 +2359,21 @@ pub(crate) async fn insert_package(
         )));
     }
     let pid = Uuid::new_v4();
+    // Sincy-04: 内容按所属品牌的行业画像打 tag
+    let profile: Option<Value> =
+        sqlx::query_scalar("SELECT profile FROM brand_intel_profiles WHERE brand_id = $1")
+            .bind(brand_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
+    let p = profile
+        .map(|v| sincy_intel::industry::CustomerProfile::from_json(&v))
+        .unwrap_or_default();
+    let industry_tags = p.industries();
     sqlx::query(
         "INSERT INTO publishing_packages
-         (id, version, agency_id, brand_id, platform, account_id, action, text_content, constraints, approval_status)
-         VALUES ($1, 1, $2, $3, $4, $5, $6, $7, $8, $9)",
+         (id, version, agency_id, brand_id, platform, account_id, action, text_content, constraints, approval_status, industry_tags)
+         VALUES ($1, 1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
     )
     .bind(pid)
     .bind(agency.as_uuid())
@@ -2372,6 +2384,7 @@ pub(crate) async fn insert_package(
     .bind(text)
     .bind(json!({"source": source, "provenance": provenance}))
     .bind(approval_status)
+    .bind(serde_json::to_value(&industry_tags).unwrap_or(json!([])))
     .execute(pool)
     .await
     .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;

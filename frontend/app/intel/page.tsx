@@ -5,6 +5,9 @@ import {
   api,
   getToken,
   type CollectResult,
+  type CustomerIntelProfile,
+  type IndustryDef,
+  type BrandItem,
   type IntelHealth,
   type IntelItem,
   type IntelJob,
@@ -33,19 +36,30 @@ export default function IntelPage() {
   const [route, setRoute] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Sincy-04: 行业过滤 + 客户画像 + 相关性 feed
+  const [industries, setIndustries] = useState<IndustryDef[]>([]);
+  const [industryFilter, setIndustryFilter] = useState("");
+  const [brands, setBrands] = useState<BrandItem[]>([]);
+  const [brandId, setBrandId] = useState("");
+  const [profile, setProfile] = useState<CustomerIntelProfile>({});
+  const [relevanceMode, setRelevanceMode] = useState(false);
 
   const load = useCallback(async () => {
     if (!getToken()) return;
     try {
-      const [s, p, i, o, j, st, h, tr] = await Promise.all([
+      const [s, p, i, o, j, st, h, tr, ind, br] = await Promise.all([
         api.listIntelSources(),
         api.listIntelProviders(),
-        api.listIntelItems(undefined, 50),
+        relevanceMode && brandId
+          ? api.brandIntelFeed(brandId, 50).then((f) => ({ items: f.items }))
+          : api.listIntelItems(undefined, 50, industryFilter || undefined),
         api.listOpportunities(30),
         api.listIntelJobs(),
         api.intelStats(),
         api.intelHealth(),
         api.intelTrends(),
+        api.listIndustries(),
+        api.listBrands(),
       ]);
       setSources(s.items);
       setProviders(p.items);
@@ -55,16 +69,34 @@ export default function IntelPage() {
       setStats(st);
       setHealth(h);
       setTrends(tr.trends);
+      setIndustries(ind.items);
+      setBrands(br.items);
     } catch (e) {
       setError(String(e));
     }
-  }, []);
+  }, [industryFilter, relevanceMode, brandId]);
 
   useEffect(() => {
     load();
     const t = setInterval(load, 30_000); // 采集是后台持续跑的, 页面 30s 自动刷新
     return () => clearInterval(t);
   }, [load]);
+
+  useEffect(() => {
+    if (!brandId) return;
+    api.getIntelProfile(brandId).then((r) => setProfile(r.profile)).catch(() => setProfile({}));
+  }, [brandId]);
+
+  const saveProfile = async () => {
+    if (!brandId) return;
+    try {
+      await api.putIntelProfile(brandId, profile);
+      setMsg("画像已保存");
+      load();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
 
   return (
     <main>
@@ -320,9 +352,78 @@ export default function IntelPage() {
       </section>
 
       <section className="panel">
+        <h2>客户情报画像 (Sincy-04)</h2>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <select value={brandId} onChange={(e) => setBrandId(e.target.value)}>
+            <option value="">选择品牌…</option>
+            {brands.map((b) => (
+              <option key={b.id} value={b.id}>{b.name}</option>
+            ))}
+          </select>
+          <select
+            value={profile.industry ?? ""}
+            onChange={(e) => setProfile({ ...profile, industry: e.target.value })}
+          >
+            <option value="">一级行业…</option>
+            {industries.filter((x) => x.level === 1).map((x) => (
+              <option key={x.id} value={x.id}>{x.name}</option>
+            ))}
+          </select>
+          <select
+            value={profile.sub_industry ?? ""}
+            onChange={(e) => setProfile({ ...profile, sub_industry: e.target.value })}
+          >
+            <option value="">子行业…</option>
+            {industries.filter((x) => x.level === 2 && (!profile.industry || x.parent_id === profile.industry)).map((x) => (
+              <option key={x.id} value={x.id}>{x.name}</option>
+            ))}
+          </select>
+          <input
+            placeholder="关键词 (逗号分隔)"
+            style={{ minWidth: 180 }}
+            value={(profile.keywords ?? []).join(",")}
+            onChange={(e) => setProfile({ ...profile, keywords: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) })}
+          />
+          <input
+            placeholder="竞争对手 (逗号分隔)"
+            style={{ minWidth: 160 }}
+            value={(profile.competitors ?? []).join(",")}
+            onChange={(e) => setProfile({ ...profile, competitors: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) })}
+          />
+          <input
+            placeholder="目标市场 (逗号分隔)"
+            style={{ minWidth: 140 }}
+            value={(profile.geography ?? []).join(",")}
+            onChange={(e) => setProfile({ ...profile, geography: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) })}
+          />
+          <button onClick={saveProfile}>保存画像</button>
+        </div>
+        <p className="muted" style={{ marginTop: 6 }}>
+          画像用于相关性评分 (行业30% / 主题25% / 竞品20% / 受众15% / 地域10%) 与内容自动打行业 tag。
+        </p>
+      </section>
+
+      <section className="panel">
         <h2>最近采集条目</h2>
+        <div style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "center" }}>
+          <select value={industryFilter} onChange={(e) => setIndustryFilter(e.target.value)}>
+            <option value="">全部行业</option>
+            {industries.map((x) => (
+              <option key={x.id} value={x.id}>{x.name}</option>
+            ))}
+          </select>
+          <label>
+            <input
+              type="checkbox"
+              checked={relevanceMode}
+              onChange={(e) => setRelevanceMode(e.target.checked)}
+              disabled={!brandId}
+            />{" "}
+            按品牌相关性排序
+          </label>
+        </div>
         <table>
-          <thead><tr><th>kind</th><th>信源</th><th>内容</th><th>时间</th></tr></thead>
+          <thead><tr><th>kind</th><th>信源</th><th>内容</th><th>行业</th><th>相关性</th><th>时间</th></tr></thead>
           <tbody>
             {items.map((i) => {
               const p = i.payload as Record<string, unknown>;
@@ -340,6 +441,13 @@ export default function IntelPage() {
                     )}
                     <span className="muted"> {String(extra).slice(0, 80)}</span>
                   </td>
+                  <td className="muted">
+                    {(i.industries ?? []).map((ind) => {
+                      const d = industries.find((x) => x.id === ind);
+                      return d ? d.name : ind;
+                    }).join(", ") || "-"}
+                  </td>
+                  <td className="muted">{i.relevance_score !== undefined ? i.relevance_score.toFixed(1) : "-"}</td>
                   <td className="muted">{i.collected_at.slice(0, 19).replace("T", " ")}</td>
                 </tr>
               );

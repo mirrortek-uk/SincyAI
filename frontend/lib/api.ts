@@ -260,6 +260,32 @@ export interface IntelItem {
   dedup_key: string;
   payload: Record<string, unknown>;
   collected_at: string;
+  industries?: string[];
+  tags?: Record<string, unknown>;
+  relevance_score?: number;
+}
+
+export interface IndustryDef {
+  id: string;
+  name: string;
+  parent_id: string | null;
+  level: number;
+  keywords: string[];
+  description: string;
+}
+
+export interface CustomerIntelProfile {
+  industry?: string;
+  sub_industry?: string;
+  business_model?: string;
+  target_audience?: string;
+  geography?: string[];
+  competitors?: string[];
+  products?: string[];
+  topics?: string[];
+  keywords?: string[];
+  business_goals?: string[];
+  brand_strategy?: string;
 }
 
 export interface IntelJob {
@@ -658,8 +684,30 @@ export const api = {
       "/intel/route",
       { method: "POST", body: JSON.stringify(body) },
     ),
-  listIntelItems: (kind?: string, limit = 50) =>
-    req<{ items: IntelItem[] }>("/intel/items" + (kind ? `?kind=${kind}&limit=${limit}` : `?limit=${limit}`)),
+  listIntelItems: (kind?: string, limit = 50, industry?: string) => {
+    const q = new URLSearchParams();
+    if (kind) q.set("kind", kind);
+    if (industry) q.set("industry", industry);
+    q.set("limit", String(limit));
+    return req<{ items: IntelItem[] }>("/intel/items?" + q.toString());
+  },
+  listIndustries: () => req<{ items: IndustryDef[] }>("/industries"),
+  createIndustry: (body: Partial<IndustryDef>) =>
+    req<{ id: string }>("/industries", { method: "POST", body: JSON.stringify(body) }),
+  getIntelProfile: (brandId: string) =>
+    req<{ brand_id: string; profile: CustomerIntelProfile }>(`/brands/${brandId}/intel-profile`),
+  putIntelProfile: (brandId: string, profile: CustomerIntelProfile) =>
+    req<{ brand_id: string; profile: CustomerIntelProfile }>(`/brands/${brandId}/intel-profile`, {
+      method: "PUT",
+      body: JSON.stringify(profile),
+    }),
+  brandIntelFeed: (brandId: string, limit = 50, minScore?: number) => {
+    const q = new URLSearchParams({ limit: String(limit) });
+    if (minScore !== undefined) q.set("min_score", String(minScore));
+    return req<{ brand_id: string; profile_industries: string[]; count: number; items: IntelItem[] }>(
+      `/brands/${brandId}/intel-feed?` + q.toString(),
+    );
+  },
   listOpportunities: (limit = 50) =>
     req<{ items: OpportunityItem[] }>(`/intel/opportunities?limit=${limit}`),
   listIntelJobs: () => req<{ items: IntelJob[] }>("/intel/jobs"),

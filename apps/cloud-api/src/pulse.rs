@@ -439,6 +439,8 @@ async fn mirror_entity_to_intel(
         return;
     }
     let metrics = serde_json::to_value(&agg.metrics).unwrap_or(json!({}));
+    let inds = sincy_intel::industry::classify_industries(&e.title);
+    let industries: Vec<String> = inds.iter().map(|(id, _)| id.clone()).collect();
     let payload = json!({
         "title": e.title,
         "entity_id": entity_id,
@@ -449,15 +451,18 @@ async fn mirror_entity_to_intel(
         "trend": trend,
         "confidence": agg.confidence,
         "source": "sincy-pulse (聚合情报源)",
+        "industries": industries,
     });
     let _ = sqlx::query(
-        "INSERT INTO intel_items (source_id, kind, dedup_key, payload, collected_at)
-         VALUES ('sincy-pulse', $1, $2, $3, now())
-         ON CONFLICT (dedup_key) DO UPDATE SET payload = EXCLUDED.payload, collected_at = now()",
+        "INSERT INTO intel_items (source_id, kind, dedup_key, payload, collected_at, industries, tags)
+         VALUES ('sincy-pulse', $1, $2, $3, now(), $4, $5)
+         ON CONFLICT (dedup_key) DO UPDATE SET payload = EXCLUDED.payload, collected_at = now(), industries = EXCLUDED.industries, tags = EXCLUDED.tags",
     )
     .bind(&e.entity_type)
     .bind(format!("pulse:{}", e.canonical_key))
     .bind(&payload)
+    .bind(serde_json::to_value(&industries).unwrap_or(json!([])))
+    .bind(json!({"source": "sincy-pulse"}))
     .execute(pool)
     .await;
 }
