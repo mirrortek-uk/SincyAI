@@ -23,7 +23,13 @@ use sqlx::Row;
 
 pub const YOUTUBE_UPLOAD_BASE: &str = "https://www.googleapis.com/upload/youtube/v3/videos";
 pub const YOUTUBE_API_BASE: &str = "https://www.googleapis.com/youtube/v3/videos";
-pub const QUOTA_COST_VIDEOS_INSERT: i64 = 1600;
+/// Default quota cost of a `videos.insert` call, used only as a fallback when
+/// the channel_capabilities row carries no `quota_cost`. Google cut this from
+/// ~1600 to ~100 units on 2026-12-04 and moved uploads into a separate quota
+/// bucket on 2026-06-01; the authoritative value lives in the capability
+/// matrix (`constraints.quota_cost`) so ops can correct it without a code
+/// release. Verify the live cost in Cloud Console.
+pub const QUOTA_COST_VIDEOS_INSERT: i64 = 100;
 
 /// A media blob resolved from the object store by the caller.
 pub struct MediaBlob {

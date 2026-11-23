@@ -4,8 +4,9 @@ use sincy_common::AgencyId;
 use sincy_device::DeviceManager;
 use sqlx::postgres::PgPoolOptions;
 
-async fn fresh_mgr() -> (sqlx::PgPool, DeviceManager<'static>, AgencyId) {
-    let url = std::env::var("SINCY_TEST_DATABASE_URL").expect("SINCY_TEST_DATABASE_URL");
+/// 无 SINCY_TEST_DATABASE_URL 时返回 None, 测试跳过 (与 cloud-api e2e 一致)。
+async fn fresh_mgr() -> Option<(sqlx::PgPool, DeviceManager<'static>, AgencyId)> {
+    let url = std::env::var("SINCY_TEST_DATABASE_URL").ok()?;
     let pool = PgPoolOptions::new()
         .max_connections(2)
         .connect(&url)
@@ -19,7 +20,7 @@ async fn fresh_mgr() -> (sqlx::PgPool, DeviceManager<'static>, AgencyId) {
         .await
         .unwrap();
     let mgr = DeviceManager::new(Box::leak(Box::new(pool.clone())), b"sess-secret");
-    (pool, mgr, agency)
+    Some((pool, mgr, agency))
 }
 
 async fn register(mgr: &DeviceManager<'_>, agency: AgencyId) -> sincy_device::SessionToken {
@@ -39,7 +40,10 @@ async fn register(mgr: &DeviceManager<'_>, agency: AgencyId) -> sincy_device::Se
 
 #[tokio::test]
 async fn session_token_hash_matches_and_expires_in_60d() {
-    let (_pool, mgr, agency) = fresh_mgr().await;
+    let Some((_pool, mgr, agency)) = fresh_mgr().await else {
+        eprintln!("skip: SINCY_TEST_DATABASE_URL not set");
+        return;
+    };
     let st = register(&mgr, agency).await;
     let (device_id, _) = mgr.authenticate(&st.token).await.expect("auth ok");
     assert_eq!(device_id, st.device_id);
@@ -58,7 +62,10 @@ async fn session_token_hash_matches_and_expires_in_60d() {
 
 #[tokio::test]
 async fn revoke_and_rotate_kill_old_tokens() {
-    let (_pool, mgr, agency) = fresh_mgr().await;
+    let Some((_pool, mgr, agency)) = fresh_mgr().await else {
+        eprintln!("skip: SINCY_TEST_DATABASE_URL not set");
+        return;
+    };
     let st = register(&mgr, agency).await;
     // revoke: 旧 token 立即失效
     mgr.revoke(agency, st.device_id).await.unwrap();

@@ -506,7 +506,10 @@ pub(crate) async fn publish_core(
         Some(r) => (Some(r.get::<Uuid, _>("pool_id")), r.get::<i64, _>("avail")),
         None => (None, 0),
     };
-    let cost: i64 = quota_cost_for(&body.platform, &body.action);
+    let cost: i64 = match quota_cost_from_matrix(pool, &body.platform, &body.action).await {
+        Some(c) => c,
+        None => quota_cost_for(&body.platform, &body.action),
+    };
     // device_ready is dynamic, not just "a device exists": pick the healthiest
     // bound device — online (recent heartbeat) > low open-task backlog > low
     // recent failure rate — and route to it explicitly. If every device is
@@ -2685,12 +2688,38 @@ fn quota_kind_for(platform: &str, action: &str) -> &'static str {
     }
 }
 
+/// Fallback quota cost, used only when the capability row carries no
+/// `constraints.quota_cost`. The authoritative cost is read from the matrix by
+/// `quota_cost_from_matrix`; keep these defaults in step with current platform
+/// docs (youtube videos.insert ≈ 100 units since the 2026-12-04 revision).
 fn quota_cost_for(platform: &str, action: &str) -> i64 {
     match (platform, action) {
-        ("youtube", "publish_video") => 1600,
+        ("youtube", "publish_video") => 100,
         ("x", "publish_post") => 1,
         _ => 1,
     }
+}
+
+/// Authoritative quota cost from the capability matrix: the `api`-route
+/// capability's `constraints.quota_cost` for this (platform, action). Returns
+/// None when there is no api capability or it declares no quota_cost, so the
+/// caller falls back to `quota_cost_for`. Reading it from the DB keeps the cost
+/// a single source of truth that ops can correct without a code release.
+async fn quota_cost_from_matrix(pool: &sqlx::PgPool, platform: &str, action: &str) -> Option<i64> {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT (constraints->>'quota_cost')::int8
+           FROM channel_capabilities
+          WHERE platform = $1 AND action = $2 AND route = 'api'
+            AND (constraints ? 'quota_cost')
+          ORDER BY priority ASC
+          LIMIT 1",
+    )
+    .bind(platform)
+    .bind(action)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
 }
 
 /// 为 API 路由构建真实平台 adapter: 从发布包取账号与媒体资产,
