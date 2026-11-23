@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { api, getToken, type ArchEdge, type Architecture } from "@/lib/api";
+import { api, getToken, type ArchEdge, type Architecture, type IntelConnector } from "@/lib/api";
 
 // 运营周期 10 步的中文名 (与后端 cycle_steps 顺序一致, 供动画高亮)
 const STEP_ZH: Record<string, string> = {
@@ -42,6 +42,20 @@ export default function ArchitecturePage() {
   const [arch, setArch] = useState<Architecture | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [hover, setHover] = useState<string | null>(null);
+  // 点击 ①Connector 节点展开已注册 Connector 清单
+  const [connOpen, setConnOpen] = useState(false);
+  const [connectors, setConnectors] = useState<IntelConnector[] | null>(null);
+
+  const toggleConnectors = () => {
+    const next = !connOpen;
+    setConnOpen(next);
+    if (next && connectors === null) {
+      api
+        .listIntelConnectors()
+        .then((d) => setConnectors(d.connectors))
+        .catch(() => setConnectors([]));
+    }
+  };
 
   useEffect(() => {
     if (!getToken()) return;
@@ -191,7 +205,10 @@ export default function ArchitecturePage() {
                   key={n.id}
                   onMouseEnter={() => setHover(n.id)}
                   onMouseLeave={() => setHover(null)}
-                  style={{ cursor: "default" }}
+                  onClick={() => {
+                    if (n.id === "pipe_conn") toggleConnectors();
+                  }}
+                  style={{ cursor: n.id === "pipe_conn" ? "pointer" : "default" }}
                 >
                   <rect
                     x={p.x}
@@ -229,6 +246,51 @@ export default function ArchitecturePage() {
           </span>
         ))}
       </div>
+
+      {/* Connector 清单: 点击 ①Connector 节点展开 */}
+      {connOpen && (
+        <section className="panel" style={{ marginTop: 16 }}>
+          <h2 style={{ marginTop: 0 }}>
+            Connector 清单 {connectors ? `(${connectors.length} 个)` : ""}
+          </h2>
+          <p className="muted" style={{ marginTop: -6 }}>
+            每个 Connector 的名称 / 功能 / 覆盖的内容源 / 内容识别出的 record_type (数据来自 GET /api/v1/intel/connectors)
+          </p>
+          {connectors === null && <p className="muted">加载中…</p>}
+          {connectors !== null && connectors.length === 0 && <p className="muted">暂无已注册 Connector</p>}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(330px, 1fr))", gap: 10 }}>
+            {(connectors ?? []).map((c) => (
+              <div key={c.id} style={{ border: "1px solid var(--border)", borderRadius: 8, padding: 10 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
+                  <strong>{c.name}</strong>
+                  <span className="muted" style={{ fontSize: 11 }}>
+                    {c.connector_type} · {c.source_count} 源{c.enabled ? "" : " · 未启用"}
+                  </span>
+                </div>
+                <div style={{ fontSize: 11, color: "var(--accent)", margin: "2px 0 6px" }}>
+                  {c.id} · {c.fetch_impl} · 每 {Math.round(c.default_interval_secs / 60)}min
+                </div>
+                <div style={{ fontSize: 11, marginBottom: 6 }}>
+                  {c.capabilities.map((cap) => (
+                    <span key={cap} style={{ display: "inline-block", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 4, padding: "1px 6px", margin: "0 4px 4px 0" }}>
+                      {cap}
+                    </span>
+                  ))}
+                </div>
+                <div style={{ fontSize: 11 }} className="muted">内容源 → record_type:</div>
+                <ul style={{ margin: "4px 0 0", paddingLeft: 16, fontSize: 11 }}>
+                  {c.sources.slice(0, 8).map((s, i) => (
+                    <li key={i} style={{ opacity: s.enabled ? 1 : 0.45 }} title={s.url}>
+                      {s.label} <span style={{ color: "var(--accent)" }}>→ {s.record_type}</span>
+                    </li>
+                  ))}
+                  {c.sources.length > 8 && <li className="muted">… 共 {c.sources.length} 个源</li>}
+                </ul>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       {/* 数字员工: 6 核心 Agent × 10 步运营周期 (runtime 高亮已跑/当前步骤, data-* 供后续动画) */}
       {arch.agents && arch.cycle_steps && (

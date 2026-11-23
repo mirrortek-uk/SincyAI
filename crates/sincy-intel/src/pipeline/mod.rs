@@ -7,12 +7,14 @@
 pub mod connector;
 pub mod engine;
 pub mod graph;
+pub mod manifest;
 pub mod processor;
 pub mod processors;
 pub mod record;
 pub mod signals;
 
 pub use connector::{Connector, ConnectorDescriptor, ConnectorRegistry, DatasetDecl, FetchParams};
+pub use manifest::{ConnectorManifest, SourceRef, default_connector_manifests};
 pub use engine::{PipelineEngine, default_engine};
 pub use graph::{Pipeline, PipelineRegistry};
 pub use processor::{ProcessingContext, ProcessingResult, Processor, ProcessorRegistry};

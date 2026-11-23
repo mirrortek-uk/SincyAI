@@ -245,6 +245,102 @@ pub fn routes() -> Router<AppState> {
         .route("/intel/entities", get(list_entities))
         .route("/intel/signals", get(list_signals))
         .route("/intel/pipelines", get(list_pipelines))
+        .route("/intel/connectors", get(list_connectors))
+        .route("/intel/connectors/{id}", get(get_connector))
+}
+
+/// 把代码里的内置 Connector 清单幂等同步进 connector_manifests (migration 0036)
+async fn seed_connector_manifests(pool: &sqlx::PgPool) {
+    for m in sincy_intel::pipeline::default_connector_manifests() {
+        let d = &m.descriptor;
+        let _ = sqlx::query(
+            "INSERT INTO connector_manifests
+               (id, name, connector_type, capabilities, datasets, sources, fetch_impl, default_interval_secs, enabled)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8, TRUE)
+             ON CONFLICT (id) DO UPDATE SET
+               name = EXCLUDED.name, connector_type = EXCLUDED.connector_type,
+               capabilities = EXCLUDED.capabilities, datasets = EXCLUDED.datasets,
+               sources = EXCLUDED.sources, fetch_impl = EXCLUDED.fetch_impl,
+               default_interval_secs = EXCLUDED.default_interval_secs, updated_at = now()",
+        )
+        .bind(&d.id)
+        .bind(&d.name)
+        .bind(&d.connector_type)
+        .bind(serde_json::to_value(&d.capabilities).unwrap_or(json!([])))
+        .bind(serde_json::to_value(&d.datasets).unwrap_or(json!([])))
+        .bind(serde_json::to_value(&m.sources).unwrap_or(json!([])))
+        .bind(&m.fetch_impl)
+        .bind(d.default_interval_secs as i64)
+        .execute(pool)
+        .await;
+    }
+}
+
+async fn list_connectors(State(state): State<AppState>) -> Result<Json<Value>, Response> {
+    let pool = state.pool().map_err(app_error_response)?;
+    seed_connector_manifests(pool).await;
+    let rows = sqlx::query(
+        "SELECT id, name, connector_type, capabilities, datasets, sources, fetch_impl,
+                default_interval_secs, enabled, updated_at
+         FROM connector_manifests ORDER BY connector_type, id",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(dberr)?;
+    let items: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            json!({
+                "id": r.get::<String, _>("id"),
+                "name": r.get::<String, _>("name"),
+                "connector_type": r.get::<String, _>("connector_type"),
+                "capabilities": r.get::<Value, _>("capabilities"),
+                "datasets": r.get::<Value, _>("datasets"),
+                "sources": r.get::<Value, _>("sources"),
+                "source_count": r.get::<Value, _>("sources").as_array().map(|a| a.len()).unwrap_or(0),
+                "fetch_impl": r.get::<String, _>("fetch_impl"),
+                "default_interval_secs": r.get::<i64, _>("default_interval_secs"),
+                "enabled": r.get::<bool, _>("enabled"),
+                "updated_at": r.get::<chrono::DateTime<chrono::Utc>, _>("updated_at"),
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "connectors": items, "total": items.len() })))
+}
+
+async fn get_connector(
+    axum::extract::Path(id): axum::extract::Path<String>,
+    State(state): State<AppState>,
+) -> Result<Json<Value>, Response> {
+    let pool = state.pool().map_err(app_error_response)?;
+    seed_connector_manifests(pool).await;
+    let row = sqlx::query(
+        "SELECT id, name, connector_type, capabilities, datasets, sources, fetch_impl,
+                default_interval_secs, enabled, updated_at
+         FROM connector_manifests WHERE id = $1",
+    )
+    .bind(&id)
+    .fetch_optional(pool)
+    .await
+    .map_err(dberr)?;
+    match row {
+        Some(r) => Ok(Json(json!({
+            "id": r.get::<String, _>("id"),
+            "name": r.get::<String, _>("name"),
+            "connector_type": r.get::<String, _>("connector_type"),
+            "capabilities": r.get::<Value, _>("capabilities"),
+            "datasets": r.get::<Value, _>("datasets"),
+            "sources": r.get::<Value, _>("sources"),
+            "fetch_impl": r.get::<String, _>("fetch_impl"),
+            "default_interval_secs": r.get::<i64, _>("default_interval_secs"),
+            "enabled": r.get::<bool, _>("enabled"),
+            "updated_at": r.get::<chrono::DateTime<chrono::Utc>, _>("updated_at"),
+        }))),
+        None => Err(app_error_response(sincy_common::AppError::non_retryable(
+            "not_found",
+            format!("connector {id} not found"),
+        ))),
+    }
 }
 
 fn dberr(e: sqlx::Error) -> Response {

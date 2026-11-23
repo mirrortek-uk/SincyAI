@@ -129,8 +129,8 @@ async fn architecture(
             "id": "pipeflow",
             "title": "情报管线内部 sincy-intel::pipeline (Sincy-05)",
             "nodes": [
-                node("pipe_conn", "① Connector 只负责采集", "Connector SPI · RSS / HTTP JSON / HTML / 无头浏览器 · cursor 幂等",
-                     "每个源一个 Connector: 认证/翻页/限流/重试/解析, 只产出统一信封不做判断; 新增数据源 = 只写一个新连接器, 零管道改动"),
+                node("pipe_conn", "① Connector 只负责采集 (点击展开清单)", "Connector SPI · RSS / HTTP JSON / HTML / 无头浏览器 · cursor 幂等 · GET /intel/connectors",
+                     "每个源一个 Connector: 认证/翻页/限流/重试/解析, 只产出统一信封不做判断; 新增数据源 = 只写一个新连接器, 零管道改动; 前端点击本节点可展开查看全部已注册 Connector (名称/功能/内容源/record_type, 见 GET /intel/connectors)"),
                 node("pipe_raw", "② RawRecord 统一信封", "record_type + dedup_key + provenance + fetched_at/observed_at",
                      "article / trend / ranking / social_post / event / metric …; 入口强类型校验后落 intelligence_raw_records (migration 0035), 原始永久保留支持历史重放"),
                 node("pipe_router", "③ Type Router 类型路由", "bus 主题 intel.raw.{record_type} (现进程内, 后续换 NATS)",

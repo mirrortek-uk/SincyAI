@@ -294,6 +294,29 @@ export interface IntelPipeline {
   enabled: boolean;
 }
 
+export interface IntelConnectorSource {
+  source_id: string;
+  label: string;
+  url: string;
+  kind: string;
+  record_type: string;
+  enabled: boolean;
+}
+
+export interface IntelConnector {
+  id: string;
+  name: string;
+  connector_type: string;
+  capabilities: string[];
+  datasets: { id: string; record_type: string; url?: string | null }[];
+  sources: IntelConnectorSource[];
+  source_count: number;
+  fetch_impl: string;
+  default_interval_secs: number;
+  enabled: boolean;
+  updated_at: string;
+}
+
 export interface IntelProcessor {
   processor_id: string;
   version: string;
@@ -731,6 +754,10 @@ export const api = {
     req<{ items: IntelSignal[] }>("/intel/signals" + (type ? `?type=${type}&limit=${limit}` : `?limit=${limit}`)),
   listIntelPipelines: () =>
     req<{ pipelines: IntelPipeline[]; processors: IntelProcessor[] }>("/intel/pipelines"),
+  listIntelConnectors: () =>
+    req<{ connectors: IntelConnector[]; total: number }>("/intel/connectors"),
+  getIntelConnector: (id: string) =>
+    req<IntelConnector>(`/intel/connectors/${encodeURIComponent(id)}`),
   brandIntelFeed: (brandId: string, limit = 50, minScore?: number) => {
     const q = new URLSearchParams({ limit: String(limit) });
     if (minScore !== undefined) q.set("min_score", String(minScore));
