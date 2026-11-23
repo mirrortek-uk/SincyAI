@@ -6,6 +6,7 @@
 //! - GET  /api/v1/employees/{id}/skills  该员工绑定的 skills
 //! - POST /api/v1/employees/{id}/skills  绑定 {skill_id|name, enabled?}
 //! - DELETE /api/v1/employees/{id}/skills/{skill_id}  解绑
+//! - POST /api/v1/skills/run               真执行一个 skill handler (返回可审计 output)
 
 use axum::{
     Json, Router,
@@ -25,6 +26,7 @@ use crate::state::AppState;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/skills", get(list_skills).post(register_skill))
+        .route("/skills/run", axum::routing::post(run_skill_endpoint))
         .route("/skills/domains", get(list_domains))
         .route(
             "/employees/{id}/skills",
@@ -49,6 +51,7 @@ fn skill_json(r: &sqlx::postgres::PgRow) -> Value {
         "input_schema": r.get::<Value, _>("input_schema"),
         "output_schema": r.get::<Value, _>("output_schema"),
         "tools": tools.as_array().cloned().unwrap_or_default(),
+        "handler": sincy_employee::handlers::handler_skill_names().contains(&r.get::<String, _>("name").as_str()),
         "status": r.get::<String, _>("status"),
         "created_at": r.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
     })
@@ -431,4 +434,34 @@ async fn unbind_skill(
         .await
         .map_err(err)?;
     Ok(Json(json!({ "unbound": true })))
+}
+
+#[derive(Debug, Deserialize)]
+struct RunSkillBody {
+    name: String,
+    #[serde(default)]
+    input: Value,
+    employee_id: Option<Uuid>,
+}
+
+/// POST /api/v1/skills/run — 真执行一个 skill handler, 返回 {skill, duration_ms, output}。
+/// handler 未注册时 400 明确报错 (元数据-only skill 不能假装执行)。
+async fn run_skill_endpoint(
+    State(state): State<AppState>,
+    axum::extract::Extension(auth): axum::extract::Extension<crate::auth::AuthCtx>,
+    Json(body): Json<RunSkillBody>,
+) -> Result<Json<Value>, axum::response::Response> {
+    let pool = state.pool().map_err(app_error_response)?;
+    let out = crate::employees::run_skill_by_name(
+        pool,
+        auth.agency_id,
+        body.employee_id,
+        &body.name,
+        body.input,
+        state.allow_mock_adapters,
+        state.jwt_secret(),
+    )
+    .await
+    .map_err(|e| app_error_response(sincy_common::AppError::non_retryable("skill_run", e)))?;
+    Ok(Json(out))
 }

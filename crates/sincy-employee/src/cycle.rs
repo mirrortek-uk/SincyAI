@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use crate::agents::AgentKind;
 use crate::domain::{Employee, Identity, Mission, Strategy};
+use crate::handlers::{SkillRunCtx, run_skill};
 use crate::memory::{MemoryItem, MemoryType};
 use crate::skills::{Skill, pick_content_skill, skills_for_agent};
 
@@ -113,6 +114,24 @@ pub trait IntelPort: Send + Sync {
         ctx: &EmployeeContext,
         limit: usize,
     ) -> Result<Vec<Opportunity>, String>;
+    /// 全文检索 intel_items (skill handler 用: social_search / topic_research / fact_checking)。
+    /// 默认实现报不支持, 由云端 PG 实现提供真实数据。
+    async fn search_items(&self, _query: &str, _limit: usize) -> Result<Vec<Value>, String> {
+        Err("search_items not supported by this IntelPort".into())
+    }
+    /// 趋势聚合 (skill handler 用: trend_discovery), 复用 /intel/trends 的口径。
+    async fn trending(&self, _limit: usize) -> Result<Vec<Value>, String> {
+        Err("trending not supported by this IntelPort".into())
+    }
+}
+
+/// 运行指标端口 (skill handler 用: analytics 域的 performance_analysis 等)。
+/// 默认实现报不支持, 由云端 PG 实现提供真实计数。
+#[async_trait]
+pub trait StatsPort: Send + Sync {
+    async fn metrics(&self) -> Result<Value, String> {
+        Err("metrics not supported by this StatsPort".into())
+    }
 }
 
 /// Content Factory / LLM port (DE §11: employee decides what/why, factory how).
@@ -185,11 +204,36 @@ impl CycleStore for Box<dyn CycleStore> {
     }
 }
 
+#[async_trait]
+impl IntelPort for Box<dyn IntelPort> {
+    async fn opportunities(
+        &self,
+        ctx: &EmployeeContext,
+        limit: usize,
+    ) -> Result<Vec<Opportunity>, String> {
+        (**self).opportunities(ctx, limit).await
+    }
+    async fn search_items(&self, q: &str, limit: usize) -> Result<Vec<Value>, String> {
+        (**self).search_items(q, limit).await
+    }
+    async fn trending(&self, limit: usize) -> Result<Vec<Value>, String> {
+        (**self).trending(limit).await
+    }
+}
+
+#[async_trait]
+impl StatsPort for Box<dyn StatsPort> {
+    async fn metrics(&self) -> Result<Value, String> {
+        (**self).metrics().await
+    }
+}
+
 pub struct CycleDeps {
     pub store: Box<dyn CycleStore>,
     pub intel: Box<dyn IntelPort>,
     pub llm: Box<dyn LlmPort>,
     pub publish: Box<dyn PublishPort>,
+    pub stats: Box<dyn StatsPort>,
 }
 
 /// Minimum opportunity score to act on in a cycle.
@@ -256,8 +300,21 @@ pub async fn run_cycle(
         audience: identity.audience.clone(),
         pillars: strategy.pillars.clone(),
         channel: employee.channel.clone(),
-        recent_topics: recent,
+        recent_topics: recent.clone(),
         max_cost_usd_per_cycle: None,
+    };
+    // skill handler 运行时上下文: persona 供 llm 类 handler 组 prompt
+    let persona = json!({
+        "name": identity.name, "role": identity.role,
+        "mission": mission.statement, "audience": identity.audience,
+        "voice": identity.voice, "pillars": strategy.pillars,
+        "language": identity.language,
+    });
+    let hctx = SkillRunCtx {
+        deps,
+        employee,
+        persona: persona.clone(),
+        no_go: Vec::new(),
     };
     step(
         &deps.store,
@@ -326,6 +383,25 @@ pub async fn run_cycle(
     .await?;
 
     // --- Plan: angle + channel from strategy (+ strategy-domain skills)
+    // 同时真正执行 research 域 handler: topic_research 拉真实情报证据喂给创作
+    let research_run = run_skill(
+        "topic_research",
+        &json!({ "topic": opp.topic, "limit": 10 }),
+        &hctx,
+    )
+    .await
+    .ok();
+    let evidence_items: Vec<Value> = research_run
+        .as_ref()
+        .and_then(|r| r.output.get("items").cloned())
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default();
+    let handler_note = research_run.as_ref().map(|r| {
+        json!({
+            "skill": r.skill, "duration_ms": r.duration_ms,
+            "count": r.output.get("count").cloned().unwrap_or(json!(0)),
+        })
+    });
     let strategy_skills: Vec<&str> = skills_for_agent(skills, &AgentKind::ResearchStrategy)
         .iter()
         .filter(|s| s.domain == "strategy")
@@ -337,6 +413,8 @@ pub async fn run_cycle(
         "channel": employee.channel,
         "format": strategy.formats.first().cloned().unwrap_or_else(|| "text".into()),
         "evidence": opp.evidence,
+        "evidence_items": evidence_items.iter().take(5).cloned().collect::<Vec<_>>(),
+        "handler": handler_note,
         "skills": strategy_skills,
     });
     step(
@@ -376,7 +454,28 @@ pub async fn run_cycle(
         ),
         None => prompt,
     };
-    let draft = deps.llm.generate(&prompt, 512).await?;
+    // 优先走真正的 skill handler (social_post_generation → llm), 失败回退内联 prompt
+    let create_input = json!({
+        "topic": opp.topic,
+        "evidence": opp.evidence,
+        "evidence_items": evidence_items.iter().take(5).cloned().collect::<Vec<_>>(),
+        "recent": recent,
+    });
+    let create_run = run_skill("social_post_generation", &create_input, &hctx)
+        .await
+        .ok();
+    let draft = match &create_run {
+        Some(r) => r
+            .output
+            .get("text")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_string(),
+        None => deps.llm.generate(&prompt, 512).await?,
+    };
+    if draft.is_empty() {
+        return Err("content handler and fallback both produced empty draft".into());
+    }
     step(
         &deps.store,
         cycle_id,
@@ -386,6 +485,9 @@ pub async fn run_cycle(
         json!({
             "draft_len": draft.chars().count(),
             "skill": content_skill.map(|s| json!({"name": s.name, "version": s.version, "tools": s.tools})),
+            "handler": create_run.as_ref().map(|r| json!({
+                "skill": r.skill, "duration_ms": r.duration_ms,
+            })),
         }),
     )
     .await?;
@@ -407,6 +509,27 @@ pub async fn run_cycle(
         verdict["pass"] = json!(false);
         verdict["checks"]["duplicate_topic"] = json!({"ok": false});
     }
+    // 真执行 quality 域 handler: content_quality_review (llm 审查) + platform_compliance (规则)
+    let review_run = run_skill("content_quality_review", &json!({"text": draft}), &hctx)
+        .await
+        .ok();
+    let compliance_run = run_skill("platform_compliance", &json!({"text": draft}), &hctx)
+        .await
+        .ok();
+    if let Some(c) = &compliance_run
+        && c.output.get("pass").and_then(|v| v.as_bool()) == Some(false)
+    {
+        verdict["pass"] = json!(false);
+        verdict["checks"]["platform_compliance"] = c.output.clone();
+    }
+    verdict["handlers"] = json!([
+        review_run
+            .as_ref()
+            .map(|r| json!({"skill": r.skill, "duration_ms": r.duration_ms, "output": r.output})),
+        compliance_run
+            .as_ref()
+            .map(|r| json!({"skill": r.skill, "duration_ms": r.duration_ms, "output": r.output})),
+    ]);
     step(
         &deps.store,
         cycle_id,
@@ -444,6 +567,7 @@ pub async fn run_cycle(
         if approval != "approved" {
             deps.publish.approve_package(package_id).await?;
         }
+        // content_publishing handler = PublishPort 真派发 (设备任务入队)
         let r = deps.publish.publish(employee, package_id).await?;
         task_id = Some(r.task_id);
         // --- Measure: verify outcome via task state, never trust the submit
@@ -453,7 +577,12 @@ pub async fn run_cycle(
                 .await
                 .unwrap_or_else(|_| "UNKNOWN".into()),
         );
-        let step_out = json!({"task_id": r.task_id, "route": r.route, "status": r.status});
+        // analytics 域 handler: performance_analysis 真查运行指标
+        let perf_run = run_skill("performance_analysis", &json!({}), &hctx)
+            .await
+            .ok();
+        let step_out = json!({"task_id": r.task_id, "route": r.route, "status": r.status,
+                              "handler": "content_publishing"});
         receipt = Some(r);
         step(
             &deps.store,
@@ -470,7 +599,8 @@ pub async fn run_cycle(
             AgentKind::AnalyticsLearning,
             CycleStep::Measure,
             idem_key,
-            json!({"task_state": task_state}),
+            json!({"task_state": task_state,
+                   "handler": perf_run.as_ref().map(|r| json!({"skill": r.skill, "duration_ms": r.duration_ms, "metrics": r.output.get("metrics").cloned()}))}),
         )
         .await?;
     } else {
@@ -504,11 +634,23 @@ pub async fn run_cycle(
         last_validated: None,
     };
     deps.store.add_memory(&mem).await.ok();
-    deps.store
-        .add_insight(
-            employee.id,
-            cycle_id,
-            &format!(
+    // learning 域 handler: insight_extraction 真调用 llm 从周期摘要提炼洞察, 失败回退模板句
+    let insight_run = run_skill(
+        "insight_extraction",
+        &json!({"cycle_summary": {
+            "topic": opp.topic, "score": opp.score, "package_id": package_id,
+            "task_id": task_id, "task_state": task_state, "draft_len": draft.chars().count(),
+        }}),
+        &hctx,
+    )
+    .await
+    .ok();
+    let insight_text = insight_run
+        .as_ref()
+        .and_then(|r| r.output.get("raw").and_then(|v| v.as_str()))
+        .map(|s| s.chars().take(300).collect::<String>())
+        .unwrap_or_else(|| {
+            format!(
                 "Opportunity '{}' scored {:.2}; {}",
                 opp.topic,
                 opp.score,
@@ -517,8 +659,15 @@ pub async fn run_cycle(
                 } else {
                     "parked for approval"
                 }
-            ),
-            &json!({"evidence": opp.evidence}),
+            )
+        });
+    deps.store
+        .add_insight(
+            employee.id,
+            cycle_id,
+            &insight_text,
+            &json!({"evidence": opp.evidence,
+                    "handler": insight_run.as_ref().map(|r| json!({"skill": r.skill, "duration_ms": r.duration_ms}))}),
             opp.score,
         )
         .await

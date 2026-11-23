@@ -120,6 +120,14 @@ impl LlmPort for MockLlm {
     }
 }
 
+struct MockStats;
+#[async_trait]
+impl sincy_employee::StatsPort for MockStats {
+    async fn metrics(&self) -> Result<serde_json::Value, String> {
+        Ok(serde_json::json!({"device_tasks_by_state": [], "mock": true}))
+    }
+}
+
 struct MockPublish {
     auto: bool,
 }
@@ -215,6 +223,7 @@ async fn cycle_with_approval_gate_parks_package() {
         intel: Box::new(MockIntel),
         llm: Box::new(MockLlm),
         publish: Box::new(MockPublish { auto: false }),
+        stats: Box::new(MockStats),
     };
     let _ = &store;
     let out = run_cycle(
@@ -242,6 +251,7 @@ async fn cycle_auto_publish_goes_to_device_route() {
         intel: Box::new(MockIntel),
         llm: Box::new(MockLlm),
         publish: Box::new(MockPublish { auto: true }),
+        stats: Box::new(MockStats),
     };
     let out = run_cycle(
         &deps,
@@ -279,6 +289,7 @@ async fn cycle_without_opportunity_is_noop_success() {
         intel: Box::new(NoIntel),
         llm: Box::new(MockLlm),
         publish: Box::new(MockPublish { auto: true }),
+        stats: Box::new(MockStats),
     };
     let out = run_cycle(
         &deps,
@@ -310,6 +321,7 @@ async fn critic_rejects_overlong_draft() {
         intel: Box::new(MockIntel),
         llm: Box::new(LongLlm),
         publish: Box::new(MockPublish { auto: true }),
+        stats: Box::new(MockStats),
     };
     let out = run_cycle(
         &deps,

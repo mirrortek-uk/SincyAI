@@ -23,7 +23,7 @@ use sincy_employee::memory::MemoryItem;
 use sincy_intel::adapter::EmployeeContext;
 use sincy_intel::model::{Opportunity, Trend};
 use sincy_intel::opportunity::{pillar_match, score_opportunity};
-use sqlx::Row;
+use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use crate::api::{NewPackage, PublishTaskBody, app_error_response, insert_package, publish_core};
@@ -629,6 +629,117 @@ async fn start_cycle(
     })))
 }
 
+/// 手动执行一个 skill handler (POST /skills/run): 真调用, 返回可审计结果。
+/// employee_id 可选 —— 带上时用该员工的身份/策略生成 persona prompt。
+pub(crate) async fn run_skill_by_name(
+    pool: &sqlx::PgPool,
+    agency: sincy_common::AgencyId,
+    employee_id: Option<Uuid>,
+    name: &str,
+    input: Value,
+    allow_mock: bool,
+    jwt_secret: &[u8],
+) -> Result<Value, String> {
+    let (emp, identity, mission, strategy) = match employee_id {
+        Some(id) => {
+            let (emp, identity, mission, strategy) = load_full(pool, id)
+                .await
+                .map_err(|e| format!("load employee: {e:?}"))?;
+            if emp.agency_id != *agency.as_uuid() {
+                return Err("not your employee".into());
+            }
+            (emp, identity, mission, strategy)
+        }
+        None => {
+            // 无员工上下文: 用占位员工 + 默认人设 (仍可跑 intel/llm/stats 类 handler)
+            let emp = Employee {
+                id: Uuid::nil(),
+                agency_id: *agency.as_uuid(),
+                name: "adhoc".into(),
+                role: "content_operator".into(),
+                status: sincy_employee::EmployeeStatus::Running,
+                config_version: 1,
+                brand_id: None,
+                channel: "x".into(),
+                auto_publish: false,
+                created_at: chrono::Utc::now(),
+            };
+            (
+                emp,
+                Identity {
+                    version: 1,
+                    name: "adhoc".into(),
+                    role: "content_operator".into(),
+                    personality: json!({}),
+                    voice: "casual, human".into(),
+                    language: "zh-CN".into(),
+                    audience: vec![],
+                    boundaries: vec![],
+                    expertise: vec![],
+                    values: vec![],
+                },
+                Mission {
+                    statement: "adhoc skill run".into(),
+                    domain: "content".into(),
+                    audience: vec![],
+                    value_proposition: String::new(),
+                    constraints: vec![],
+                    success_definition: String::new(),
+                },
+                Strategy::default(),
+            )
+        }
+    };
+    let persona = json!({
+        "name": identity.name, "role": identity.role,
+        "mission": mission.statement, "audience": identity.audience,
+        "voice": identity.voice, "pillars": strategy.pillars,
+        "language": identity.language,
+    });
+    // 品牌 no_go 列表
+    let no_go: Vec<String> = match emp.brand_id {
+        Some(bid) => sqlx::query("SELECT config->'no_go' FROM brands WHERE id = $1")
+            .bind(bid)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|r| r.try_get::<Value, _>(0).ok())
+            .and_then(|v| v.as_array().cloned())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let deps = CycleDeps {
+        store: Box::new(PgCycleStore { pool: pool.clone() }),
+        intel: Box::new(PgIntelPort { pool: pool.clone() }),
+        llm: Box::new(PgLlmPort { allow_mock }),
+        publish: Box::new(PgPublishPort {
+            pool: pool.clone(),
+            agency,
+            allow_mock,
+            jwt_secret: jwt_secret.to_vec(),
+        }),
+        stats: Box::new(PgStatsPort { pool: pool.clone() }),
+    };
+    let hctx = sincy_employee::handlers::SkillRunCtx {
+        deps: &deps,
+        employee: &emp,
+        persona: persona.clone(),
+        no_go,
+    };
+    let run = sincy_employee::handlers::run_skill(name, &input, &hctx).await?;
+    Ok(json!({
+        "skill": run.skill,
+        "duration_ms": run.duration_ms,
+        "output": run.output,
+    }))
+}
+
 /// 执行一个运营周期的共享实现 (HTTP 手工触发 + 后台调度器共用)。
 pub(crate) async fn run_cycle_for(
     pool: &sqlx::PgPool,
@@ -661,6 +772,7 @@ pub(crate) async fn run_cycle_for(
             allow_mock,
             jwt_secret: jwt_secret.to_vec(),
         }),
+        stats: Box::new(PgStatsPort { pool: pool.clone() }),
     };
     let skills = crate::skills::load_bound_skills(pool, id)
         .await
@@ -827,7 +939,7 @@ async fn list_insights(
 
 // ---------- PG ports ----------
 
-struct PgCycleStore {
+pub(crate) struct PgCycleStore {
     pool: sqlx::PgPool,
 }
 
@@ -939,7 +1051,7 @@ impl CycleStore for PgCycleStore {
     }
 }
 
-struct PgIntelPort {
+pub(crate) struct PgIntelPort {
     pool: sqlx::PgPool,
 }
 
@@ -1053,9 +1165,123 @@ impl IntelPort for PgIntelPort {
         out.truncate(limit.max(10));
         Ok(out)
     }
+
+    /// skill handler 用: 全文检索 intel_items (research 域 social_search/topic_research/fact_checking)
+    async fn search_items(&self, query: &str, limit: usize) -> Result<Vec<Value>, String> {
+        let rows = sqlx::query(
+            "SELECT source_id, kind, dedup_key, payload, collected_at FROM intel_items \
+             WHERE payload::text ILIKE '%' || $1 || '%' \
+             ORDER BY collected_at DESC LIMIT $2",
+        )
+        .bind(query)
+        .bind(limit.max(1) as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                json!({
+                    "source_id": r.get::<String, _>("source_id"),
+                    "kind": r.get::<String, _>("kind"),
+                    "dedup_key": r.get::<String, _>("dedup_key"),
+                    "title": r.get::<Value, _>("payload").get("title").cloned().unwrap_or(Value::Null),
+                    "url": r.get::<Value, _>("payload").get("url").cloned().unwrap_or(Value::Null),
+                    "collected_at": r.get::<chrono::DateTime<chrono::Utc>, _>("collected_at"),
+                })
+            })
+            .collect())
+    }
+
+    /// skill handler 用: 趋势聚合 (trend_discovery), 口径与 GET /intel/trends 一致
+    async fn trending(&self, limit: usize) -> Result<Vec<Value>, String> {
+        let rows = sqlx::query(
+            r#"WITH t AS (
+                 SELECT coalesce(payload->>'topic', payload->>'title') AS topic,
+                        source_id, collected_at, payload->>'url' AS url
+                 FROM intel_items
+                 WHERE collected_at > now() - interval '24 hours'
+                   AND coalesce(payload->>'topic', payload->>'title') IS NOT NULL
+               )
+               SELECT topic,
+                      count(*)::int8 AS total,
+                      count(*) FILTER (WHERE collected_at > now() - interval '6 hours')::int8 AS h6,
+                      count(DISTINCT source_id)::int8 AS platforms,
+                      array_agg(DISTINCT source_id) AS sources
+               FROM t
+               WHERE length(topic) > 2
+               GROUP BY topic
+               HAVING count(*) >= 3
+               ORDER BY h6 DESC, total DESC
+               LIMIT $1"#,
+        )
+        .bind(limit.max(1) as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                json!({
+                    "topic": r.get::<String, _>("topic"),
+                    "total_24h": r.get::<i64, _>("total"),
+                    "last_6h": r.get::<i64, _>("h6"),
+                    "platforms": r.get::<i64, _>("platforms"),
+                    "sources": r.get::<Vec<String>, _>("sources"),
+                })
+            })
+            .collect())
+    }
 }
 
-struct PgLlmPort {
+/// skill handler 用: analytics 域的真实运行指标 (devices/tasks/packages/intel)。
+pub(crate) struct PgStatsPort {
+    pool: PgPool,
+}
+
+#[async_trait]
+impl sincy_employee::StatsPort for PgStatsPort {
+    async fn metrics(&self) -> Result<Value, String> {
+        let tasks = sqlx::query(
+            "SELECT state, count(*)::int8 AS n FROM device_tasks GROUP BY state ORDER BY n DESC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        let pkgs = sqlx::query(
+            "SELECT approval_status, count(*)::int8 AS n FROM publishing_packages GROUP BY approval_status ORDER BY n DESC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        let devices = sqlx::query(
+            "SELECT state, count(*)::int8 AS n FROM devices GROUP BY state ORDER BY n DESC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        let intel_items: i64 = sqlx::query_scalar("SELECT count(*) FROM intel_items")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        let jobs_ran: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM intel_collection_jobs WHERE last_run_at IS NOT NULL",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(json!({
+            "device_tasks_by_state": tasks.iter().map(|r| json!({"state": r.get::<String,_>("state"), "n": r.get::<i64,_>("n")})).collect::<Vec<_>>(),
+            "packages_by_approval": pkgs.iter().map(|r| json!({"status": r.get::<String,_>("approval_status"), "n": r.get::<i64,_>("n")})).collect::<Vec<_>>(),
+            "devices_by_state": devices.iter().map(|r| json!({"state": r.get::<String,_>("state"), "n": r.get::<i64,_>("n")})).collect::<Vec<_>>(),
+            "intel_items_total": intel_items,
+            "intel_jobs_ran": jobs_ran,
+            "collected_at": chrono::Utc::now(),
+        }))
+    }
+}
+
+pub(crate) struct PgLlmPort {
     allow_mock: bool,
 }
 
@@ -1076,7 +1302,7 @@ impl LlmPort for PgLlmPort {
     }
 }
 
-struct PgPublishPort {
+pub(crate) struct PgPublishPort {
     pool: sqlx::PgPool,
     agency: sincy_common::AgencyId,
     allow_mock: bool,

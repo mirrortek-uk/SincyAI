@@ -411,6 +411,190 @@ async fn architecture(
         Err(_) => json!(null),
     };
 
+    // ---- live: 实时计数/状态 (动画每帧可轮询或与 runtime 联动) ----
+    // 租户内表按 agency 隔离; intel 表为全局采集数据。
+    let live = match state.pool() {
+        Ok(pool) => {
+            let ag = auth.agency_id.as_uuid();
+            let scalar = |sql: &'static str| async move {
+                sqlx::query_scalar::<_, i64>(sql)
+                    .bind(ag)
+                    .fetch_one(pool)
+                    .await
+                    .ok()
+                    .unwrap_or(0)
+            };
+            let devices: i64 = scalar(
+                "SELECT count(*)::int8 FROM devices WHERE agency_id = $1 AND state = 'online'",
+            )
+            .await;
+            let devices_total: i64 =
+                scalar("SELECT count(*)::int8 FROM devices WHERE agency_id = $1").await;
+            let tasks_24h: i64 = scalar("SELECT count(*)::int8 FROM device_tasks WHERE agency_id = $1 AND created_at > now() - interval '24 hours'").await;
+            let tasks_by_state = sqlx::query(
+                "SELECT state, count(*)::int8 AS n FROM device_tasks WHERE agency_id = $1 AND created_at > now() - interval '24 hours' GROUP BY state ORDER BY n DESC",
+            ).bind(ag).fetch_all(pool).await.unwrap_or_default();
+            let pkgs_pending: i64 = scalar("SELECT count(*)::int8 FROM publishing_packages WHERE agency_id = $1 AND approval_status = 'pending'").await;
+            let employees = sqlx::query(
+                "SELECT state, count(*)::int8 AS n FROM digital_employees WHERE agency_id = $1 GROUP BY state ORDER BY n DESC",
+            ).bind(ag).fetch_all(pool).await.unwrap_or_default();
+            let intel_items: i64 = sqlx::query_scalar("SELECT count(*)::int8 FROM intel_items")
+                .fetch_one(pool)
+                .await
+                .ok()
+                .unwrap_or(0);
+            let sources_total: i64 =
+                sqlx::query_scalar("SELECT count(*)::int8 FROM intelligence_sources")
+                    .fetch_one(pool)
+                    .await
+                    .ok()
+                    .unwrap_or(0);
+            let jobs_ran: i64 = sqlx::query_scalar(
+                "SELECT count(*)::int8 FROM intel_collection_jobs WHERE last_run_at > now() - interval '24 hours'",
+            ).fetch_one(pool).await.ok().unwrap_or(0);
+            let last_job: Option<chrono::DateTime<chrono::Utc>> =
+                sqlx::query_scalar("SELECT max(last_run_at) FROM intel_collection_jobs")
+                    .fetch_one(pool)
+                    .await
+                    .ok();
+            let opps_new: i64 = sqlx::query_scalar(
+                "SELECT count(*)::int8 FROM intel_opportunities WHERE status = 'new'",
+            )
+            .fetch_one(pool)
+            .await
+            .ok()
+            .unwrap_or(0);
+            json!({
+                "devices_online": devices,
+                "devices_total": devices_total,
+                "device_tasks_24h": tasks_24h,
+                "device_tasks_by_state": tasks_by_state.iter().map(|r| json!({"state": r.get::<String,_>("state"), "n": r.get::<i64,_>("n")})).collect::<Vec<_>>(),
+                "packages_pending_approval": pkgs_pending,
+                "employees_by_state": employees.iter().map(|r| json!({"state": r.get::<String,_>("state"), "n": r.get::<i64,_>("n")})).collect::<Vec<_>>(),
+                "intel": {
+                    "sources_registered": sources_total,
+                    "items_total": intel_items,
+                    "jobs_ran_24h": jobs_ran,
+                    "last_job_at": last_job,
+                    "opportunities_new": opps_new,
+                },
+                "llm_provider": std::env::var("SINCY_LLM_PROVIDER").unwrap_or_else(|_| "mock".into()),
+                "env": std::env::var("SINCY_ENV").unwrap_or_else(|_| "local".into()),
+            })
+        }
+        Err(_) => json!({}),
+    };
+
+    // ---- node_status: 关键节点的实时状态 (静态描述节点标 static) ----
+    let node_status = match state.pool() {
+        Ok(pool) => {
+            let ag = auth.agency_id.as_uuid();
+            let online: i64 = sqlx::query_scalar(
+                "SELECT count(*)::int8 FROM devices WHERE agency_id = $1 AND state = 'online'",
+            )
+            .bind(ag)
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0);
+            let last_job: Option<chrono::DateTime<chrono::Utc>> =
+                sqlx::query_scalar("SELECT max(last_run_at) FROM intel_collection_jobs")
+                    .fetch_one(pool)
+                    .await
+                    .ok();
+            let items: i64 = sqlx::query_scalar("SELECT count(*)::int8 FROM intel_items")
+                .fetch_one(pool)
+                .await
+                .unwrap_or(0);
+            json!({
+                "api": "up", "wss": "up", "mw": "up",
+                "db": "up",
+                "agent": format!("online:{online}"),
+                "collector": match last_job {
+                    Some(t) => format!("last_run:{t}"),
+                    None => "never".into(),
+                },
+                "wi": format!("items:{items}"),
+                "ai": std::env::var("SINCY_LLM_PROVIDER").unwrap_or_else(|_| "mock".into()),
+                "llm": "external",
+                "x": "external",
+                "wisrc": "external",
+            })
+        }
+        Err(_) => json!({ "db": "down" }),
+    };
+
+    // ---- flow paths: 每条流的结构化节点路径 (动画沿真实 edge 高亮, 不用解析文字) ----
+    let flow_paths: Vec<(&str, Vec<&str>)> = vec![
+        ("F1", vec!["console", "api", "mw", "db"]),
+        ("F2", vec!["console", "api", "agent", "wss", "db"]),
+        (
+            "F3",
+            vec![
+                "console", "api", "pub", "wss", "agent", "adapter", "x", "db",
+            ],
+        ),
+        ("F4", vec!["api", "de", "wi", "ai", "pub", "db"]),
+        ("F5", vec!["wisrc", "collector", "db", "wi"]),
+        ("F6", vec!["db", "wihealth"]),
+        ("F7", vec!["db", "witrend", "wi"]),
+        ("F8", vec!["adapter", "humanize", "agent", "x"]),
+        ("F9", vec!["vercel", "worker", "proddb", "devfarm", "x"]),
+    ];
+    let flows = {
+        let mut v = flows;
+        if let Some(arr) = v.as_array_mut() {
+            for f in arr.iter_mut() {
+                if let Some(id) = f.get("id").and_then(|x| x.as_str())
+                    && let Some((_, path)) = flow_paths.iter().find(|(fid, _)| *fid == id)
+                {
+                    f["path"] = json!(path);
+                }
+            }
+        }
+        v
+    };
+
+    // skill 域里已落地 handler 的数量 (动画里 skill 节点可显示 绿点=有真 handler)
+    let handler_names = sincy_employee::handlers::handler_skill_names();
+    let skill_domains = {
+        let mut sd = skill_domains;
+        if let Some(doms) = sd.get_mut("domains").and_then(|d| d.as_array_mut()) {
+            for d in doms.iter_mut() {
+                if let Some(names) = d.get("skills").and_then(|s| s.as_array()) {
+                    let with_handler = names
+                        .iter()
+                        .filter(|n| {
+                            n.as_str()
+                                .map(|s| handler_names.contains(&s))
+                                .unwrap_or(false)
+                        })
+                        .count();
+                    d["handlers"] = json!(with_handler);
+                }
+            }
+            let total_handlers: i64 = doms
+                .iter()
+                .map(|d| d.get("handlers").and_then(|h| h.as_i64()).unwrap_or(0))
+                .sum();
+            sd["total_handlers"] = json!(total_handlers);
+        }
+        sd
+    };
+
+    // ---- animation: 动画编排元数据 ----
+    let step_to_agent = json!({
+        "observe": "executive", "understand": "research_strategy", "decide": "executive",
+        "plan": "research_strategy", "create": "content", "review": "critic_compliance",
+        "execute": "critic_compliance", "measure": "analytics_learning",
+        "learn": "analytics_learning", "adapt": "executive",
+    });
+    let animation = json!({
+        "cycle_steps": cycle_steps_model(),
+        "step_to_agent": step_to_agent,
+        "flow_ids": ["F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9"],
+        "hint": "F4 数字员工周期按 cycle_steps 顺序高亮 step_to_agent 里的 agent 节点; 每步证据见 runtime.steps",
+    });
+
     Json(json!({
         "title": "Sincy 系统架构 (as-built)",
         "service": "cloud-api",
@@ -423,6 +607,9 @@ async fn architecture(
         "cycle_steps": cycle_steps_model(),
         "skill_domains": skill_domains,
         "runtime": runtime,
+        "live": live,
+        "node_status": node_status,
+        "animation": animation,
         "edge_kinds": {
             "http": "HTTP REST (JWT)",
             "ws": "WebSocket",
