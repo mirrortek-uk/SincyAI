@@ -61,6 +61,122 @@ pub fn handler_skill_names() -> Vec<&'static str> {
     v
 }
 
+/// 插件化展示:每个内置 handler 的"具体干什么"说明 (skill 名 → 用途描述)。
+pub fn skill_what_it_does() -> Vec<(&'static str, &'static str)> {
+    vec![
+        // research
+        (
+            "social_search",
+            "在 World Intelligence 情报库里按关键词搜索帖子/文章/视频,返回相关内容列表",
+        ),
+        (
+            "topic_research",
+            "围绕一个主题做情报汇总:相关内容、热度、讨论焦点",
+        ),
+        (
+            "audience_research",
+            "分析目标受众画像:他们在哪、关心什么、怎么说话",
+        ),
+        (
+            "competitor_analysis",
+            "抓取并分析竞品账号的内容策略和发布节奏",
+        ),
+        (
+            "content_gap_analysis",
+            "找内容空白:同类在讲什么、我们还没讲什么",
+        ),
+        (
+            "creator_analysis",
+            "分析某个创作者的风格、爆款特征和可复用的套路",
+        ),
+        (
+            "trend_discovery",
+            "从情报库读取当前热门趋势榜(多平台热榜聚合)",
+        ),
+        ("fact_checking", "核查一条说法的可信度,给出依据来源"),
+        ("source_verification", "验证信息来源是否可靠、是否一手"),
+        ("fact_check", "fact_checking 的别名"),
+        ("claim_verification", "claim_verification:核验具体断言"),
+        // content
+        (
+            "social_post_generation",
+            "生成一篇可直接发布的社交媒体帖子文案",
+        ),
+        ("text_generation", "按要求生成通用文本内容"),
+        ("article_writing", "写一篇完整文章(结构+正文)"),
+        ("caption_generation", "为图片/视频生成配文 caption"),
+        ("script_generation", "生成短视频/口播脚本"),
+        ("subtitle_generation", "生成字幕文本"),
+        ("content_rewriting", "把已有内容改写成另一种风格/平台版本"),
+        ("localization", "把内容本地化(语言+文化适配)"),
+        ("translation", "翻译内容到目标语言"),
+        ("carousel_generation", "生成图文轮播(多页)的每页文案"),
+        // creative
+        ("idea_generation", "批量出内容选题 idea"),
+        ("angle_discovery", "从一个主题挖掘多个切入角度"),
+        ("hook_generation", "生成开头钩子(前 3 秒抓人的话)"),
+        ("storytelling", "把信息包装成故事结构"),
+        ("viral_format_analysis", "分析爆款内容的格式套路"),
+        ("creative_variation", "在一个创意基础上做多版本变体"),
+        ("content_brainstorming", "头脑风暴:围绕品牌做内容共创"),
+        ("trend_to_content", "把一个热点趋势转化成可发布的内容方案"),
+        // strategy
+        ("content_strategy", "制定整体内容战略(方向+节奏+资源)"),
+        ("audience_strategy", "制定受众增长策略"),
+        ("channel_strategy", "选择和规划投放渠道"),
+        (
+            "content_pillar_planning",
+            "规划内容支柱(长期可复用的主题板块)",
+        ),
+        ("campaign_planning", "策划一次营销活动的内容计划"),
+        ("growth_strategy", "制定账号增长策略"),
+        ("competitor_positioning", "基于竞品分析给出差异化定位"),
+        // quality_compliance
+        ("content_quality_review", "从质量维度审查内容并打分"),
+        ("brand_voice_review", "检查内容是否符合品牌调性"),
+        ("originality_check", "原创性检查,防止洗稿"),
+        ("safety_review", "安全/敏感内容审查"),
+        ("content_scoring", "综合质量评分"),
+        ("platform_compliance", "检查是否符合目标平台的发布政策"),
+        ("copyright_check", "版权风险检查"),
+        // publishing
+        (
+            "content_publishing",
+            "把审核通过的内容包真正派发到平台/设备执行发布",
+        ),
+        (
+            "platform_formatting",
+            "按平台要求改写格式(字数/标签/链接位置)",
+        ),
+        ("account_selection", "从可用账号里选最合适的发布账号"),
+        (
+            "publishing_verification",
+            "发布后回查平台,确认是否真的发出去了",
+        ),
+        // analytics
+        (
+            "performance_analysis",
+            "统计内容发布后的表现数据(阅读/播放/互动)",
+        ),
+        ("engagement_analysis", "分析互动率、评论情感等互动质量"),
+        ("audience_analysis", "分析受众构成和行为数据"),
+        ("viral_content_analysis", "分析爆款内容的传播路径和原因"),
+        ("content_comparison", "对比多条内容的表现,找出差异"),
+        ("trend_performance_analysis", "分析趋势话题相关内容的表现"),
+        ("campaign_analysis", "复盘活动整体效果"),
+        // learning
+        ("insight_extraction", "从数据里提炼洞察结论"),
+        (
+            "strategy_optimization",
+            "根据历史表现优化策略,输出可实验的假设",
+        ),
+        ("pattern_detection", "识别数据中的模式和异常"),
+        // memory
+        ("episodic_memory", "读写情景记忆(具体事件/经历)"),
+        ("semantic_memory", "读写语义记忆(事实/偏好/规则)"),
+    ]
+}
+
 /// 查注册表并执行一次 skill; 不阻塞周期 —— 调用方决定是否容忍错误。
 pub async fn run_skill(
     skill: &str,
@@ -488,3 +604,20 @@ impl SkillHandler for BuiltinHandlers {
 // 让 StatsPort 在本模块可被引用 (handlers 通过 deps.stats 访问)
 #[allow(dead_code)]
 fn _assert_stats_port(_: &dyn StatsPort) {}
+
+#[cfg(test)]
+mod plugin_desc_tests {
+    #[test]
+    fn every_handler_has_what_it_does() {
+        let descs: std::collections::HashSet<&str> = super::skill_what_it_does()
+            .iter()
+            .map(|(n, _)| *n)
+            .collect();
+        for name in super::handler_skill_names() {
+            assert!(
+                descs.contains(name),
+                "handler '{name}' missing what_it_does description"
+            );
+        }
+    }
+}

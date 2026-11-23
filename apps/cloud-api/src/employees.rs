@@ -79,21 +79,31 @@ async fn list_plugins(
     .fetch_all(pool)
     .await
     .map_err(err)?;
+    let what_map: std::collections::HashMap<&str, &str> =
+        sincy_employee::handlers::skill_what_it_does()
+            .into_iter()
+            .collect();
     let skills: Vec<Value> = skill_rows
         .iter()
         .map(|r| {
             let tools: Value = r.get("tools");
+            let name = r.get::<String, _>("name");
             json!({
                 "type": "skill",
                 "id": r.get::<Uuid, _>("id"),
                 "domain": r.get::<String, _>("domain"),
-                "name": r.get::<String, _>("name"),
+                "name": name,
                 "version": r.get::<i32, _>("version"),
                 "title": r.get::<String, _>("title"),
                 "description": r.get::<String, _>("description"),
+                "what_it_does": what_map
+                    .get(name.as_str())
+                    .copied()
+                    .map(Value::from)
+                    .unwrap_or(Value::Null),
                 "tools": tools.as_array().cloned().unwrap_or_default(),
                 "handler": sincy_employee::handlers::handler_skill_names()
-                    .contains(&r.get::<String, _>("name").as_str()),
+                    .contains(&name.as_str()),
                 "enabled": r.get::<bool, _>("enabled"),
                 "bound_at": r.get::<chrono::DateTime<chrono::Utc>, _>("bound_at"),
             })
