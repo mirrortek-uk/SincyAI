@@ -7,6 +7,8 @@ import {
   type CollectResult,
   type CustomerIntelProfile,
   type IndustryDef,
+  type IntelSignal,
+  type IntelPipeline,
   type BrandItem,
   type IntelHealth,
   type IntelItem,
@@ -43,11 +45,13 @@ export default function IntelPage() {
   const [brandId, setBrandId] = useState("");
   const [profile, setProfile] = useState<CustomerIntelProfile>({});
   const [relevanceMode, setRelevanceMode] = useState(false);
+  const [signals, setSignals] = useState<IntelSignal[]>([]);
+  const [pipelines, setPipelines] = useState<IntelPipeline[]>([]);
 
   const load = useCallback(async () => {
     if (!getToken()) return;
     try {
-      const [s, p, i, o, j, st, h, tr, ind, br] = await Promise.all([
+      const [s, p, i, o, j, st, h, tr, ind, br, sig, pipe] = await Promise.all([
         api.listIntelSources(),
         api.listIntelProviders(),
         relevanceMode && brandId
@@ -60,6 +64,8 @@ export default function IntelPage() {
         api.intelTrends(),
         api.listIndustries(),
         api.listBrands(),
+        api.listIntelSignals(undefined, 30),
+        api.listIntelPipelines(),
       ]);
       setSources(s.items);
       setProviders(p.items);
@@ -71,6 +77,8 @@ export default function IntelPage() {
       setTrends(tr.trends);
       setIndustries(ind.items);
       setBrands(br.items);
+      setSignals(sig.items);
+      setPipelines(pipe.pipelines);
     } catch (e) {
       setError(String(e));
     }
@@ -401,6 +409,27 @@ export default function IntelPage() {
         <p className="muted" style={{ marginTop: 6 }}>
           画像用于相关性评分 (行业30% / 主题25% / 竞品20% / 受众15% / 地域10%) 与内容自动打行业 tag。
         </p>
+      </section>
+
+      <section className="panel">
+        <h2>情报信号 (Pipeline Signals)</h2>
+        <p className="muted" style={{ marginTop: 0 }}>
+          管线: {pipelines.filter((p) => p.enabled).length} 条 · 每个 record_type 一个 bus 主题 (intel.raw.*)
+        </p>
+        <table>
+          <thead><tr><th>信号</th><th>来源</th><th>强度</th><th>重要性</th><th>时间</th></tr></thead>
+          <tbody>
+            {signals.map((s) => (
+              <tr key={s.signal_id}>
+                <td>{s.signal_type}</td>
+                <td className="muted">{s.source_id}</td>
+                <td>{s.strength.toFixed(2)}</td>
+                <td>{s.importance.toFixed(2)}</td>
+                <td className="muted">{s.observed_at.slice(0, 19).replace("T", " ")}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </section>
 
       <section className="panel">

@@ -13,6 +13,7 @@ pub mod adapter;
 pub mod industry;
 pub mod model;
 pub mod opportunity;
+pub mod pipeline;
 pub mod pulse;
 pub mod registry;
 pub mod router;

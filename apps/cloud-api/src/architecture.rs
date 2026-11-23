@@ -105,6 +105,8 @@ async fn architecture(
                      "超限且规则为 thread 时, 内容拆成多帖写入 publishing_packages.thread_chunks; publish_core 按 chunk 扇出多个 device_tasks(幂等键 :tN), agent brief 按 thread_index 取对应分块文本"),
                 node("wi", "世界情报 sincy-intel", "registry · router · opportunity · adapter",
                      "信源/Provider 注册表(28 个注册源, 支持 enable-all/单源 toggle); 路由打分 健康.45+可靠.30+限流.15+成本.10 + 降级链; ingest 按 dedup_key 去重; 机会引擎 0.35 支柱匹配+0.25 动量+0.15 量+0.15 稀缺+0.10 新鲜度, 过滤阈值 0.45, 周期行动阈值 0.30; wikipedia-rc 独占话题 ×0.5 防噪; DE 适配器(只给建议不改策略)"),
+                node("pipe", "情报管线 sincy-intel::pipeline (Sincy-05)", "Connector SPI · RawRecord · Type Router · Pipelines · Signals · migration 0035",
+                     "Connector 只负责接入产出统一 RawRecord (record_type, dedup_key, provenance, cursor 幂等); 每个 record_type 一个 bus 主题 intel.raw.*; Type Router 按 record_type 路由到独立 pipeline (article/trend/ranking/social_post/...); 每条 pipeline = 类型 processor + universal 富化(行业/主题/语言/质量/相关性); 输出统一 IntelEntity (四层存储: raw_records/entities/trend_series+ranking_snapshots/signals); 信号进 Opportunity Engine"),
                 node("pub", "发布管线 routing/execution/platform/content", "publish_core",
                      "急停 → 审批门(pending 包)→ 路由选择(device@10/api@50/assisted@90, device 路由按实时健康度选设备: 在线窗口 120s > 积压少 > 1h 失败率低, 并写回 assigned_device_id)→ 配额 → 幂等键 → 审计; thread 包按 chunk 扇出多任务; 任务租约/到期回收; side_effect 完成后失败记 FAILED_FINAL 且重试需 force=true, 不允许盲重试"),
                 node("adapter", "Adapter 引擎 sincy-adapter", "YAML 定义 · 解释器 · 漂移检测 · HMAC-SHA256 + Ed25519 双签名方案(signature_scheme)",
@@ -246,6 +248,19 @@ async fn architecture(
         edge("pub", "db", "device_tasks / routes / events", "data"),
         edge("de", "db", "cycles/tasks/memory/insights", "data"),
         edge("wi", "db", "intel_items / opportunities", "data"),
+        edge(
+            "wi",
+            "pipe",
+            "collector/pulse 产出 RawRecord 双写",
+            "inproc"
+        ),
+        edge(
+            "pipe",
+            "db",
+            "raw_records / entities / signals / trend_series / ranking_snapshots",
+            "data"
+        ),
+        edge("pipe", "wi", "signals → 机会引擎", "signal"),
         edge("api", "db", "全部业务读写 (RLS 按 agency 隔离)", "data"),
         edge("wi", "wisrc", "只读采集/搜索/趋势", "external"),
         edge(
@@ -262,6 +277,12 @@ async fn architecture(
         ),
         edge("console", "api", "GET /pulse/* + 注册 provider", "http"),
         edge("pulse", "wi", "聚合源 sincy-pulse 镜像 intel_items", "sql"),
+        edge(
+            "pulse",
+            "pipe",
+            "pulse 实体作为 RawRecord 进统一 pipeline 产出 signals",
+            "inproc"
+        ),
         edge(
             "collector",
             "wisrc",

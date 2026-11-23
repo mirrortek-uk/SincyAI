@@ -386,6 +386,18 @@ pub async fn run_provider_once(pool: &sqlx::PgPool, provider_id: &str) -> Result
                     if upsert_entity(pool, provider_id, &ds.id, &e, reliability).await? {
                         new += 1;
                     }
+                    // Sincy-05: pulse 实体同时作为 RawRecord 进入统一 pipeline 产出 signals
+                    let mut rp = e.payload.clone();
+                    rp["title"] = json!(e.title);
+                    let rec = sincy_intel::pipeline::RawRecord::new(
+                        provider_id,
+                        provider_id,
+                        &ds.id,
+                        crate::pipeline::record_type_for_pulse(&e.entity_type),
+                        &e.canonical_key,
+                        rp,
+                    );
+                    if let Err(e) = crate::pipeline::ingest_record(pool, &rec).await { tracing::warn!(error = %e, dedup = %rec.dedup_key, "pipeline ingest failed"); }
                 }
                 total_fetched += fetched;
                 total_new += new;

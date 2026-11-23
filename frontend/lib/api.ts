@@ -274,6 +274,32 @@ export interface IndustryDef {
   description: string;
 }
 
+export interface IntelSignal {
+  signal_id: string;
+  signal_type: string;
+  entity_id: string | null;
+  source_id: string;
+  strength: number;
+  importance: number;
+  observed_at: string;
+  payload: Record<string, unknown>;
+}
+
+export interface IntelPipeline {
+  id: string;
+  input_record_type: string;
+  processors: string[];
+  output_entity_types: string[];
+  bus_subject: string;
+  enabled: boolean;
+}
+
+export interface IntelProcessor {
+  processor_id: string;
+  version: string;
+  input_types: string[];
+}
+
 export interface CustomerIntelProfile {
   industry?: string;
   sub_industry?: string;
@@ -701,6 +727,10 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(profile),
     }),
+  listIntelSignals: (type?: string, limit = 50) =>
+    req<{ items: IntelSignal[] }>("/intel/signals" + (type ? `?type=${type}&limit=${limit}` : `?limit=${limit}`)),
+  listIntelPipelines: () =>
+    req<{ pipelines: IntelPipeline[]; processors: IntelProcessor[] }>("/intel/pipelines"),
   brandIntelFeed: (brandId: string, limit = 50, minScore?: number) => {
     const q = new URLSearchParams({ limit: String(limit) });
     if (minScore !== undefined) q.set("min_score", String(minScore));

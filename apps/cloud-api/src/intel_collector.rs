@@ -566,6 +566,8 @@ async fn collect_feed(
         let inds = sincy_intel::industry::classify_industries(&text_for_cls);
         let industries: Vec<String> = inds.iter().map(|(id, _)| id.clone()).collect();
         let tags = json!({"industries_detail": inds, "source_kind": f.kind});
+        let mut full_payload = payload;
+        full_payload["title"] = json!(title);
         let r = sqlx::query(
             "INSERT INTO intel_items (id, source_id, kind, dedup_key, payload, industries, tags)
              VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (dedup_key) DO NOTHING RETURNING id",
@@ -574,11 +576,7 @@ async fn collect_feed(
         .bind(&f.source_id)
         .bind(&f.kind)
         .bind(&dk)
-        .bind({
-            let mut p = payload;
-            p["title"] = json!(title);
-            p
-        })
+        .bind(&full_payload)
         .bind(serde_json::to_value(&industries).unwrap_or(json!([])))
         .bind(&tags)
         .fetch_optional(pool)
@@ -586,6 +584,17 @@ async fn collect_feed(
         .map_err(|e| e.to_string())?;
         if r.is_some() {
             ins += 1;
+            // Sincy-05 pipeline: 同一条记录同时进入 RawRecord 管线 (intel_items 保留为 legacy 层)
+            let rp = full_payload.clone();
+            let rec = sincy_intel::pipeline::RawRecord::new(
+                &f.source_id,
+                &f.source_id,
+                &f.label,
+                crate::pipeline::record_type_for_feed_kind(&f.kind),
+                &dk,
+                rp,
+            );
+            if let Err(e) = crate::pipeline::ingest_record(pool, &rec).await { tracing::warn!(error = %e, dedup = %rec.dedup_key, "pipeline ingest failed"); }
         } else {
             dup += 1;
         }
