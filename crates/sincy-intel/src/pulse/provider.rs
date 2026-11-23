@@ -141,23 +141,121 @@ impl WebScrapeProvider {
     }
 }
 
-/// 从 HTML 里提取候选条目: 先剥离 nav/header/footer/aside/script/style 页面 chrome,
-/// 再取锚点 (href + 文本); 话题标签要求带数字(热度)或高频出现, 避免把导航/语言名抓成实体。
+/// 榜单/工具类站点的结构化提取策略 (按页面特征自动选择):
+/// 1) trend-list: <a class=trend-link>NAME</a> + <span data-count=N> (trends24 等)
+/// 2) table-rows: <tr> 行, data-* 属性与数字单元格作为指标 (xbangdan / xpaiming 等榜单表)
+/// 3) main-anchors: 仅 <main>/<article> 内的锚点 (兜底), 带导航黑名单。
+///
+/// 页面 chrome (nav/header/footer/aside/script/style) 先剥离。
 pub fn extract_html_items(html: &str, base_url: &str) -> Vec<(String, String, Value)> {
     use regex::Regex;
-    // 1) 剥离页面 chrome 与脚本样式
     let mut stripped = html.to_string();
-    for t in ["nav", "header", "footer", "aside", "script", "style", "noscript"] {
+    for t in [
+        "nav", "header", "footer", "aside", "script", "style", "noscript",
+    ] {
         let re = Regex::new(&format!("(?is)<{t}[^>]*>.*?</{t}>")).unwrap();
         stripped = re.replace_all(&stripped, " ").into_owned();
     }
     let stripped = Regex::new(r"(?is)<!--.*?-->")
         .unwrap()
         .replace_all(&stripped, " ");
-    let anchor = Regex::new(r#"<a\s[^>]*href="([^"]+)"[^>]*>(.*?)</a>"#).unwrap();
+
+    let trends = extract_trend_list(&stripped, base_url);
+    if !trends.is_empty() {
+        return trends;
+    }
+    let rows = extract_table_rows(&stripped, base_url);
+    if !rows.is_empty() {
+        return rows;
+    }
+    extract_main_anchors(&stripped, base_url)
+}
+
+/// 策略1: 趋势列表 (trend-link + data-count)
+fn extract_trend_list(html: &str, base_url: &str) -> Vec<(String, String, Value)> {
+    use regex::Regex;
+    let re = Regex::new(r#"<a[^>]*class="[^"]*trend-link[^"]*"[^>]*>(.*?)</a>[^<]*(?:<span[^>]*data-count="(\d+)"[^>]*>[^<]*</span>)?"#).unwrap();
     let tag = Regex::new(r"<[^>]+>").unwrap();
-    let num = Regex::new(r"[\d][\d,.]*\s*[KkMm]?").unwrap();
-    // 导航/语言/通用词黑名单 (多语言)
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for cap in re.captures_iter(html) {
+        let name = tag.replace_all(&cap[1], "").trim().to_string();
+        if name.len() < 2 || name.len() > 80 || !seen.insert(name.clone()) {
+            continue;
+        }
+        let mut payload = serde_json::json!({"text": name, "url": base_url});
+        if let Some(c) = cap.get(2) {
+            payload["tweet_count"] = Value::from(c.as_str().parse::<u64>().unwrap_or(0));
+        }
+        out.push((format!("trend:{}", name.to_lowercase()), name, payload));
+        if out.len() >= 100 {
+            break;
+        }
+    }
+    out
+}
+
+/// 策略2: 榜单表格行 — <tr> 的 data-* 属性 + 数字单元格作为指标, 行内首个链接文本为标题
+fn extract_table_rows(html: &str, base_url: &str) -> Vec<(String, String, Value)> {
+    use regex::Regex;
+    let row_re = Regex::new(r"(?is)<tr[^>]*>(.*?)</tr>").unwrap();
+    let attr_re = Regex::new(r#"data-([\w-]+)="([^"]*)""#).unwrap();
+    let anchor_re = Regex::new(r#"(?is)<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>"#).unwrap();
+    let tag = Regex::new(r"<[^>]+>").unwrap();
+    let numcell = Regex::new(r"(?is)<td[^>]*>(.*?)</td>").unwrap();
+    let num = Regex::new(r"^[\d][\d,.]*[KkMm\u{4e07}\u{4ebf}]?$").unwrap();
+    let mut out = Vec::new();
+    for (ri, row) in row_re.captures_iter(html).enumerate() {
+        let attrs: Vec<(String, String)> = attr_re
+            .captures_iter(&row[0])
+            .map(|c| (c[1].to_string(), c[2].to_string()))
+            .collect();
+        let anchor = anchor_re.captures(&row[1]);
+        let (href, title) = match anchor {
+            Some(c) => (
+                c[1].to_string(),
+                tag.replace_all(&c[2], "").trim().to_string(),
+            ),
+            None => continue,
+        };
+        if title.len() < 2 || title.len() > 80 {
+            continue;
+        }
+        let url = if href.starts_with("http") {
+            href
+        } else if let Some(st) = href.strip_prefix('/') {
+            format!("{}/{}", base_url.trim_end_matches('/'), st)
+        } else {
+            continue;
+        };
+        let mut payload = serde_json::json!({"url": url, "text": title, "rank": ri + 1});
+        for (k, v) in &attrs {
+            if let Ok(n) = v.parse::<u64>() {
+                payload[k.replace('-', "_")] = Value::from(n);
+            }
+        }
+        for (ci, c) in numcell.captures_iter(&row[1]).enumerate() {
+            let t = tag.replace_all(&c[1], "").trim().to_string();
+            if num.is_match(&t) {
+                payload[format!("cell{ci}")] = Value::from(t);
+            }
+        }
+        let key = attrs
+            .iter()
+            .find(|(k, _)| k == "h" || k == "id")
+            .map(|(_, v)| v.clone())
+            .unwrap_or_else(|| url.clone());
+        out.push((format!("row:{key}"), title, payload));
+        if out.len() >= 100 {
+            break;
+        }
+    }
+    out
+}
+
+/// 策略3: <main>/<article> 内锚点兜底 + 导航/语言黑名单
+fn extract_main_anchors(html: &str, base_url: &str) -> Vec<(String, String, Value)> {
+    use regex::Regex;
     const STOP: &[&str] = &[
         "首页",
         "home",
@@ -168,23 +266,13 @@ pub fn extract_html_items(html: &str, base_url: &str) -> Vec<(String, String, Va
         "more",
         "更多",
         "blog",
+        "faq",
         "statistics",
         "methodology",
         "monitoring",
-        "faq",
         "follow us",
         "see the full",
         "leaderboard",
-        "中文",
-        "日本語",
-        "한국어",
-        "english",
-        "español",
-        "français",
-        "português",
-        "ภาษาไทย",
-        "türkçe",
-        "language",
         "privacy",
         "terms",
         "contact",
@@ -195,18 +283,52 @@ pub fn extract_html_items(html: &str, base_url: &str) -> Vec<(String, String, Va
         "press",
         "developers",
         "status",
+        "language",
+        "中文",
+        "日本語",
+        "한국어",
+        "english",
+        "español",
+        "français",
+        "português",
+        "portuguese",
+        "spanish",
+        "french",
+        "german",
+        "deutsch",
+        "italiano",
+        "japanese",
+        "korean",
+        "chinese",
+        "thai",
+        "türkçe",
+        "turkish",
+        "bahasa",
+        "arabic",
+        "russian",
+        "ukrainian",
+        "vietnamese",
+        "hindi",
+        "indonesian",
     ];
-    let mut out: Vec<(String, String, Value)> = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for cap in anchor.captures_iter(&stripped) {
+    let main = Regex::new(r"(?is)<(?:main|article)[^>]*>(.*?)</(?:main|article)>").unwrap();
+    let scope = main
+        .captures(html)
+        .map(|c| c[1].to_string())
+        .unwrap_or_else(|| html.to_string());
+    let anchor = Regex::new(r#"<a\s[^>]*href="([^"]+)"[^>]*>(.*?)</a>"#).unwrap();
+    let tag = Regex::new(r"<[^>]+>").unwrap();
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for cap in anchor.captures_iter(&scope) {
         let href = cap[1].trim();
         if href.starts_with('#') || href.starts_with("javascript:") || href.starts_with("mailto:") {
             continue;
         }
-        let raw_text = cap[2].to_string();
-        let text = tag.replace_all(&raw_text, "").trim().to_string();
+        let raw = cap[2].to_string();
+        let text = tag.replace_all(&raw, "").trim().to_string();
         let tl = text.to_lowercase();
-        if text.len() < 3 || text.len() > 120 || seen.contains(&text) {
+        if text.len() < 3 || text.len() > 120 || !seen.insert(text.clone()) {
             continue;
         }
         if STOP
@@ -215,52 +337,19 @@ pub fn extract_html_items(html: &str, base_url: &str) -> Vec<(String, String, Va
         {
             continue;
         }
-        seen.insert(text.clone());
         let url = if href.starts_with("http") {
             href.to_string()
-        } else if let Some(stripped_href) = href.strip_prefix('/') {
-            format!("{}/{}", base_url.trim_end_matches('/'), stripped_href)
+        } else if let Some(st) = href.strip_prefix('/') {
+            format!("{}/{}", base_url.trim_end_matches('/'), st)
         } else {
             continue;
         };
-        let mut payload = serde_json::json!({"url": url, "text": text});
-        if let Some(m) = num.find(&raw_text) {
-            payload["count"] = Value::from(m.as_str().to_string());
-        }
-        let key = format!("html:{}", url);
-        out.push((key, text, payload));
-        if out.len() >= 200 {
-            break;
-        }
-    }
-    // 2) 话题标签: 只在纯文本 (剥离所有标签后, 避免 CSS 颜色/URL 残片) 里提取,
-    //    必须以字母开头, 出现 >=2 次或旁边带数字 (热度), 才认为是趋势词
-    let plain = tag.replace_all(&stripped, " ");
-    let hashtag = Regex::new(r"#([\p{L}][\p{L}\p{N}_]{1,60})").unwrap();
-    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let mut with_num: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for cap in hashtag.captures_iter(&plain) {
-        let t = cap[1].to_string();
-        *counts.entry(t.clone()).or_insert(0) += 1;
-        // 找标签后 40 字符内是否有数字
-        let start = cap.get(0).unwrap().end();
-        let tail = plain
-            .get(start..(start + 40).min(plain.len()))
-            .unwrap_or("");
-        if num.is_match(tail) {
-            with_num.insert(t);
-        }
-    }
-    for (t, c) in &counts {
-        if *c >= 2 || with_num.contains(t) {
-            let tag_text = format!("#{t}");
-            out.push((
-                format!("tag:{t}"),
-                tag_text.clone(),
-                serde_json::json!({"hashtag": tag_text, "freq": c}),
-            ));
-        }
-        if out.len() >= 300 {
+        out.push((
+            format!("html:{}", url),
+            text.clone(),
+            serde_json::json!({"url": url, "text": text}),
+        ));
+        if out.len() >= 100 {
             break;
         }
     }
@@ -408,25 +497,55 @@ mod tests {
     }
 
     #[test]
-    fn html_extractor_pulls_anchors_and_hashtags_but_not_nav_junk() {
+    fn html_extractor_prefers_trend_list() {
+        let html = r#"<html><body><ol class="trend-card__list">
+            <li><span class="trend-name"><a href="https://twitter.com/search?q=X" class="trend-link">Jensen Huang</a><span class="tweet-count" data-count="219093">219K</span></span></li>
+            <li><span class="trend-name"><a href="https://twitter.com/search?q=Y" class="trend-link">#AI</a><span class="tweet-count" data-count="88000">88K</span></span></li>
+        </ol></body></html>"#;
+        let items = extract_html_items(html, "https://trends24.in/");
+        assert_eq!(items.len(), 2);
+        assert!(
+            items
+                .iter()
+                .any(|(_, t, p)| t == "Jensen Huang" && p["tweet_count"] == 219093)
+        );
+    }
+
+    #[test]
+    fn html_extractor_reads_ranking_table_rows() {
+        let html = r#"<html><body><table class="tb"><tbody>
+            <tr data-h="mi88860" data-followers="11543" data-views-30="7331993"><td class="tc-r"></td><td class="tc-w"><a href="https://x.com/mi88860"><span>大鱼🐟</span></a></td><td>7,331,993</td></tr>
+            <tr data-h="elonmusk" data-followers="200000000"><td class="tc-r"></td><td class="tc-w"><a href="https://x.com/elonmusk"><span>Elon Musk</span></a></td><td>1亿</td></tr>
+        </tbody></table></body></html>"#;
+        let items = extract_html_items(html, "https://xbangdan.com/accounts/");
+        assert_eq!(items.len(), 2);
+        let e = items.iter().find(|(_, t, _)| t == "Elon Musk").unwrap();
+        assert_eq!(e.2["followers"], 200000000u64);
+        assert_eq!(e.2["rank"], 2);
+    }
+
+    #[test]
+    fn html_extractor_falls_back_to_main_anchors_without_nav_junk() {
         let html = r#"<html><body>
-            <nav><a href="/blog">Blog</a><a href="/faq">FAQ</a><a href="/lang">中文</a></nav>
-            <footer><a href="/privacy">Privacy</a><a href="https://x.com/follow">Follow us on X</a></footer>
-            <a href="https://x.com/alice/status/1">Alice post</a>
-            <a href="/accounts/">账号榜</a>
-            <span>#AI热门 219K</span>
-            <span>#noise</span>
-            <a href="https://x.com/bob/status/2">Bob post</a>
+            <nav><a href="/blog">Blog</a><a href="/lang">Portuguese</a></nav>
+            <main>
+              <a href="https://x.com/alice/status/1">Alice post about LLM agents</a>
+              <a href="/accounts/">账号榜</a>
+            </main>
+            <footer><a href="/privacy">Privacy</a></footer>
         </body></html>"#;
         let items = extract_html_items(html, "https://example.com");
-        assert!(items.iter().any(|(_, t, _)| t == "Alice post"));
+        assert!(
+            items
+                .iter()
+                .any(|(_, t, _)| t == "Alice post about LLM agents")
+        );
         assert!(items.iter().any(|(_, t, _)| t == "账号榜"));
-        assert!(items.iter().any(|(_, t, _)| t == "#AI热门")); // 带数字 → 趋势词
-        assert!(!items.iter().any(|(_, t, _)| t == "Blog"
-            || t == "中文"
-            || t == "Follow us on X"
-            || t == "Privacy"));
-        assert!(!items.iter().any(|(_, t, _)| t == "#noise")); // 低频无数字 → 过滤
+        assert!(
+            !items
+                .iter()
+                .any(|(_, t, _)| t == "Blog" || t == "Portuguese" || t == "Privacy")
+        );
     }
 
     #[test]

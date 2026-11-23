@@ -35,3 +35,8 @@ DELETE FROM intel_items
 DELETE FROM pulse_observations WHERE entity_id IN (SELECT id FROM pulse_entities WHERE canonical_key LIKE '%:tag:%');
 DELETE FROM pulse_entities WHERE canonical_key LIKE '%:tag:%';
 DELETE FROM intel_items WHERE dedup_key LIKE 'pulse:%' AND (payload->>'title') LIKE '#%';
+
+-- 结构化提取器 (trend-list / table-rows / main-anchors) 重写后, 旧版抓取的实体全部作废重抓
+DELETE FROM pulse_observations;
+DELETE FROM pulse_entities;
+DELETE FROM intel_items WHERE source_id = 'sincy-pulse';
