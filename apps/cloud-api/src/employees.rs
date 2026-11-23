@@ -1142,6 +1142,46 @@ impl CycleStore for PgCycleStore {
         .map_err(|e| e.to_string())?;
         Ok(id)
     }
+
+    async fn review_rule(
+        &self,
+        platform: &str,
+    ) -> Result<sincy_employee::cycle::PlatformReviewRule, String> {
+        use sincy_employee::cycle::PlatformReviewRule;
+        let row = sqlx::query(
+            "SELECT platform, weighted_limit, on_over_limit FROM platform_review_rules WHERE platform = $1",
+        )
+        .bind(platform)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        let row = match row {
+            Some(r) => r,
+            None => sqlx::query(
+                "SELECT platform, weighted_limit, on_over_limit FROM platform_review_rules WHERE platform = 'default'",
+            )
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "no default review rule".to_string())?,
+        };
+        use sqlx::Row;
+        Ok(PlatformReviewRule {
+            platform: row.get("platform"),
+            weighted_limit: row.get::<i32, _>("weighted_limit") as usize,
+            on_over_limit: row.get("on_over_limit"),
+        })
+    }
+
+    async fn set_thread_chunks(&self, package_id: Uuid, chunks: &[String]) -> Result<(), String> {
+        sqlx::query("UPDATE publishing_packages SET thread_chunks = $1 WHERE id = $2")
+            .bind(serde_json::to_value(chunks).map_err(|e| e.to_string())?)
+            .bind(package_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
 }
 
 pub(crate) struct PgIntelPort {

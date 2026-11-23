@@ -11,7 +11,7 @@ use axum::{
     extract::{Path, Query, Request, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{delete, get, patch, post},
+    routing::{delete, get, patch, post, put},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -39,6 +39,11 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/version", get(version))
+        .route("/settings/platform-review-rules", get(list_review_rules))
+        .route(
+            "/settings/platform-review-rules/{platform}",
+            put(upsert_review_rule),
+        )
         .route("/auth/login", post(crate::auth::login))
         .route("/agent/connect", get(crate::gateway::agent_connect))
         .route("/agent/tasks/{id}", get(get_agent_task))
@@ -116,6 +121,81 @@ async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
         "llm_provider": std::env::var("SINCY_LLM_PROVIDER").unwrap_or_else(|_| "mock".into()),
         "database": state.pool.is_some(),
     }))
+}
+
+/// GET /settings/platform-review-rules — 各平台审核门(加权字数上限 + 超限行为)。
+async fn list_review_rules(
+    State(state): State<AppState>,
+    axum::extract::Extension(_auth): axum::extract::Extension<crate::auth::AuthCtx>,
+) -> Result<Json<Value>, Response> {
+    let pool = state.pool().map_err(app_error_response)?;
+    let rows = sqlx::query(
+        "SELECT platform, weighted_limit, on_over_limit, note, updated_at FROM platform_review_rules ORDER BY platform",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
+    let items: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            json!({
+                "platform": r.get::<String, _>("platform"),
+                "weighted_limit": r.get::<i32, _>("weighted_limit"),
+                "on_over_limit": r.get::<String, _>("on_over_limit"),
+                "note": r.get::<String, _>("note"),
+                "updated_at": r.get::<chrono::DateTime<chrono::Utc>, _>("updated_at"),
+            })
+        })
+        .collect();
+    Ok(Json(json!({"items": items})))
+}
+
+/// PUT /settings/platform-review-rules/{platform} — 修改某平台审核门。
+/// body: {weighted_limit, on_over_limit: "reject"|"thread", note?}
+async fn upsert_review_rule(
+    State(state): State<AppState>,
+    axum::extract::Extension(_auth): axum::extract::Extension<crate::auth::AuthCtx>,
+    Path(platform): Path<String>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, Response> {
+    let pool = state.pool().map_err(app_error_response)?;
+    let limit = body
+        .get("weighted_limit")
+        .and_then(|v| v.as_i64())
+        .filter(|v| *v > 0)
+        .ok_or_else(|| {
+            app_error_response(AppError::non_retryable(
+                "bad_request",
+                "weighted_limit (positive int) required",
+            ))
+        })?;
+    let on_over = body
+        .get("on_over_limit")
+        .and_then(|v| v.as_str())
+        .filter(|v| *v == "reject" || *v == "thread")
+        .ok_or_else(|| {
+            app_error_response(AppError::non_retryable(
+                "bad_request",
+                "on_over_limit must be 'reject' or 'thread'",
+            ))
+        })?;
+    let note = body.get("note").and_then(|v| v.as_str()).unwrap_or("");
+    sqlx::query(
+        "INSERT INTO platform_review_rules (platform, weighted_limit, on_over_limit, note, updated_at)
+         VALUES ($1, $2, $3, $4, now())
+         ON CONFLICT (platform) DO UPDATE SET weighted_limit = EXCLUDED.weighted_limit,
+           on_over_limit = EXCLUDED.on_over_limit, note = EXCLUDED.note, updated_at = now()",
+    )
+    .bind(&platform)
+    .bind(limit as i32)
+    .bind(on_over)
+    .bind(note)
+    .execute(pool)
+    .await
+    .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
+    Ok(Json(
+        json!({"platform": platform, "weighted_limit": limit, "on_over_limit": on_over, "note": note}),
+    ))
 }
 
 async fn version() -> impl IntoResponse {
@@ -368,7 +448,7 @@ pub(crate) async fn publish_core(
     // 1.5 the referenced package must exist for this agency and be approved
     //     (FR: only approved packages are published; AI content needs human review first)
     let pkg_row = sqlx::query(
-        "SELECT approval_status FROM publishing_packages
+        "SELECT approval_status, thread_chunks FROM publishing_packages
          WHERE id = $1 AND version = $2 AND agency_id = $3",
     )
     .bind(body.package_id)
@@ -384,6 +464,17 @@ pub(crate) async fn publish_core(
         ))
     })?;
     let approval: String = pkg_row.get("approval_status");
+    // thread: 超限内容被审核门拆成多帖, 每帖一个任务(幂等键加 :tN 后缀)
+    let thread_chunks: Vec<String> = pkg_row
+        .get::<serde_json::Value, _>("thread_chunks")
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let thread_total = thread_chunks.len().max(1);
     if !matches!(approval.as_str(), "approved" | "auto_approved") {
         return Err(app_error_response(AppError::needs_user(
             "package_not_approved",
@@ -522,22 +613,35 @@ pub(crate) async fn publish_core(
     } else {
         None
     };
-    sqlx::query(
-        "INSERT INTO device_tasks (id, agency_id, brand_id, idempotency_key, state, route_id, package_id, package_version, assigned_device_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
-    )
-    .bind(task_id)
-    .bind(agency.as_uuid())
-    .bind(body.brand_id)
-    .bind(&body.idempotency_key)
-    .bind(task_state)
-    .bind(Uuid::new_v4())
-    .bind(body.package_id)
-    .bind(body.package_version as i32)
-    .bind(assigned)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
+    for t in 0..thread_total {
+        let chunk_key = if thread_total > 1 {
+            format!("{}:t{t}", body.idempotency_key)
+        } else {
+            body.idempotency_key.clone()
+        };
+        let ctx = if thread_total > 1 {
+            serde_json::json!({"thread_index": t, "thread_total": thread_total})
+        } else {
+            serde_json::Value::Null
+        };
+        sqlx::query(
+            "INSERT INTO device_tasks (id, agency_id, brand_id, idempotency_key, state, route_id, package_id, package_version, assigned_device_id, context)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        )
+        .bind(if thread_total > 1 { Uuid::new_v4() } else { task_id })
+        .bind(agency.as_uuid())
+        .bind(body.brand_id)
+        .bind(&chunk_key)
+        .bind(task_state)
+        .bind(Uuid::new_v4())
+        .bind(body.package_id)
+        .bind(body.package_version as i32)
+        .bind(assigned)
+        .bind(ctx)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
+    }
     sqlx::query(
         "INSERT INTO execution_routes (agency_id, task_id, platform, action, selected_route, capability_status, priority, skipped)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
@@ -1146,16 +1250,48 @@ async fn get_agent_task(
     // the control channel) — the agent pulls it via the transfer service.
     let package_id: Option<Uuid> = task.get("package_id");
     let package_version: Option<i32> = task.get("package_version");
+    // thread 任务: context.thread_index 指定取哪一帖的文本
+    let thread_index: Option<usize> = task
+        .try_get::<serde_json::Value, _>("context")
+        .ok()
+        .and_then(|v| {
+            v.as_object()
+                .and_then(|o| o.get("thread_index"))
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize)
+        });
     let text = match (package_id, package_version) {
-        (Some(pid), Some(pv)) => sqlx::query_scalar::<_, String>(
-            "SELECT text_content FROM publishing_packages WHERE id = $1 AND version = $2",
-        )
-        .bind(pid)
-        .bind(pv)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?
-        .unwrap_or_default(),
+        (Some(pid), Some(pv)) => {
+            let row = sqlx::query(
+                "SELECT text_content, thread_chunks FROM publishing_packages WHERE id = $1 AND version = $2",
+            )
+            .bind(pid)
+            .bind(pv)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
+            match row {
+                Some(r) => {
+                    let chunks: Vec<String> = r
+                        .get::<serde_json::Value, _>("thread_chunks")
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    match thread_index {
+                        Some(i) if !chunks.is_empty() => chunks
+                            .get(i)
+                            .cloned()
+                            .unwrap_or_else(|| r.get::<String, _>("text_content")),
+                        _ => r.get::<String, _>("text_content"),
+                    }
+                }
+                None => String::new(),
+            }
+        }
         _ => String::new(),
     };
 

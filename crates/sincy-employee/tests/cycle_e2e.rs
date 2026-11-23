@@ -308,12 +308,13 @@ async fn cycle_without_opportunity_is_noop_success() {
 }
 
 #[tokio::test]
-async fn critic_rejects_overlong_draft() {
+async fn overlong_draft_on_x_becomes_thread() {
+    // X 默认审核门: 280 加权 + 超限拆 thread, 不再打回
     struct LongLlm;
     #[async_trait]
     impl LlmPort for LongLlm {
         async fn generate(&self, _p: &str, _m: u32) -> Result<String, String> {
-            Ok("a".repeat(300)) // over X 280 limit
+            Ok("a".repeat(600)) // over X 280 limit
         }
     }
     let deps = CycleDeps {
@@ -336,8 +337,97 @@ async fn critic_rejects_overlong_draft() {
     .await
     .unwrap();
     assert!(
+        out.package_id.is_some(),
+        "overlong draft on x must be packaged as a thread, not rejected; summary={}",
+        out.summary
+    );
+}
+
+#[tokio::test]
+async fn critic_rejects_overlong_draft_on_reject_platform() {
+    // 非 X 渠道默认 reject: 超限仍然打回
+    struct LongLlm;
+    #[async_trait]
+    impl LlmPort for LongLlm {
+        async fn generate(&self, _p: &str, _m: u32) -> Result<String, String> {
+            Ok("a".repeat(300))
+        }
+    }
+    let mut e = employee(true);
+    e.channel = "mastodon".into(); // default rule: 40000/reject... use small via rule? default 40000 won't trigger
+    e.channel = "x-reject-test".into();
+    // default_for 非 x 是 40000, 300 字不会触发; 这里直接用自定义 store 规则更准:
+    struct RejectStore(MemStore);
+    #[async_trait]
+    impl CycleStore for RejectStore {
+        async fn begin_cycle(&self, e: Uuid, t: &str, i: &str) -> Result<Uuid, String> {
+            self.0.begin_cycle(e, t, i).await
+        }
+        async fn finish_cycle(&self, c: Uuid, s: &str, su: &Value) -> Result<(), String> {
+            self.0.finish_cycle(c, s, su).await
+        }
+        async fn begin_task(
+            &self,
+            c: Uuid,
+            a: AgentKind,
+            s: CycleStep,
+            i: &str,
+        ) -> Result<Uuid, String> {
+            self.0.begin_task(c, a, s, i).await
+        }
+        async fn finish_task(&self, t: Uuid, s: &str, o: &Value) -> Result<(), String> {
+            self.0.finish_task(t, s, o).await
+        }
+        async fn add_memory(&self, i: &MemoryItem) -> Result<(), String> {
+            self.0.add_memory(i).await
+        }
+        async fn add_insight(
+            &self,
+            e: Uuid,
+            c: Uuid,
+            ct: &str,
+            ev: &Value,
+            cf: f64,
+        ) -> Result<(), String> {
+            self.0.add_insight(e, c, ct, ev, cf).await
+        }
+        async fn recent_topics(&self, e: Uuid, l: usize) -> Result<Vec<String>, String> {
+            self.0.recent_topics(e, l).await
+        }
+        async fn mark_opportunity(&self, t: &str, s: &str) -> Result<(), String> {
+            self.0.mark_opportunity(t, s).await
+        }
+        async fn review_rule(&self, platform: &str) -> Result<PlatformReviewRule, String> {
+            Ok(PlatformReviewRule {
+                platform: platform.into(),
+                weighted_limit: 100,
+                on_over_limit: "reject".into(),
+            })
+        }
+    }
+    let deps = CycleDeps {
+        store: Box::new(RejectStore(MemStore::default())),
+        intel: Box::new(MockIntel),
+        llm: Box::new(LongLlm),
+        publish: Box::new(MockPublish { auto: true }),
+        stats: Box::new(MockStats),
+    };
+    let out = run_cycle(
+        &deps,
+        &e,
+        &identity(),
+        &mission(),
+        &strategy(),
+        &[],
+        "manual",
+        "c5",
+    )
+    .await
+    .unwrap();
+    assert!(
         out.package_id.is_none(),
-        "overlong draft must not be packaged"
+        "overlong draft on reject platform must not be packaged; summary={}",
+        out.summary
     );
     assert_eq!(out.summary["reason"], "critic rejected draft");
 }

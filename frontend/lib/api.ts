@@ -446,6 +446,14 @@ export interface PluginManifest {
   skills: PluginSkill[];
 }
 
+export interface ReviewRule {
+  platform: string;
+  weighted_limit: number;
+  on_over_limit: "reject" | "thread";
+  note: string;
+  updated_at: string;
+}
+
 export const api = {
   health: () => req<Health>("/healthz"),
   version: () => req<VersionInfo>("/version"),
@@ -615,6 +623,12 @@ export const api = {
     req<{ id: string; enabled: boolean }>(`/intel/sources/${id}/toggle`, { method: "POST", body: JSON.stringify({ enabled }) }),
   enableAllIntelSources: () => req<{ enabled: number }>("/intel/sources/enable-all", { method: "POST" }),
   resumeAllIntelJobs: () => req<{ resumed: number }>("/intel/jobs/resume-all", { method: "POST" }),
+  listReviewRules: () => req<{ items: ReviewRule[] }>("/settings/platform-review-rules"),
+  upsertReviewRule: (platform: string, body: { weighted_limit: number; on_over_limit: string; note?: string }) =>
+    req<ReviewRule>(`/settings/platform-review-rules/${encodeURIComponent(platform)}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
   intelTrends: () => req<IntelTrends>("/intel/trends"),
   collectNow: () =>
     req<CollectResult>("/intel/collect", { method: "POST" }),

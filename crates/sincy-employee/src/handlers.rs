@@ -61,6 +61,15 @@ pub fn handler_skill_names() -> Vec<&'static str> {
     v
 }
 
+/// 取平台审核规则: 优先 store(platform_review_rules 表), 回退内置默认值。
+async fn rule_for(ctx: &SkillRunCtx<'_>) -> crate::cycle::PlatformReviewRule {
+    ctx.deps
+        .store
+        .review_rule(&ctx.employee.channel)
+        .await
+        .unwrap_or_else(|_| crate::cycle::PlatformReviewRule::default_for(&ctx.employee.channel))
+}
+
 /// 插件化展示:每个内置 handler 的"具体干什么"说明 (skill 名 → 用途描述)。
 pub fn skill_what_it_does() -> Vec<(&'static str, &'static str)> {
     vec![
@@ -375,7 +384,7 @@ impl SkillHandler for BuiltinHandlers {
                         .and_then(|v| v.as_str())
                         .unwrap_or("zh-CN"),
                     channel = ctx.employee.channel,
-                    limit = crate::cycle::platform_text_limit(&ctx.employee.channel),
+                    limit = rule_for(ctx).await.weighted_limit,
                     evidence = input.get("evidence").cloned().unwrap_or(json!([])),
                     recent = input.get("recent").cloned().unwrap_or(json!([])),
                 );
@@ -464,16 +473,19 @@ impl SkillHandler for BuiltinHandlers {
             }
             "platform_compliance" | "copyright_check" => {
                 let text = input.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                let limit = crate::cycle::platform_text_limit(&ctx.employee.channel);
+                let rule = rule_for(ctx).await;
                 let hits: Vec<&str> = ctx
                     .no_go
                     .iter()
                     .filter(|ng| !ng.is_empty() && text.to_lowercase().contains(&ng.to_lowercase()))
                     .map(|s| s.as_str())
                     .collect();
+                // 长度是否超限由审核门按规则处理 (reject 打回 / thread 拆帖), 这里只查 no_go
+                let over = crate::cycle::weighted_len(text) > rule.weighted_limit;
                 Ok(json!({
-                    "skill": skill, "pass": hits.is_empty() && text.len() <= limit * 2,
-                    "no_go_hits": hits, "len": text.len(), "limit": limit,
+                    "skill": skill, "pass": hits.is_empty(),
+                    "no_go_hits": hits, "len": text.len(), "limit": rule.weighted_limit,
+                    "over_limit": over, "on_over_limit": rule.on_over_limit,
                 }))
             }
 
@@ -505,15 +517,17 @@ impl SkillHandler for BuiltinHandlers {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let limit = crate::cycle::platform_text_limit(&ctx.employee.channel);
-                let truncated = crate::cycle::weighted_len(&text) > limit;
-                let out = if truncated {
-                    text.chars().take(limit).collect::<String>()
+                let rule = rule_for(ctx).await;
+                let over = crate::cycle::weighted_len(&text) > rule.weighted_limit;
+                // 超限不硬截断: thread 平台交给审核门拆串行帖, reject 平台由审核门打回
+                let out = if over && rule.on_over_limit == "reject" {
+                    text.chars().take(rule.weighted_limit).collect::<String>()
                 } else {
                     text
                 };
                 Ok(json!({ "skill": skill, "channel": ctx.employee.channel,
-                           "limit": limit, "truncated": truncated, "text": out }))
+                           "limit": rule.weighted_limit, "on_over_limit": rule.on_over_limit,
+                           "truncated": over && rule.on_over_limit == "reject", "text": out }))
             }
             "account_selection" => Ok(json!({
                 "skill": skill, "channel": ctx.employee.channel,

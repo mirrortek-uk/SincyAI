@@ -114,6 +114,132 @@ pub trait CycleStore: Send + Sync {
     ) -> Result<Uuid, String> {
         Err("add_experiment not supported by this CycleStore".into())
     }
+    /// 平台审核规则 (platform_review_rules)。默认返回内置默认值, 由云端 PG 实现读表。
+    async fn review_rule(&self, platform: &str) -> Result<PlatformReviewRule, String> {
+        Ok(PlatformReviewRule::default_for(platform))
+    }
+    /// 把 thread 拆分结果写回发布包。默认不支持, 由云端 PG 实现写 publishing_packages.thread_chunks。
+    async fn set_thread_chunks(&self, _package_id: Uuid, _chunks: &[String]) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// 平台审核门规则: 加权字数上限 + 超限行为 (reject=打回 / thread=拆串行帖)。
+/// 默认值内置在代码里, 生产环境由 platform_review_rules 表覆盖(设置页可改)。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PlatformReviewRule {
+    pub platform: String,
+    pub weighted_limit: usize,
+    pub on_over_limit: String,
+}
+
+impl PlatformReviewRule {
+    pub fn default_for(platform: &str) -> Self {
+        if platform == "x" {
+            Self {
+                platform: platform.into(),
+                weighted_limit: 280,
+                on_over_limit: "thread".into(),
+            }
+        } else {
+            Self {
+                platform: platform.into(),
+                weighted_limit: 40_000,
+                on_over_limit: "reject".into(),
+            }
+        }
+    }
+}
+
+/// 按加权长度拆分 thread: 优先段落边界, 再句子边界, 最后硬切。
+/// 每块加权长度都不超过 limit (CJK 字符权重 2, 见 weighted_len)。
+pub fn split_thread(text: &str, limit: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut cur_w = 0usize;
+    fn push_chunk(cur: &mut String, cur_w: &mut usize, out: &mut Vec<String>) {
+        if !cur.trim().is_empty() {
+            out.push(std::mem::take(cur));
+        }
+        cur.clear();
+        *cur_w = 0;
+    }
+    // 先按段落切
+    for para in text.split("\n\n") {
+        let para_w = weighted_len(para);
+        if para_w <= limit {
+            if cur_w + para_w + 2 > limit && !cur.is_empty() {
+                push_chunk(&mut cur, &mut cur_w, &mut out);
+            }
+            if !cur.is_empty() {
+                cur.push_str("\n\n");
+                cur_w += 2;
+            }
+            cur.push_str(para);
+            cur_w += para_w;
+        } else {
+            // 段落本身超限: 按句子切
+            if !cur.is_empty() {
+                push_chunk(&mut cur, &mut cur_w, &mut out);
+            }
+            for sent in split_sentences(para) {
+                let sent_w = weighted_len(&sent);
+                if sent_w > limit {
+                    // 句子也超限: 硬切
+                    let mut rest = sent.as_str();
+                    while weighted_len(rest) > limit {
+                        let (head, tail) = take_weighted(rest, limit);
+                        out.push(head.to_string());
+                        rest = tail;
+                    }
+                    if !rest.trim().is_empty() {
+                        out.push(rest.to_string());
+                    }
+                } else if cur_w + sent_w > limit && !cur.is_empty() {
+                    push_chunk(&mut cur, &mut cur_w, &mut out);
+                    cur.push_str(&sent);
+                    cur_w = sent_w;
+                } else {
+                    cur.push_str(&sent);
+                    cur_w += sent_w;
+                }
+            }
+        }
+    }
+    push_chunk(&mut cur, &mut cur_w, &mut out);
+    if out.is_empty() && !text.trim().is_empty() {
+        out.push(text.to_string());
+    }
+    out
+}
+
+/// 按中英文句末标点切句。
+fn split_sentences(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for c in s.chars() {
+        cur.push(c);
+        if matches!(c, '。' | '！' | '？' | '.' | '!' | '?') {
+            out.push(std::mem::take(&mut cur));
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// 从头取不超过 limit 加权长度的前缀, 返回 (前缀, 剩余)。
+fn take_weighted(s: &str, limit: usize) -> (&str, &str) {
+    let mut w = 0usize;
+    for (i, c) in s.char_indices() {
+        let cw = if (c as u32) >= 0x1100 { 2 } else { 1 };
+        if w + cw > limit {
+            return (&s[..i], &s[i..]);
+        }
+        w += cw;
+    }
+    (s, "")
 }
 
 /// World Intelligence port (L7 adapter, WI §20).
@@ -214,6 +340,12 @@ impl CycleStore for Box<dyn CycleStore> {
     }
     async fn add_experiment(&self, e: Uuid, h: &str, v: &str) -> Result<Uuid, String> {
         (**self).add_experiment(e, h, v).await
+    }
+    async fn review_rule(&self, platform: &str) -> Result<PlatformReviewRule, String> {
+        (**self).review_rule(platform).await
+    }
+    async fn set_thread_chunks(&self, p: Uuid, c: &[String]) -> Result<(), String> {
+        (**self).set_thread_chunks(p, c).await
     }
 }
 
@@ -440,6 +572,13 @@ pub async fn run_cycle(
     )
     .await?;
 
+    // 平台审核规则: 优先读 platform_review_rules 表(设置页可改), 回退内置默认值
+    let rule = deps
+        .store
+        .review_rule(&employee.channel)
+        .await
+        .unwrap_or_else(|_| PlatformReviewRule::default_for(&employee.channel));
+
     // --- Create: LLM draft via Content Factory port
     let prompt = format!(
         "You are {name} ({role}). Mission: {mission}. Audience: {audience:?}. Voice: {voice}. Pillars: {pillars:?}. Language: {language}.\n\
@@ -453,7 +592,7 @@ pub async fn run_cycle(
         pillars = strategy.pillars,
         language = identity.language,
         channel = employee.channel,
-        limit = platform_text_limit(&employee.channel),
+        limit = rule.weighted_limit,
         topic = opp.topic,
         evidence = opp.evidence,
         recent = ctx.recent_topics,
@@ -506,17 +645,27 @@ pub async fn run_cycle(
     .await?;
 
     // --- Review: critic gate (length, duplication, boundaries)
-    let limit = platform_text_limit(&employee.channel);
+    // 审核门来自可配置规则: 超限时 reject=打回 / thread=拆成串行帖放行
+    let limit = rule.weighted_limit;
     let draft_weight = weighted_len(&draft);
+    let mut thread_chunks: Vec<String> = Vec::new();
     let quality_skills: Vec<&str> = skills_for_agent(skills, &AgentKind::CriticCompliance)
         .iter()
         .map(|s| s.name.as_str())
         .collect();
     let mut verdict = json!({"pass": true, "checks": {}, "skills": quality_skills});
     if draft_weight > limit {
-        verdict["pass"] = json!(false);
-        verdict["checks"]["length"] =
-            json!({"ok": false, "limit": limit, "weighted_len": draft_weight});
+        if rule.on_over_limit == "thread" {
+            thread_chunks = split_thread(&draft, limit);
+            verdict["checks"]["length"] = json!({
+                "ok": true, "limit": limit, "weighted_len": draft_weight,
+                "action": "thread", "chunks": thread_chunks.len(),
+            });
+        } else {
+            verdict["pass"] = json!(false);
+            verdict["checks"]["length"] =
+                json!({"ok": false, "limit": limit, "weighted_len": draft_weight});
+        }
     }
     if ctx.recent_topics.iter().any(|r| r == &opp.topic) {
         verdict["pass"] = json!(false);
@@ -573,6 +722,12 @@ pub async fn run_cycle(
         .publish
         .save_package(employee, &opp.topic, &draft)
         .await?;
+    if !thread_chunks.is_empty() {
+        deps.store
+            .set_thread_chunks(package_id, &thread_chunks)
+            .await
+            .ok();
+    }
     let mut receipt = None;
     let mut task_id = None;
     let mut task_state = None;
@@ -781,4 +936,49 @@ async fn step(
 /// 拉运行指标 (StatsPort), 失败返回空对象 —— 学习闭环不因指标缺失中断
 async fn ctx_deps_stats(deps: &CycleDeps) -> Value {
     deps.stats.metrics().await.unwrap_or_else(|_| json!({}))
+}
+
+#[cfg(test)]
+mod thread_tests {
+    use super::*;
+
+    #[test]
+    fn split_short_text_stays_single() {
+        let chunks = split_thread("hello world", 280);
+        assert_eq!(chunks, vec!["hello world".to_string()]);
+    }
+
+    #[test]
+    fn split_respects_weighted_limit_cjk_counts_double() {
+        // 200 个中文字符 = 加权 400 > 280, 必须被拆开
+        let text = "汉".repeat(200);
+        let chunks = split_thread(&text, 280);
+        assert!(chunks.len() >= 2);
+        for c in &chunks {
+            assert!(
+                weighted_len(c) <= 280,
+                "chunk weight {} > 280",
+                weighted_len(c)
+            );
+        }
+        assert_eq!(chunks.concat(), text);
+    }
+
+    #[test]
+    fn split_prefers_paragraph_boundary() {
+        let text = format!("{}\n\n{}", "a".repeat(200), "b".repeat(200));
+        let chunks = split_thread(&text, 280);
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks[0].starts_with('a'));
+        assert!(chunks[1].starts_with('b'));
+    }
+
+    #[test]
+    fn default_rule_x_is_thread_280() {
+        let r = PlatformReviewRule::default_for("x");
+        assert_eq!(r.weighted_limit, 280);
+        assert_eq!(r.on_over_limit, "thread");
+        let r2 = PlatformReviewRule::default_for("youtube");
+        assert_eq!(r2.on_over_limit, "reject");
+    }
 }
