@@ -70,6 +70,12 @@ async fn setup() -> Option<(sqlx::PgPool, u16, String, Uuid)> {
     mgr.complete_registration(ch.device_id, &ch.nonce, &proof)
         .await
         .unwrap();
+    // 设备路由按心跳判在线: 注册后立刻心跳
+    sqlx::query("UPDATE devices SET last_seen = now() WHERE id = $1")
+        .bind(ch.device_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     // intel seed (normally from migration 0017, truncated above)
     sqlx::query("INSERT INTO intelligence_sources (id, name, category, access_method, capabilities) VALUES ('trendradar','TrendRadar','trend','ExternalService','[\"trend_search\"]'), ('reach-mcp','reach-mcp','social','MCPServer','[\"social_search\",\"x_research\"]') ON CONFLICT (id) DO NOTHING")
         .execute(&pool).await.unwrap();

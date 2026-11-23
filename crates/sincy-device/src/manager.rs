@@ -169,10 +169,6 @@ impl<'a> DeviceManager<'a> {
             .bind(device_id)
             .execute(self.pool)
             .await?;
-        sqlx::query("UPDATE device_sessions SET state = 'active', token_hash = '' WHERE id = $1")
-            .bind(sess.get::<Uuid, _>("id"))
-            .execute(self.pool)
-            .await?;
         let token = self
             .jwt
             .issue(
@@ -181,6 +177,14 @@ impl<'a> DeviceManager<'a> {
                 vec!["device".into()],
             )
             .map_err(|e| DeviceError::InvalidToken(e.to_string()))?;
+        // 会话行升级为 active, 并存入 token 哈希 + 60 天过期 (撤销/轮换据此精确踢下线)
+        sqlx::query(
+            "UPDATE device_sessions SET state = 'active', token_hash = $2, expires_at = now() + interval '60 days' WHERE id = $1",
+        )
+        .bind(sess.get::<Uuid, _>("id"))
+        .bind(hash_secret(token.as_bytes()))
+        .execute(self.pool)
+        .await?;
         Ok(SessionToken {
             token,
             device_id,
@@ -267,8 +271,8 @@ impl<'a> DeviceManager<'a> {
             .map_err(|e| DeviceError::InvalidToken(e.to_string()))?;
         let token_hash = hash_secret(token.as_bytes());
         sqlx::query(
-            "INSERT INTO device_sessions (id, agency_id, device_id, token_hash, state)
-             VALUES ($1, $2, $3, $4, 'active')",
+            "INSERT INTO device_sessions (id, agency_id, device_id, token_hash, state, expires_at)
+             VALUES ($1, $2, $3, $4, 'active', now() + interval '60 days')",
         )
         .bind(Uuid::new_v4())
         .bind(agency_id.as_uuid())
@@ -311,10 +315,14 @@ impl<'a> DeviceManager<'a> {
         if row.get::<String, _>("state") != "active" {
             return Err(DeviceError::Revoked);
         }
+        let token_hash = hash_secret(token.as_bytes());
         let active_sessions: i64 = sqlx::query(
-            "SELECT count(*) FROM device_sessions WHERE device_id = $1 AND state = 'active'",
+            "SELECT count(*) FROM device_sessions
+             WHERE device_id = $1 AND state = 'active' AND token_hash = $2
+               AND (expires_at IS NULL OR expires_at > now())",
         )
         .bind(device_id)
+        .bind(token_hash)
         .fetch_one(self.pool)
         .await?
         .get::<i64, _>(0);
@@ -340,6 +348,52 @@ impl<'a> DeviceManager<'a> {
             .execute(self.pool)
             .await?;
         Ok(())
+    }
+
+    /// Rotate a device token: revoke all active sessions, issue a fresh 60-day token.
+    pub async fn rotate(
+        &self,
+        agency_id: AgencyId,
+        device_id: Uuid,
+    ) -> Result<SessionToken, DeviceError> {
+        let row = sqlx::query("SELECT state FROM devices WHERE id = $1 AND agency_id = $2")
+            .bind(device_id)
+            .bind(agency_id.as_uuid())
+            .fetch_optional(self.pool)
+            .await?;
+        let Some(r) = row else {
+            return Err(DeviceError::NotFound);
+        };
+        if r.get::<String, _>("state") != "active" {
+            return Err(DeviceError::Revoked);
+        }
+        sqlx::query("UPDATE device_sessions SET state = 'revoked' WHERE device_id = $1 AND state = 'active'")
+            .bind(device_id)
+            .execute(self.pool)
+            .await?;
+        let token = self
+            .jwt
+            .issue(
+                &device_id.to_string(),
+                &agency_id.to_string(),
+                vec!["device".into()],
+            )
+            .map_err(|e| DeviceError::InvalidToken(e.to_string()))?;
+        sqlx::query(
+            "INSERT INTO device_sessions (id, agency_id, device_id, token_hash, state, expires_at)
+             VALUES ($1, $2, $3, $4, 'active', now() + interval '60 days')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(agency_id.as_uuid())
+        .bind(device_id)
+        .bind(hash_secret(token.as_bytes()))
+        .execute(self.pool)
+        .await?;
+        Ok(SessionToken {
+            token,
+            device_id,
+            agency_id,
+        })
     }
 
     pub async fn heartbeat(&self, device_id: Uuid) -> Result<(), DeviceError> {

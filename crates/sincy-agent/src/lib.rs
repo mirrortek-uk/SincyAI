@@ -23,4 +23,5 @@ pub use adb_io::AdbIo;
 pub use client::{AgentClient, AgentError, TaskBrief};
 pub use execute::{
     AdapterExecution, ScriptedIo, TaskOutcome, execute_signed_adapter, execute_signed_adapter_ctx,
+    execute_signed_adapter_ctx_v2, verify_signed,
 };

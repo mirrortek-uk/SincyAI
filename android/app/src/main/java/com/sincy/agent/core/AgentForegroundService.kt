@@ -274,6 +274,7 @@ class AgentForegroundService : Service() {
         val resultJson = AdapterRuntime.runAdapter(
             brief.getString("adapter_yaml"),
             brief.getString("signature"),
+            brief.optString("signature_scheme", "hmac-sha256"),
             appVersion,
             taskContext,
         )

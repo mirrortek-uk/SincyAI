@@ -8,7 +8,7 @@ use sincy_adapter::interpreter::{
     ExecEvent, ExecStatus, Interpreter, MockSnapshot, PlatformIo, ScreenSnapshot,
 };
 use sincy_adapter::schema::{AdapterDefinition, FlowStep};
-use sincy_adapter::sign::verify_definition;
+use sincy_adapter::sign::{SignatureScheme, verify_definition, verify_definition_scheme};
 use sincy_adapter::version_range::VersionRange;
 use thiserror::Error;
 
@@ -92,6 +92,41 @@ pub fn execute_signed_adapter(
     )
 }
 
+/// 按签名方案验签: scheme=None 时回退 hmac (兼容旧 brief)。
+pub fn verify_signed(
+    canonical: &str,
+    signature: &str,
+    key_material: &[u8],
+    scheme: Option<SignatureScheme>,
+) -> Result<(), sincy_adapter::sign::SigningError> {
+    match scheme {
+        Some(sc) => verify_definition_scheme(sc, key_material, canonical, signature),
+        None => verify_definition(key_material, canonical, signature),
+    }
+}
+
+/// v2: 带签名方案的执行入口 (设备端公钥验签 ed25519, 旧 hmac 降级兼容)。
+#[allow(clippy::too_many_arguments)]
+pub fn execute_signed_adapter_ctx_v2(
+    adapter_yaml: &str,
+    signature: &str,
+    signing_key: &[u8],
+    signature_scheme: &str,
+    app_version: &str,
+    io: &mut dyn PlatformIo,
+    media_count: usize,
+    task_context: Option<serde_json::Value>,
+) -> Result<AdapterExecution, ExecuteError> {
+    let scheme = SignatureScheme::parse(signature_scheme);
+    let def = AdapterDefinition::from_yaml(adapter_yaml)
+        .map_err(|e| ExecuteError::InvalidDefinition(e.to_string()))?;
+    let canonical =
+        serde_json::to_string(&def).map_err(|e| ExecuteError::InvalidDefinition(e.to_string()))?;
+    verify_signed(&canonical, signature, signing_key, scheme)
+        .map_err(|e| ExecuteError::BadSignature(e.to_string()))?;
+    execute_verified(def, app_version, io, media_count, task_context)
+}
+
 /// Same as execute_signed_adapter, but allows a task context (e.g. agentic goal).
 pub fn execute_signed_adapter_ctx(
     adapter_yaml: &str,
@@ -106,9 +141,19 @@ pub fn execute_signed_adapter_ctx(
         .map_err(|e| ExecuteError::InvalidDefinition(e.to_string()))?;
     let canonical =
         serde_json::to_string(&def).map_err(|e| ExecuteError::InvalidDefinition(e.to_string()))?;
-    verify_definition(signing_key, &canonical, signature)
+    verify_signed(&canonical, signature, signing_key, None)
         .map_err(|e| ExecuteError::BadSignature(e.to_string()))?;
+    execute_verified(def, app_version, io, media_count, task_context)
+}
 
+/// 验签通过后的执行体 (v1/v2 共用)。
+fn execute_verified(
+    def: AdapterDefinition,
+    app_version: &str,
+    io: &mut dyn PlatformIo,
+    media_count: usize,
+    task_context: Option<serde_json::Value>,
+) -> Result<AdapterExecution, ExecuteError> {
     // 验签之后才注入内容包文本: flow 里 value == "package.text" 的占位符
     // 替换为 task_context.package_text (数据, 不参与签名)
     let mut def = def;

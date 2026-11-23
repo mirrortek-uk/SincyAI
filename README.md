@@ -10,6 +10,27 @@ Content Factory 生产多模态内容，经质量与合规门禁后封装为不�
 - `Sincy-02_TDD_系统技术架构与详细设计书_V1.1.docx`（ADR-001…ADR-015）
 - `Sincy-03_项目开发与实施指导书_V1.1.docx`（WP-01…WP-16）
 
+## 产品愿景与当前状态
+
+Sincy 不是"AI 生成一段文案"的工具，而是 **AI Digital Employee（数字员工）**：
+用户只给一个运营目标（如"在 X 上建立 AI agents 领域的品牌权威")，数字员工自己完成
+感知 → 理解 → 决策 → 计划 → 创作 → 审核 → 执行 → 衡量 → 学习 → 适应的完整周期。
+
+当前已跑通的真实能力（非 mock)：
+
+- **数字员工运营周期**: 6 个逻辑 Agent × 10 步周期，9 个 skill 域 / 77 个 skill 中 59 个已落地真 handler
+  （research 直查情报库、content/creative 走 LLM、publishing 真派设备任务），每步证据落库可审计
+- **世界情报 World Intelligence**: 26 个注册信源、定时采集入库（dedup 去重）、趋势聚合（velocity/growth/跨平台）、
+  机会引擎打分、信源健康审计（healthy/degraded/failed/not_configured)
+- **手机 Agent 真机执行**: 无障碍节点树 + Set-of-Mark 截图视觉融合，云端 LLM 逐步决策，
+  人工化手势（贝塞尔滑动/抖动/压力变化）注入真实触摸；已在真实小米设备上验证通过 X 回帖全流程
+- **全自动回帖流水线**: `POST /setup/reply_auto` 搜索 X → 打开最相关帖子 → 云端 LLM 按品牌语气生成人类口吻回复
+  → 自动 approved → 签名 adapter 在详情页发出（回帖免人工审核）
+- **安全与治理**: RLS 多租户隔离 + 负向测试、Argon2id、设备配对 challenge-response、Adapter HMAC 签名 +
+  设备端验签、side-effect 后禁止自动重试、kill switch、预算熔断
+
+快速上手（生产模式验证路径，本地 sincy_prod)：见下文「本地启动」；控制台 `http://localhost:3000`。
+
 ## 技术栈基线（TDD 3）
 
 | 层 | 技术 |
@@ -139,15 +160,15 @@ cargo run -p cloud-api          # http://127.0.0.1:8080/api/v1/healthz
 | WP-07/08 | Device Registry（challenge-response、JWT 会话）+ WSS 网关 | ✅ 已完成 |
 | WP-09 | 任务编排状态机（守卫迁移、幂等、kill switch） | ✅ 已完成 |
 | WP-10 | Transfer Service（8 MiB 分块、双重 sha256、断点续传） | ✅ 已完成 |
-| WP-11/12 | Android Agent + 屏幕感知 | ⏳ 骨架/待真机矩阵（无设备环境，mock only） |
-| WP-13 | App Adapter 框架与 Drift 检测（schema、HMAC 签名、version_range、降级） | ✅ 已完成 |
+| WP-11/12 | Android Agent：无障碍感知 + 录屏视觉(SoM) + agentic LLM 闭环 + 人工化手势，真机已验证 X 回帖 | ✅ 已完成（真机验证通过） |
+| WP-13 | App Adapter 框架与 Drift 检测（schema、签名验签、version_range、降级）+ agentic adapter(system.agentic) | ✅ 已完成 |
 | WP-14 | 分析回流 + 急停 + 预算熔断（sincy-ai：BudgetChecker、LlmGateway、Analytics） | ✅ 已完成 |
 | WP-15 | 可观测性与运维（/metrics、日志脱敏、重入队恢复、Runbook、备份/PITR 脚本） | ✅ 已完成 |
 | WP-16 | Windows Agent | ⏳ MVP 后 |
 | — | 前端 Agency Console（Next.js：总览/发布/急停/指标） | ✅ 骨架已完成（`frontend/`） |
 
 质量门禁当前状态：`cargo fmt` / `cargo clippy --workspace --all-targets -- -D warnings` / 
-`SINCY_TEST_DATABASE_URL=... cargo test --workspace` 全绿（42 个测试套件）。
+`SINCY_TEST_DATABASE_URL=... cargo test --workspace` 全绿（62 个测试套件）。
 集成测试依赖本地 PostgreSQL：`SINCY_TEST_DATABASE_URL="postgres://postgres:password@127.0.0.1:5432/sincy_test"`。
 
 ADR 落地口径见 `docs/ADR.md`；故障恢复见 `docs/runbook.md`；备份/PITR 见 `docs/backup.md`。

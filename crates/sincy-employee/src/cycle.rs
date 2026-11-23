@@ -104,6 +104,16 @@ pub trait CycleStore: Send + Sync {
     ) -> Result<(), String>;
     async fn recent_topics(&self, employee_id: Uuid, limit: usize) -> Result<Vec<String>, String>;
     async fn mark_opportunity(&self, topic: &str, status: &str) -> Result<(), String>;
+    /// 落实验假说 (learning 闭环: Analytics → Hypothesis → Experiment)。
+    /// 默认不支持, 由云端 PG 实现写 employee_experiments。
+    async fn add_experiment(
+        &self,
+        _employee_id: Uuid,
+        _hypothesis: &str,
+        _variable: &str,
+    ) -> Result<Uuid, String> {
+        Err("add_experiment not supported by this CycleStore".into())
+    }
 }
 
 /// World Intelligence port (L7 adapter, WI §20).
@@ -201,6 +211,9 @@ impl CycleStore for Box<dyn CycleStore> {
     }
     async fn mark_opportunity(&self, t: &str, s: &str) -> Result<(), String> {
         (**self).mark_opportunity(t, s).await
+    }
+    async fn add_experiment(&self, e: Uuid, h: &str, v: &str) -> Result<Uuid, String> {
+        (**self).add_experiment(e, h, v).await
     }
 }
 
@@ -686,10 +699,37 @@ pub async fn run_cycle(
     )
     .await?;
 
-    // --- Adapt: propose tactical adjustment (recommendation only; strategy
-    // changes need approval per DE §7)
+    // --- Adapt: learning 闭环 — 把本周期结果 + 运行指标喂给 llm 生成可检验假说,
+    // 落 employee_experiments 表 (Analytics ≠ Learning, 要产出 hypothesis + experiment)
+    let metrics = ctx_deps_stats(deps).await;
+    let hyp_run = run_skill(
+        "strategy_optimization",
+        &json!({
+            "cycle_summary": {
+                "topic": opp.topic, "score": opp.score, "task_state": task_state,
+                "draft_len": draft.chars().count(),
+            },
+            "metrics": metrics,
+        }),
+        &hctx,
+    )
+    .await
+    .ok();
+    let hypothesis = hyp_run
+        .as_ref()
+        .and_then(|r| r.output.get("raw").and_then(|v| v.as_str()))
+        .map(|s| s.chars().take(400).collect::<String>())
+        .unwrap_or_else(|| format!("increase weight of pillar related to '{}'", opp.topic));
+    let experiment_id = deps
+        .store
+        .add_experiment(employee.id, &hypothesis, "hook_structure")
+        .await
+        .ok();
     let adapt = json!({
-        "recommendation": format!("increase weight of pillar related to '{}'", opp.topic),
+        "recommendation": hypothesis,
+        "hypothesis": hypothesis,
+        "experiment_id": experiment_id,
+        "handler": hyp_run.as_ref().map(|r| json!({"skill": r.skill, "duration_ms": r.duration_ms})),
         "requires_approval": true,
     });
     step(
@@ -736,4 +776,9 @@ async fn step(
     let key = format!("{idem_key}:{}:{}", agent.as_str(), s.as_str());
     let t = store.begin_task(cycle_id, agent, s, &key).await?;
     store.finish_task(t, "SUCCEEDED", &output).await
+}
+
+/// 拉运行指标 (StatsPort), 失败返回空对象 —— 学习闭环不因指标缺失中断
+async fn ctx_deps_stats(deps: &CycleDeps) -> Value {
+    deps.stats.metrics().await.unwrap_or_else(|_| json!({}))
 }

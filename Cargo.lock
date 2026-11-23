@@ -2548,6 +2548,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
+ "ed25519-dalek",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -2561,7 +2562,11 @@ dependencies = [
 name = "sincy-agent"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "ed25519-dalek",
  "futures-util",
+ "hex",
+ "rand 0.8.8",
  "reqwest",
  "serde",
  "serde_json",
@@ -2580,6 +2585,7 @@ dependencies = [
 name = "sincy-agent-core"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
  "jni",
  "serde",
  "serde_json",

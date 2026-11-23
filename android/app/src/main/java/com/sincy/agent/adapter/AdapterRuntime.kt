@@ -41,7 +41,7 @@ object AdapterRuntime {
      * @param appVersion      installed versionName of the target app
      * @param taskContextJson task context JSON (e.g. {"goal": "..."} for agentic tasks); "" = none
      */
-    external fun runAdapter(adapterJson: String, signature: String, appVersion: String, taskContextJson: String): String
+    external fun runAdapter(adapterJson: String, signature: String, signatureScheme: String, appVersion: String, taskContextJson: String): String
 
     /** Cloud base URL + device token, set by AgentForegroundService on connect; used by llmDecide. */
     @Volatile var cloudBase: String = ""

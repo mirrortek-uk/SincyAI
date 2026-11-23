@@ -76,6 +76,11 @@ async fn register_device(pool: &sqlx::PgPool, agency: AgencyId) -> (Uuid, String
         )
         .await
         .expect("complete");
+    sqlx::query("UPDATE devices SET last_seen = now() WHERE id = $1")
+        .bind(ch.device_id)
+        .execute(pool)
+        .await
+        .unwrap();
     (ch.device_id, session.token)
 }
 

@@ -43,3 +43,7 @@ android/app/build/
 keys/
 android/keys/
 android/key.properties
+
+# build artifacts
+*.rlib
+*.rlib.*

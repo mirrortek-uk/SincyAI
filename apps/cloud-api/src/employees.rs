@@ -1049,6 +1049,27 @@ impl CycleStore for PgCycleStore {
             .map(|_| ())
             .map_err(|e| e.to_string())
     }
+
+    async fn add_experiment(
+        &self,
+        employee_id: Uuid,
+        hypothesis: &str,
+        variable: &str,
+    ) -> Result<Uuid, String> {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO employee_experiments (id, employee_id, hypothesis, variable, status) \
+             VALUES ($1, $2, $3, $4, 'proposed')",
+        )
+        .bind(id)
+        .bind(employee_id)
+        .bind(hypothesis)
+        .bind(variable)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(id)
+    }
 }
 
 pub(crate) struct PgIntelPort {
@@ -1081,8 +1102,8 @@ impl IntelPort for PgIntelPort {
             // 品牌相关性: topic + 标题 vs 支柱/受众
             let haystack = format!("{topic} {title}");
             let pm = pillar_match(&haystack, &ctx.pillars, &ctx.audience);
-            if pm < 0.2 {
-                continue; // 与品牌支柱不沾边的直接不给员工看
+            if pm < 0.45 {
+                continue; // 与品牌支柱不沾边的直接不给员工看 (单关键词蹭分已不够)
             }
             // 用 rationale 里的趋势分量重打分
             let velocity = rationale
@@ -1113,7 +1134,18 @@ impl IntelPort for PgIntelPort {
                 sentiment: 0.5,
                 window_hours: 24,
             };
-            let score = score_opportunity(pm, &trend, 0.2, freshness);
+            let mut score = score_opportunity(pm, &trend, 0.2, freshness);
+            // 噪声信源降权: 只有 wikipedia-rc 这类百科流水的 topic 衰减 50%
+            let plats = rationale
+                .get("platforms")
+                .and_then(|p| p.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let only_noise =
+                !plats.is_empty() && plats.iter().all(|p| p.as_str() == Some("wikipedia-rc"));
+            if only_noise {
+                score *= 0.5;
+            }
             let mut rat = rationale.clone();
             rat["pillar_match"] = json!(pm);
             // 证据解析成可读条目

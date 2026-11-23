@@ -10,11 +10,15 @@
 //! screens are never auto-solved (WAITING_USER).
 
 use sincy_adapter::interpreter::PlatformIo;
-use sincy_agent::{execute_signed_adapter_ctx, AdapterExecution, TaskOutcome};
+use sincy_agent::{execute_signed_adapter_ctx_v2, AdapterExecution, TaskOutcome};
 
 /// Pinned platform adapter-signing key. In production builds this is compiled
 /// in from a build-time secret (not from network config); the dev build uses
 /// the local dev key, matching migrations/0015_seed_x_adapter.sql.
+/// Ed25519 公钥 (烧录进设备, 只有公钥 —— 私钥只在云端签名端)。
+/// 对应 keys/adapter_signing_ed25519.key (gitignored)。
+pub const PINNED_VERIFYING_KEY_B64: &str = "PBiZF2NoULhRKTsdvX68s7ygJEOQYXUyBRUvPU3tMSg=";
+
 #[cfg(debug_assertions)]
 pub const PINNED_SIGNING_KEY: &[u8] = b"sincy-dev-adapter-signing-key";
 #[cfg(not(debug_assertions))]
@@ -67,10 +71,41 @@ pub fn run_adapter(
     media_count: usize,
     task_context: Option<serde_json::Value>,
 ) -> Result<RunResult, String> {
-    let ex = execute_signed_adapter_ctx(
+    run_adapter_scheme(
         adapter_yaml,
         signature,
         signing_key,
+        "hmac-sha256",
+        app_version,
+        io,
+        media_count,
+        task_context,
+    )
+}
+
+/// 带签名方案的入口: ed25519 时用烧录的公钥验签 (PINNED_VERIFYING_KEY), 私钥永不下发设备。
+#[allow(clippy::too_many_arguments)]
+pub fn run_adapter_scheme(
+    adapter_yaml: &str,
+    signature: &str,
+    signing_key: &[u8],
+    signature_scheme: &str,
+    app_version: &str,
+    io: &mut dyn PlatformIo,
+    media_count: usize,
+    task_context: Option<serde_json::Value>,
+) -> Result<RunResult, String> {
+    let key_material: &[u8] = if signature_scheme == "ed25519" {
+        // 编译期嵌入的公钥 (PINNED_VERIFYING_KEY_B64 的字节形式)
+        &PINNED_VERIFYING_KEY_BYTES
+    } else {
+        signing_key
+    };
+    let ex = execute_signed_adapter_ctx_v2(
+        adapter_yaml,
+        signature,
+        key_material,
+        signature_scheme,
         app_version,
         io,
         media_count,
@@ -80,12 +115,20 @@ pub fn run_adapter(
     Ok(RunResult::from(ex))
 }
 
+/// PINNED_VERIFYING_KEY_B64 解码后的 32 字节公钥 (lazy static, 避免引入 once_cell)。
+static PINNED_VERIFYING_KEY_BYTES: [u8; 32] = [
+    0x3c, 0x18, 0x99, 0x17, 0x63, 0x68, 0x50, 0xb8, 0x51, 0x29, 0x3b, 0x1d, 0xbd, 0x7e, 0xbc, 0xb3,
+    0xbc, 0xa0, 0x24, 0x43, 0x90, 0x61, 0x75, 0x32, 0x05, 0x15, 0x2f, 0x3d, 0x4d, 0xed, 0x31, 0x28,
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use sincy_adapter::interpreter::MockSnapshot;
     use sincy_adapter::schema::AdapterDefinition;
-    use sincy_adapter::sign::sign_definition;
+    use sincy_adapter::sign::{
+        sign_definition, sign_definition_ed25519, verify_definition_ed25519,
+    };
     use sincy_agent::ScriptedIo;
 
     #[test]
@@ -130,6 +173,21 @@ mod tests {
             None
         )
         .is_err());
+    }
+    #[test]
+    fn pinned_ed25519_verifying_key_matches_private_key() {
+        // 私钥文件 (gitignored) 签名, 设备端烧录的公钥必须能验过
+        let seed = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../keys/adapter_signing_ed25519.key"
+        ))
+        .expect("private key file");
+        let def = r#"{"adapter":"x","version":1}"#;
+        let sig = sign_definition_ed25519(&seed, def).unwrap();
+        assert!(
+            verify_definition_ed25519(&PINNED_VERIFYING_KEY_BYTES, def, &sig).is_ok(),
+            "pinned public key must verify signatures from keys/adapter_signing_ed25519.key"
+        );
     }
 }
 
@@ -576,6 +634,7 @@ mod jni {
         thiz: JObject,
         adapter_json: JString,
         signature: JString,
+        signature_scheme: JString,
         app_version: JString,
         task_context: JString,
     ) -> jstring {
@@ -587,6 +646,10 @@ mod jni {
             .get_string(&signature)
             .map(|s| s.into())
             .unwrap_or_default();
+        let signature_scheme: String = env
+            .get_string(&signature_scheme)
+            .map(|s| s.into())
+            .unwrap_or_else(|_| "hmac-sha256".into());
         let app_version: String = env
             .get_string(&app_version)
             .map(|s| s.into())
@@ -619,10 +682,11 @@ mod jni {
             }
         }));
         let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run_adapter(
+            run_adapter_scheme(
                 &adapter_json,
                 &signature,
                 PINNED_SIGNING_KEY,
+                &signature_scheme,
                 &app_version,
                 &mut bridge,
                 0,

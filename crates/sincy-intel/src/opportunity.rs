@@ -96,12 +96,13 @@ pub fn pillar_match(topic: &str, pillars: &[String], audience: &[String]) -> f64
         return 0.5; // 没有配置支柱时保持中性
     }
     let hit = keys.iter().filter(|k| word_matches(&tw, k)).count();
-    // 命中越多相关性越高; 至少命中 1 个关键词给 0.4 起步, 满额 1.0
+    // 命中比例直接决定相关性: 单个弱命中不再给 0.4 保底 (否则"lead azide"蹭到
+    // 一个关键词就能过 0.2 阈值); 至少命中 2 个关键词才开始给分。
     let matched_ratio = hit as f64 / keys.len() as f64;
-    if hit == 0 {
-        0.0
+    if hit < 2 {
+        if hit == 0 { 0.0 } else { 0.1 }
     } else {
-        (0.4 + 0.6 * matched_ratio * 4.0).min(1.0)
+        (0.3 + 0.7 * matched_ratio * 3.0).min(1.0)
     }
 }
 

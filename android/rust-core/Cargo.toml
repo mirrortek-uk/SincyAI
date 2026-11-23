@@ -11,6 +11,7 @@ description = "Sincy Android agent Rust core (JNI): thin wrapper over crates/sin
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+ed25519-dalek = { workspace = true }
 sincy-agent = { path = "../../crates/sincy-agent" }
 sincy-adapter = { path = "../../crates/sincy-adapter" }
 sincy-protocol = { path = "../../crates/sincy-protocol" }

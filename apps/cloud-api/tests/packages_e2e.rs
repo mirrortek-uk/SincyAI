@@ -67,6 +67,11 @@ async fn setup() -> Option<(sqlx::PgPool, AgencyId, u16, String, Uuid)> {
     mgr.complete_registration(ch.device_id, &ch.nonce, &proof)
         .await
         .unwrap();
+    sqlx::query("UPDATE devices SET last_seen = now() WHERE id = $1")
+        .bind(ch.device_id)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let state = cloud_api::state_for_test::test_state(Some(pool.clone()));
     let app = axum::Router::new()

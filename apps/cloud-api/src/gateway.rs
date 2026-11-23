@@ -75,11 +75,16 @@ async fn handle_socket(socket: WebSocket, state: AppState, device_id: Uuid, agen
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(2));
         loop {
             ticker.tick().await;
+            // 优先派发显式指派给本设备的任务 (路由按健康度选设备), 再吃未指派的
             let rows = sqlx::query(
                 "SELECT id, idempotency_key, package_id, package_version, route_id
-                 FROM device_tasks WHERE agency_id = $1 AND state = 'QUEUED' ORDER BY created_at LIMIT 5",
+                 FROM device_tasks
+                 WHERE agency_id = $1 AND state = 'QUEUED'
+                   AND (assigned_device_id = $2 OR assigned_device_id IS NULL)
+                 ORDER BY (assigned_device_id = $2) DESC, created_at LIMIT 5",
             )
             .bind(dispatch_agency.as_uuid())
+            .bind(dispatch_device)
             .fetch_all(&dispatch_pool)
             .await;
             let Ok(rows) = rows else { continue };
@@ -316,6 +321,35 @@ async fn handle_envelope(
             .await
             .map_err(db)?;
             if upd.rows_affected() == 1 {
+                // 失败分类 (评估报告 §12): side_effect 已发生的失败写 FAILED_FINAL,
+                // 禁止自动重试 (重复发布风险); 其余为 FAILED_RETRYABLE。
+                let side_effect_done = env
+                    .payload
+                    .get("side_effect_done")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if new_state == DeviceTaskState::Failed && side_effect_done {
+                    sqlx::query(
+                        "UPDATE device_tasks SET state = 'FAILED_FINAL', side_effect_done = true, updated_at = now()
+                         WHERE id = $1 AND agency_id = $2",
+                    )
+                    .bind(task_id)
+                    .bind(agency_id.as_uuid())
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(db)?;
+                    sqlx::query(
+                        "INSERT INTO task_events (agency_id, task_id, event, from_state, to_state, detail)
+                         VALUES ($1, $2, 'task.failed_final', $3, 'FAILED_FINAL', $4)",
+                    )
+                    .bind(agency_id.as_uuid())
+                    .bind(task_id)
+                    .bind(&ev.to)
+                    .bind(&env.payload)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(db)?;
+                }
                 sqlx::query(
                     "INSERT INTO task_events (agency_id, task_id, event, from_state, to_state, detail)
                      VALUES ($1, $2, $3, $4, $5, $6)",

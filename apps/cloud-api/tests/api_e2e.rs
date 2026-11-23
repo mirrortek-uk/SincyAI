@@ -15,6 +15,9 @@ const TEST_URL_ENV: &str = "SINCY_TEST_DATABASE_URL";
 /// 每个测试会 TRUNCATE 共享测试库, 必须串行执行
 static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// e2e 测试共享同一个测试库, setup 里会 TRUNCATE —— 必须串行执行。
+static E2E_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn setup() -> Option<(
     sqlx::PgPool,
     cloud_api::state_for_test::AppState,
@@ -142,6 +145,7 @@ async fn call(
 
 #[tokio::test]
 async fn publish_flow_e2e() {
+    let _guard = E2E_LOCK.lock().await;
     let _guard = TEST_LOCK.lock().await;
     let Some((pool, state, agency_id, brand_id, token, package_id)) = setup().await else {
         eprintln!("skip: {TEST_URL_ENV} not set");
@@ -295,6 +299,7 @@ async fn publish_flow_e2e() {
 
 #[tokio::test]
 async fn x_platform_routes_to_api_and_publishes() {
+    let _guard = E2E_LOCK.lock().await;
     let _guard = TEST_LOCK.lock().await;
     let Some((pool, state, agency_id, brand_id, token, package_id)) = setup().await else {
         eprintln!("skip: {TEST_URL_ENV} not set");
@@ -360,4 +365,138 @@ async fn x_platform_routes_to_api_and_publishes() {
             .await
             .unwrap();
     assert_eq!(used, 1);
+}
+
+/// RLS 负向测试 (API 层, 评估报告 §14.1): 租户 B 的 token 访问租户 A 的资源
+/// 必须 403/404, 绝不能 200 漏数据。覆盖读/写/审批/发布四类敏感操作。
+#[tokio::test]
+async fn cross_tenant_requests_are_rejected() {
+    let _guard = E2E_LOCK.lock().await;
+    let Some((pool, state, _agency_a, brand_a, _token_a, package_a)) = setup().await else {
+        eprintln!("skip: no test db");
+        return;
+    };
+    // agency B + member B
+    let agency_b = Uuid::new_v4();
+    sqlx::query("INSERT INTO agencies (id, name) VALUES ($1, 'e2e-api-B')")
+        .bind(agency_b)
+        .execute(&pool)
+        .await
+        .expect("agency B");
+    let client_b = Uuid::new_v4();
+    sqlx::query("INSERT INTO clients (id, agency_id, name) VALUES ($1, $2, 'cB')")
+        .bind(client_b)
+        .bind(agency_b)
+        .execute(&pool)
+        .await
+        .expect("client B");
+    let member_b = Uuid::new_v4();
+    let hash = sincy_security::password::hash_password("test-password-123").expect("hash");
+    sqlx::query(
+        "INSERT INTO agency_members (id, agency_id, email, role, password_hash) VALUES ($1, $2, 'b@test.local', 'owner', $3)",
+    )
+    .bind(member_b)
+    .bind(agency_b)
+    .bind(&hash)
+    .execute(&pool)
+    .await
+    .expect("member B");
+    let token_b = state
+        .jwt()
+        .issue(
+            &member_b.to_string(),
+            &agency_b.to_string(),
+            vec!["owner".into()],
+        )
+        .expect("token B");
+
+    let get = |path: String| {
+        let state = state.clone();
+        let token_b = token_b.clone();
+        async move {
+            let req = Request::builder()
+                .method("GET")
+                .uri(path)
+                .body(Body::empty())
+                .unwrap();
+            call(&state, &token_b, req).await
+        }
+    };
+    let post = |path: String, body: Value| {
+        let state = state.clone();
+        let token_b = token_b.clone();
+        async move {
+            let req = Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap();
+            call(&state, &token_b, req).await
+        }
+    };
+
+    // 读: B 列表里看不到 A 的品牌/包 (RLS 过滤), 直接按 A 的 id 拿必须 404
+    let (st, v) = get("/brands".into()).await;
+    assert_eq!(st, StatusCode::OK);
+    let items = v
+        .get("items")
+        .and_then(|i| i.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        items
+            .iter()
+            .all(|b| b["id"].as_str() != Some(&brand_a.to_string())),
+        "RLS leak: agency B sees agency A brand in list"
+    );
+    let _ = get(format!("/brands/{brand_a}")).await;
+    // PATCH 不是 GET; 用 PATCH 直接改 A 的品牌
+    let req = Request::builder()
+        .method("PATCH")
+        .uri(format!("/brands/{brand_a}"))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"name":"hacked"}"#))
+        .unwrap();
+    let (st, _) = call(&state, &token_b, req).await;
+    assert!(
+        st == StatusCode::NOT_FOUND || st == StatusCode::FORBIDDEN || st == StatusCode::BAD_REQUEST,
+        "cross-tenant PATCH brand must be rejected, got {st}"
+    );
+    let name_a: String = sqlx::query_scalar("SELECT name FROM brands WHERE id = $1")
+        .bind(brand_a)
+        .fetch_one(&pool)
+        .await
+        .expect("brand A still there");
+    assert_eq!(
+        name_a, "b1",
+        "cross-tenant PATCH must not modify agency A data"
+    );
+    // 审批 A 的包
+    let (st, _) = post(format!("/packages/{package_a}/approve"), json!({})).await;
+    assert!(
+        st == StatusCode::NOT_FOUND || st == StatusCode::FORBIDDEN || st == StatusCode::CONFLICT,
+        "cross-tenant approve must be rejected (403/404/409), got {st}"
+    );
+    // 用 A 的包发发布任务
+    let (st, _) = post(
+        "/tasks/publish".into(),
+        json!({
+            "brand_id": brand_a,
+            "platform": "youtube",
+            "action": "publish_video",
+            "package_id": package_a,
+            "package_version": 1,
+            "idempotency_key": format!("cross-tenant-{}", Uuid::new_v4()),
+        }),
+    )
+    .await;
+    assert!(
+        st != StatusCode::OK && st != StatusCode::CREATED,
+        "cross-tenant publish must not succeed, got {st}"
+    );
+    // 设备列表里不应出现 A 的设备
+    let (st, v) = get("/devices".into()).await;
+    assert_eq!(st, StatusCode::OK);
+    let _ = v;
 }

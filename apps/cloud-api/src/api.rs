@@ -50,6 +50,8 @@ pub fn routes() -> Router<AppState> {
         .route("/tasks/{id}/route", get(get_task_route))
         .route("/tasks/{id}/retry", post(retry_task))
         .route("/devices", get(list_devices))
+        .route("/devices/{id}/revoke", post(revoke_device))
+        .route("/devices/{id}/rotate", post(rotate_device))
         .route("/devices/register/start", post(start_device_registration))
         .route("/devices/pairing-codes", post(create_pairing_code))
         .route("/devices/pair", post(pair_with_code))
@@ -414,25 +416,61 @@ pub(crate) async fn publish_core(
         None => (None, 0),
     };
     let cost: i64 = quota_cost_for(&body.platform, &body.action);
-    // device_ready is real: an active bound device for this agency must exist
-    // (X posting routes here per PRD 5.3 / HID design doc — no paid X API).
-    let device_ready: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM devices WHERE agency_id = $1 AND state = 'active')",
+    // device_ready is dynamic, not just "a device exists": pick the healthiest
+    // bound device — online (recent heartbeat) > low open-task backlog > low
+    // recent failure rate — and route to it explicitly. If every device is
+    // offline or drowning in WAITING_USER backlog, device route is blocked with
+    // a concrete reason (评估报告 §7: 路由决策必须含设备/账号动态状态)。
+    let best_device: Option<(Uuid, bool, i64, Option<f64>)> = sqlx::query(
+        r#"SELECT d.id,
+                  COALESCE(d.last_seen > now() - interval '120 seconds', false) AS online,
+                  (SELECT count(*)::int8 FROM device_tasks t
+                    WHERE t.assigned_device_id = d.id
+                      AND t.state IN ('QUEUED','EXECUTING','WAITING_USER')) AS backlog,
+                  (SELECT count(*) FILTER (WHERE t.state = 'FAILED')::float8
+                       / NULLIF(count(*), 0)
+                     FROM device_tasks t
+                    WHERE t.assigned_device_id = d.id
+                      AND t.created_at > now() - interval '1 hour') AS fail_rate
+             FROM devices d
+            WHERE d.agency_id = $1 AND d.state = 'active'
+            ORDER BY online DESC, backlog ASC, fail_rate ASC NULLS FIRST, d.last_seen DESC
+            LIMIT 1"#,
     )
     .bind(agency.as_uuid())
-    .fetch_one(pool)
+    .fetch_optional(pool)
     .await
-    .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
+    .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?
+    .map(|r| {
+        use sqlx::Row;
+        (
+            r.get::<Uuid, _>("id"),
+            r.get::<bool, _>("online"),
+            r.get::<i64, _>("backlog"),
+            r.get::<Option<f64>, _>("fail_rate"),
+        )
+    });
+    let (device_ready, picked_device, device_block) = match &best_device {
+        Some((id, true, _, _)) => (true, Some(*id), None),
+        Some((id, false, backlog, fail_rate)) => (
+            false,
+            None,
+            Some(format!(
+                "device {id} offline (last heartbeat stale); backlog={backlog}, fail_rate={fail_rate:?}"
+            )),
+        ),
+        None => (
+            false,
+            None,
+            Some("no active device bound for this agency".into()),
+        ),
+    };
     // route-time check is coarse (any headroom); the ledger reserve is authoritative
     let pre = Preconditions {
         api_ready: quota_avail > 0,
         api_block_reason: Some(format!("quota available {quota_avail} < cost {cost}")),
         device_ready,
-        device_block_reason: if device_ready {
-            None
-        } else {
-            Some("no active device bound for this agency".into())
-        },
+        device_block_reason: device_block,
         assisted_ready: true,
         assisted_block_reason: None,
     };
@@ -478,9 +516,15 @@ pub(crate) async fn publish_core(
         Route::Device => "QUEUED",
         _ => "EXECUTING",
     };
+    // device 路由: 显式指派给健康设备, 网关按 assigned_device_id 派发
+    let assigned = if matches!(decision.reason.selected, Route::Device) {
+        picked_device
+    } else {
+        None
+    };
     sqlx::query(
-        "INSERT INTO device_tasks (id, agency_id, brand_id, idempotency_key, state, route_id, package_id, package_version)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        "INSERT INTO device_tasks (id, agency_id, brand_id, idempotency_key, state, route_id, package_id, package_version, assigned_device_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
     )
     .bind(task_id)
     .bind(agency.as_uuid())
@@ -490,6 +534,7 @@ pub(crate) async fn publish_core(
     .bind(Uuid::new_v4())
     .bind(body.package_id)
     .bind(body.package_version as i32)
+    .bind(assigned)
     .execute(&mut *tx)
     .await
     .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
@@ -667,15 +712,38 @@ async fn get_task_route(
 
 /// POST /tasks/{id}/retry — WAITING_USER / FAILED 的任务重新排队 (attempt+1)。
 /// 用于"人工处理完挑战界面后让 agent 继续"的场景。
+#[derive(Debug, Deserialize)]
+struct RetryBody {
+    #[serde(default)]
+    force: bool,
+}
+
 async fn retry_task(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     axum::extract::Extension(auth): axum::extract::Extension<crate::auth::AuthCtx>,
+    body: Option<Json<RetryBody>>,
 ) -> Result<Json<Value>, Response> {
     let pool = state.pool().map_err(app_error_response)?;
+    let force: bool = body.as_ref().map(|b| b.force).unwrap_or(false);
+    // FAILED_FINAL (side_effect 已发生) 禁止重试, 防止重复发布; force=true 仅人工显式确认
+    let guard = sqlx::query_scalar::<_, bool>(
+        "SELECT side_effect_done FROM device_tasks WHERE id = $1 AND agency_id = $2 AND state IN ('WAITING_USER', 'FAILED', 'FAILED_FINAL')",
+    )
+    .bind(id)
+    .bind(auth.agency_id.as_uuid())
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
+    if guard == Some(true) && !force {
+        return Err(app_error_response(AppError::non_retryable(
+            "failed_final",
+            "task is FAILED_FINAL (side effect already happened); republish with a new idempotency key, or pass {\"force\": true} to explicitly override",
+        )));
+    }
     let row = sqlx::query(
         "UPDATE device_tasks SET state = 'QUEUED', assigned_device_id = NULL, attempt = attempt + 1, updated_at = now()
-         WHERE id = $1 AND agency_id = $2 AND state IN ('WAITING_USER', 'FAILED')
+         WHERE id = $1 AND agency_id = $2 AND state IN ('WAITING_USER', 'FAILED', 'FAILED_FINAL')
          RETURNING id, state, attempt",
     )
     .bind(id)
@@ -686,7 +754,7 @@ async fn retry_task(
     .ok_or_else(|| {
         app_error_response(AppError::non_retryable(
             "not_retryable",
-            "only WAITING_USER/FAILED tasks of this agency can be retried",
+            "only WAITING_USER/FAILED/FAILED_FINAL tasks of this agency can be retried",
         ))
     })?;
     sqlx::query("INSERT INTO task_events (agency_id, task_id, event, from_state, to_state, detail) VALUES ($1, $2, 'task.retry', 'WAITING_USER', 'QUEUED', '{}')")
@@ -1058,7 +1126,7 @@ async fn get_agent_task(
 
     // latest active signed version of that adapter (platform-level registry)
     let av = sqlx::query(
-        "SELECT v.version, v.definition, v.signature, a.app_package
+        "SELECT v.version, v.definition, v.signature, v.signature_scheme, a.app_package
          FROM app_adapter_versions v JOIN app_adapters a ON a.id = v.adapter_id
          WHERE v.adapter_id = $1 AND v.state = 'active'
          ORDER BY v.version DESC LIMIT 1",
@@ -1119,6 +1187,7 @@ async fn get_agent_task(
         "adapter_version": av.get::<i32, _>("version"),
         "adapter_yaml": adapter_yaml,
         "signature": av.get::<String, _>("signature"),
+        "signature_scheme": av.get::<String, _>("signature_scheme"),
         "task_context": task_context,
     })))
 }
@@ -1848,6 +1917,40 @@ async fn run_reply_auto(
     .map_err(|e| format!("publish_core: {e:?}"))?;
     tracing::info!(task = %find_task_id, package = %pid, publish_task = %pub_out.task_id, "reply_auto published");
     Ok(())
+}
+
+/// POST /devices/{id}/revoke — 撤销设备: state=revoked + 所有会话撤销, token 立即失效。
+async fn revoke_device(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    axum::extract::Extension(auth): axum::extract::Extension<crate::auth::AuthCtx>,
+) -> Result<Json<Value>, Response> {
+    let pool = state.pool().map_err(app_error_response)?;
+    let mgr = sincy_device::DeviceManager::new(pool, state.jwt_secret());
+    mgr.revoke(auth.agency_id, id)
+        .await
+        .map_err(|e| app_error_response(AppError::non_retryable("revoke_failed", e.to_string())))?;
+    Ok(Json(json!({ "device_id": id, "state": "revoked" })))
+}
+
+/// POST /devices/{id}/rotate — 轮换设备 token: 旧会话全部撤销, 返回新 token (60 天有效)。
+async fn rotate_device(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    axum::extract::Extension(auth): axum::extract::Extension<crate::auth::AuthCtx>,
+) -> Result<Json<Value>, Response> {
+    let pool = state.pool().map_err(app_error_response)?;
+    let mgr = sincy_device::DeviceManager::new(pool, state.jwt_secret());
+    let st = mgr
+        .rotate(auth.agency_id, id)
+        .await
+        .map_err(|e| app_error_response(AppError::non_retryable("rotate_failed", e.to_string())))?;
+    Ok(Json(json!({
+        "device_id": st.device_id,
+        "token": st.token,
+        "agency_id": st.agency_id,
+        "expires_in_days": 60,
+    })))
 }
 
 async fn list_devices(

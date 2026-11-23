@@ -152,6 +152,12 @@ async fn register_device(pool: &sqlx::PgPool, agency: AgencyId) -> (Uuid, String
         )
         .await
         .expect("complete");
+    // 设备路由按心跳判在线: 注册后立刻心跳, 模拟真实在线设备
+    sqlx::query("UPDATE devices SET last_seen = now(), state = 'active' WHERE id = $1")
+        .bind(ch.device_id)
+        .execute(pool)
+        .await
+        .expect("heartbeat");
     (ch.device_id, session.token)
 }
 
