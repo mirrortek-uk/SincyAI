@@ -103,7 +103,7 @@ export default function PulsePage() {
       <h1>Sincy Pulse</h1>
       <p className="muted">
         聚合式情报产品: 底层由多个 Intelligence Provider 提供数据, Sincy 统一采集、归一化、
-        跨源聚合评分后输出。用户只看到 Sincy Pulse, 原始观测全部保留可审计。
+        跨源聚合评分后输出。用户只看到 Sincy Pulse, 原始观测全部保留可审计。本页即世界情报 (/intel) 中的聚合源 <b>sincy-pulse</b> —— 下方 Provider 是可扩展的聚合成员。
         红线: legal_status 非 public/commercial_ok 的 provider 不会被调度。
       </p>
       {error && <p style={{ color: "var(--danger)" }}>{error}</p>}

@@ -276,7 +276,7 @@ export default function IntelPage() {
               <tr key={s.id}>
                 <td>{s.id}</td>
                 <td>{s.name}</td>
-                <td>{s.category}</td>
+                <td>{s.category === "aggregate" ? <span title="聚合情报源: 由 Sincy Pulse 跨源聚合输出">聚合源</span> : s.category}</td>
                 <td className="muted">{s.capabilities.join(",")}</td>
                 <td className="muted">{s.platforms.join(",") || "-"}</td>
                 <td>{s.enabled ? "是" : "否"}</td>

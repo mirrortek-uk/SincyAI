@@ -395,6 +395,48 @@ pub async fn run_provider_once(pool: &sqlx::PgPool, provider_id: &str) -> Result
     }))
 }
 
+/// 把聚合实体镜像进 intel_items (source_id='sincy-pulse'), 使 Sincy Pulse 成为
+/// 世界情报里的一个聚合源; 聚合源被停用 (enabled=false) 时跳过。
+async fn mirror_entity_to_intel(
+    pool: &sqlx::PgPool,
+    entity_id: Uuid,
+    e: &sincy_intel::pulse::IntelligenceEntity,
+    agg: &sincy_intel::pulse::AggregateMetrics,
+    trend: &Value,
+) {
+    let enabled: Option<bool> =
+        sqlx::query_scalar("SELECT enabled FROM intelligence_sources WHERE id = 'sincy-pulse'")
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
+    if enabled == Some(false) {
+        return;
+    }
+    let metrics = serde_json::to_value(&agg.metrics).unwrap_or(json!({}));
+    let payload = json!({
+        "title": e.title,
+        "entity_id": entity_id,
+        "entity_type": e.entity_type,
+        "platform": e.platform,
+        "canonical_key": e.canonical_key,
+        "metrics": metrics,
+        "trend": trend,
+        "confidence": agg.confidence,
+        "source": "sincy-pulse (聚合情报源)",
+    });
+    let _ = sqlx::query(
+        "INSERT INTO intel_items (source_id, kind, dedup_key, payload, collected_at)
+         VALUES ('sincy-pulse', $1, $2, $3, now())
+         ON CONFLICT (dedup_key) DO UPDATE SET payload = EXCLUDED.payload, collected_at = now()",
+    )
+    .bind(&e.entity_type)
+    .bind(format!("pulse:{}", e.canonical_key))
+    .bind(&payload)
+    .execute(pool)
+    .await;
+}
+
 /// upsert 一个实体 + 其 observations, 返回是否新建实体。
 async fn upsert_entity(
     pool: &sqlx::PgPool,
@@ -476,6 +518,9 @@ async fn upsert_entity(
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
+
+    // 镜像为世界情报条目: Sincy Pulse 作为 /intel 的聚合源 (source_id='sincy-pulse')
+    mirror_entity_to_intel(pool, entity_id, e, &agg, &trend).await;
 
     for o in &e.observations {
         sqlx::query(
@@ -646,57 +691,93 @@ async fn health(
 
 // ---------- 种子 + 调度器 ----------
 
-/// 把现有 collector feed 包装成 3 个内置 Pulse provider (Phase 2 首批, 均公开只读)。
-pub fn seed_builtin_providers() -> Vec<Value> {
+/// 默认 provider 种子: 7 个 X 生态情报站的 manifest (设计文档 §Phase 2)。
+/// 它们都是第三方榜单/分析站, legal_status 一律 'unknown' (待法务与 ToS 审查),
+/// 因此 seed 时 enabled=false —— 调度器红线只跑 legal 合规且已启用的 provider。
+/// hotrank / hn / gnews 不再作为 Pulse provider: 那些数据本就是世界情报 (/intel)
+/// 里的普通信源, Pulse 只作为聚合源 (sincy-pulse) 输出交叉验证后的统一实体。
+pub fn seed_default_providers() -> Vec<Value> {
     vec![
         json!({
-            "id": "pulse-hotrank", "name": "GitHub Trending (HotRank)", "platform": "github",
-            "category": "trend_intelligence",
-            "capabilities": ["repo_ranking", "trending_topics", "emerging_projects"],
-            "acquisition": {"type": "builtin_feed", "strategy": "json_api"},
+            "id": "xbangdan", "name": "Xbangdan", "platform": "x", "category": "social_intelligence",
+            "capabilities": ["account_ranking", "post_ranking", "viral_content", "creator_growth", "topic_ranking", "global_content"],
+            "acquisition": {"type": "json", "strategy": "json_api"},
             "datasets": [
-                {"id": "gh_ai_agent", "update_frequency_secs": 3600, "entity_type": "trend", "feed_label": "github trending (ai agent)"},
-                {"id": "gh_llm", "update_frequency_secs": 3600, "entity_type": "trend", "feed_label": "github trending (llm)"},
-                {"id": "gh_agent_fw", "update_frequency_secs": 3600, "entity_type": "trend", "feed_label": "github trending (agent framework)"}
+                {"id": "account_ranking", "update_frequency_secs": 21600, "entity_type": "social_account"},
+                {"id": "post_ranking", "update_frequency_secs": 3600, "entity_type": "social_post"},
+                {"id": "global_ranking", "update_frequency_secs": 21600, "entity_type": "social_post"}
+            ],
+            "entity_types": ["social_account", "social_post", "ranking_snapshot"],
+            "reliability": 0.75, "legal_status": "unknown"
+        }),
+        json!({
+            "id": "xpaiming", "name": "Xpaiming", "platform": "x", "category": "social_intelligence",
+            "capabilities": ["account_growth", "tweet_impressions", "country_rankings", "account_history"],
+            "acquisition": {"type": "html", "strategy": "html_parser"},
+            "datasets": [
+                {"id": "account_growth", "update_frequency_secs": 21600, "entity_type": "social_account"},
+                {"id": "country_rankings", "update_frequency_secs": 21600, "entity_type": "ranking_snapshot"}
+            ],
+            "entity_types": ["social_account", "ranking_snapshot"],
+            "reliability": 0.7, "legal_status": "unknown"
+        }),
+        json!({
+            "id": "shadowban-radar", "name": "Shadowban Radar", "platform": "x", "category": "account_health",
+            "capabilities": ["account_visibility", "search_visibility", "reply_visibility", "restriction_detection", "account_health"],
+            "acquisition": {"type": "json", "strategy": "json_api"},
+            "datasets": [
+                {"id": "visibility_check", "update_frequency_secs": 3600, "entity_type": "account_health"}
+            ],
+            "entity_types": ["account_health"],
+            "reliability": 0.8, "legal_status": "unknown"
+        }),
+        json!({
+            "id": "getxanalytics", "name": "GetXAnalytics", "platform": "x", "category": "social_intelligence",
+            "capabilities": ["post_metrics", "impression_history", "engagement_rate"],
+            "acquisition": {"type": "json", "strategy": "json_api"},
+            "datasets": [
+                {"id": "post_metrics", "update_frequency_secs": 3600, "entity_type": "social_post"}
+            ],
+            "entity_types": ["social_post", "metric_snapshot"],
+            "reliability": 0.7, "legal_status": "unknown"
+        }),
+        json!({
+            "id": "xranks", "name": "XRanks", "platform": "x", "category": "social_intelligence",
+            "capabilities": ["account_ranking", "category_ranking", "influence_score"],
+            "acquisition": {"type": "html", "strategy": "html_parser"},
+            "datasets": [
+                {"id": "account_ranking", "update_frequency_secs": 21600, "entity_type": "ranking_snapshot"}
+            ],
+            "entity_types": ["ranking_snapshot", "social_account"],
+            "reliability": 0.65, "legal_status": "unknown"
+        }),
+        json!({
+            "id": "trends24", "name": "Trends24", "platform": "x", "category": "trend_intelligence",
+            "capabilities": ["global_trends", "country_trends", "city_trends", "trend_history"],
+            "acquisition": {"type": "html", "strategy": "html_parser"},
+            "datasets": [
+                {"id": "global_trends", "update_frequency_secs": 3600, "entity_type": "trend"},
+                {"id": "country_trends", "update_frequency_secs": 3600, "entity_type": "trend"}
             ],
             "entity_types": ["trend"],
-            "reliability": 0.85,
-            "legal_status": "public"
+            "reliability": 0.75, "legal_status": "unknown"
         }),
         json!({
-            "id": "pulse-hn", "name": "Hacker News (Algolia)", "platform": "hn",
-            "category": "social_intelligence",
-            "capabilities": ["post_ranking", "viral_content", "topic_trends"],
-            "acquisition": {"type": "builtin_feed", "strategy": "json_api"},
+            "id": "tide-now", "name": "Tide Now", "platform": "x", "category": "trend_intelligence",
+            "capabilities": ["trend_velocity", "trend_acceleration", "hashtag_momentum"],
+            "acquisition": {"type": "json", "strategy": "json_api"},
             "datasets": [
-                {"id": "hn_front", "update_frequency_secs": 1800, "entity_type": "social_post", "feed_label": "hn: front page"},
-                {"id": "hn_recent", "update_frequency_secs": 1800, "entity_type": "social_post", "feed_label": "hn: recent stories"},
-                {"id": "hn_ai_search", "update_frequency_secs": 3600, "entity_type": "social_post", "feed_label": "hn: search AI"}
+                {"id": "trend_velocity", "update_frequency_secs": 3600, "entity_type": "trend"}
             ],
-            "entity_types": ["social_post"],
-            "reliability": 0.9,
-            "legal_status": "public"
-        }),
-        json!({
-            "id": "pulse-gnews", "name": "Google News RSS", "platform": "web",
-            "category": "news_intelligence",
-            "capabilities": ["global_trends", "topic_news"],
-            "acquisition": {"type": "builtin_feed", "strategy": "rss"},
-            "datasets": [
-                {"id": "gnews_ai_en", "update_frequency_secs": 1800, "entity_type": "news", "feed_label": "gnews: AI agent (en)"},
-                {"id": "gnews_llm_en", "update_frequency_secs": 1800, "entity_type": "news", "feed_label": "gnews: large language model (en)"},
-                {"id": "gnews_ai_zh", "update_frequency_secs": 1800, "entity_type": "news", "feed_label": "gnews: AI 智能体 (zh)"}
-            ],
-            "entity_types": ["news"],
-            "reliability": 0.8,
-            "legal_status": "public"
+            "entity_types": ["trend"],
+            "reliability": 0.6, "legal_status": "unknown"
         }),
     ]
 }
 
-/// 启动时把内置 provider 种子写入 pulse_providers (幂等)。
+/// 启动时把默认 provider (7 个 X 生态站) 种子写入 pulse_providers (幂等)。
 pub async fn seed_providers(pool: &sqlx::PgPool) {
-    for m in seed_builtin_providers() {
+    for m in seed_default_providers() {
         let manifest = match ProviderManifest::parse(&m) {
             Ok(m) => m,
             Err(e) => {

@@ -115,8 +115,8 @@ async fn architecture(
                      "32 条默认 feed: arXiv×5 / HN Algolia×3 / dev.to×4 / Wikipedia RC / GitHub 趋势×3 / YouTube×3 / IT之家/少数派/掘金/V2EX RSS / Google News×5(en+zh) / Product Hunt×2 / B站排行榜×2; 可选: GDELT(SINCY_INTEL_GDELT=1)、自托管 RSSHub 扩展×8(Reddit/知乎/微博/抖音/百度热榜/36氪)、SearXNG 自托管×2; 归一化 WI §11 入 intel_items(dedup_key 去重), jobs 记 last_fetched/last_new; 失败记 jobs 不强攻; 红线: 只走公开只读 API, 礼貌间隔, 不绕认证/验证码/限流"),
                 node("wihealth", "Source Health Audit", "GET /intel/health",
                      "按 source 聚合 job 运行记录: healthy(有新入库)/ degraded(在跑但 0 新增或部分失败)/ failed(全部失败)/ not_configured(已注册但 job 暂停、待自托管实例/密钥/出口 IP)/ disabled; 注册 ≠ 可用, 审计才是真相"),
-                node("pulse", "Sincy Pulse (情报插件框架)", "sincy-intel::pulse · manifest 驱动 · migration 0030",
-                     "Provider manifest 注册(pulse_providers, 含 legal_status 红线: 非 public/commercial_ok 不调度) → 调度器按 dataset.update_frequency 触发 → adapter 归一化成 IntelligenceEntity → 跨源聚合(估计值+范围+cross_source_score+置信度)写 pulse_entities, 原始保留 pulse_observations → 控制台 /pulse 产品化展示; 内置 3 个 provider(hotrank/hn/gnews) 复用 collector feed"),
+                node("pulse", "Sincy Pulse (世界情报的聚合源)", "sincy-intel::pulse · manifest 驱动 · migration 0030/0031",
+                     "世界情报 /intel 的聚合源 sincy-pulse (intelligence_sources.category=aggregate): 可扩展 Provider manifest 注册(pulse_providers, legal_status 红线: 非 public/commercial_ok 不调度, 当前 7 个 X 生态站均 pending) → 调度器按 dataset.update_frequency 触发 → adapter 归一化成 IntelligenceEntity → 跨源聚合(估计值+范围+cross_source_score+置信度)写 pulse_entities 并镜像进 intel_items(source_id=sincy-pulse), 原始保留 pulse_observations → 控制台 /pulse 产品化展示"),
                 node("witrend", "Trend Intelligence", "GET /intel/trends",
                      "intel_items 最近 24h 按 topic 聚合: 近 6h 速度 velocity/h, 相对前 18h 的 growth%, 跨平台数(platforms/sources), 样本标题; 输出 Trend(topic,growth,velocity,跨平台传播) 供机会引擎与数字员工"),
                 node("humanize", "人工化手势 humanize", "sincy-adapter::humanize · 确定性 SplitMix64 RNG",
@@ -261,6 +261,7 @@ async fn architecture(
             "data"
         ),
         edge("console", "api", "GET /pulse/* + 注册 provider", "http"),
+        edge("pulse", "wi", "聚合源 sincy-pulse 镜像 intel_items", "sql"),
         edge(
             "collector",
             "wisrc",
@@ -360,7 +361,7 @@ async fn architecture(
         },
         {
             "id": "F12", "title": "Sincy Pulse: 第三方情报源 → 统一情报产品",
-            "steps": "Provider manifest 注册(Admin 上传, legal_status 非合规不启用) → 调度器按 update_frequency 跑 builtin feed provider → 归一化成 IntelligenceEntity → 引擎跨源聚合(估计值/范围/cross_source_score/置信度)写 pulse_entities, 原始观测留 pulse_observations → 控制台 /pulse 展示 Sincy Pulse 产品层"
+            "steps": "Provider manifest 注册(Admin 上传, legal_status 非合规不启用; 默认 7 个 X 生态站 seed 为 disabled/pending) → 调度器按 update_frequency 跑合规 provider → 归一化成 IntelligenceEntity → 引擎跨源聚合(估计值/范围/cross_source_score/置信度)写 pulse_entities 并镜像 intel_items(source_id=sincy-pulse) → 世界情报 /intel 与 /pulse 展示 Sincy Pulse 聚合情报"
         },
         {
             "id": "F5", "title": "世界情报采集 → 路由 → 机会",
