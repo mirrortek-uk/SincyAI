@@ -9,6 +9,7 @@ pub mod gateway;
 pub mod intel;
 pub mod intel_collector;
 pub mod metrics;
+pub mod pulse;
 pub mod skills;
 pub mod state;
 

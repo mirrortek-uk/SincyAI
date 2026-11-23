@@ -66,7 +66,10 @@ async fn main() {
             feeds = cfg.feeds.len(),
             "intel collector starting"
         );
-        tokio::spawn(cloud_api::intel_collector::run_loop(pool, cfg));
+        tokio::spawn(cloud_api::intel_collector::run_loop(pool.clone(), cfg));
+        // Sincy Pulse: 种子内置 provider + manifest 驱动调度
+        cloud_api::pulse::seed_providers(&pool).await;
+        tokio::spawn(cloud_api::pulse::run_scheduler(pool.clone()));
     }
 
     // Digital Employee scheduler (DE §cadence): auto-runs operating cycles for

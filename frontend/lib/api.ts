@@ -446,6 +446,52 @@ export interface PluginManifest {
   skills: PluginSkill[];
 }
 
+export interface PulseProvider {
+  id: string;
+  name: string;
+  platform: string;
+  category: string;
+  legal_status: string;
+  reliability: number;
+  enabled: boolean;
+  schedulable: boolean;
+  manifest: {
+    capabilities: string[];
+    datasets: { id: string; update_frequency_secs: number; entity_type: string; feed_label?: string }[];
+    acquisition: { type: string; strategy: string };
+  };
+  recent_runs?: { dataset_id: string; status: string; items_fetched: number; items_new: number; error: string | null; started_at: string }[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PulseEntity {
+  id: string;
+  entity_type: string;
+  platform: string;
+  canonical_key: string;
+  title: string;
+  payload: Record<string, unknown>;
+  metrics: Record<string, unknown>;
+  trend: { velocity?: number; classification?: string };
+  confidence: { score?: number; level?: string };
+  updated_at: string;
+}
+
+export interface PulseObservation {
+  provider_id: string;
+  dataset_id: string;
+  metric: string;
+  value: unknown;
+  observed_at: string;
+}
+
+export interface PulseHealth {
+  providers: { provider_id: string; name: string; legal_status: string; enabled: boolean; status: string; runs_24h: number; ok_rate: number; last_run_at: string | null; last_error: string | null }[];
+  entities_total: number;
+  observations_total: number;
+}
+
 export interface ReviewRule {
   platform: string;
   weighted_limit: number;
@@ -624,6 +670,20 @@ export const api = {
   enableAllIntelSources: () => req<{ enabled: number }>("/intel/sources/enable-all", { method: "POST" }),
   resumeAllIntelJobs: () => req<{ resumed: number }>("/intel/jobs/resume-all", { method: "POST" }),
   listReviewRules: () => req<{ items: ReviewRule[] }>("/settings/platform-review-rules"),
+  listPulseProviders: () => req<{ items: PulseProvider[] }>("/pulse/providers"),
+  getPulseProvider: (id: string) => req<PulseProvider>(`/pulse/providers/${encodeURIComponent(id)}`),
+  registerPulseProvider: (manifest: Record<string, unknown>) =>
+    req<{ id: string; enabled: boolean; legal_status: string }>("/pulse/providers", { method: "POST", body: JSON.stringify(manifest) }),
+  updatePulseProvider: (id: string, body: Record<string, unknown>) =>
+    req<{ id: string }>(`/pulse/providers/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(body) }),
+  togglePulseProvider: (id: string, enabled: boolean) =>
+    req<{ id: string; enabled: boolean }>(`/pulse/providers/${encodeURIComponent(id)}/toggle`, { method: "POST", body: JSON.stringify({ enabled }) }),
+  runPulseProvider: (id: string) =>
+    req<{ provider_id: string; fetched: number; new: number; errors: string[] }>(`/pulse/providers/${encodeURIComponent(id)}/run`, { method: "POST" }),
+  listPulseEntities: (q?: { type?: string; q?: string; classification?: string; limit?: number }) =>
+    req<{ items: PulseEntity[] }>("/pulse/entities" + (q ? `?${new URLSearchParams(Object.fromEntries(Object.entries(q).filter(([, v]) => v !== undefined && v !== "").map(([k, v]) => [k, String(v)])))}` : "")),
+  listPulseObservations: (entityId: string) => req<{ items: PulseObservation[] }>(`/pulse/entities/${entityId}/observations`),
+  pulseHealth: () => req<PulseHealth>("/pulse/health"),
   upsertReviewRule: (platform: string, body: { weighted_limit: number; on_over_limit: string; note?: string }) =>
     req<ReviewRule>(`/settings/platform-review-rules/${encodeURIComponent(platform)}`, {
       method: "PUT",

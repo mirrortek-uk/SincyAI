@@ -115,6 +115,8 @@ async fn architecture(
                      "32 条默认 feed: arXiv×5 / HN Algolia×3 / dev.to×4 / Wikipedia RC / GitHub 趋势×3 / YouTube×3 / IT之家/少数派/掘金/V2EX RSS / Google News×5(en+zh) / Product Hunt×2 / B站排行榜×2; 可选: GDELT(SINCY_INTEL_GDELT=1)、自托管 RSSHub 扩展×8(Reddit/知乎/微博/抖音/百度热榜/36氪)、SearXNG 自托管×2; 归一化 WI §11 入 intel_items(dedup_key 去重), jobs 记 last_fetched/last_new; 失败记 jobs 不强攻; 红线: 只走公开只读 API, 礼貌间隔, 不绕认证/验证码/限流"),
                 node("wihealth", "Source Health Audit", "GET /intel/health",
                      "按 source 聚合 job 运行记录: healthy(有新入库)/ degraded(在跑但 0 新增或部分失败)/ failed(全部失败)/ not_configured(已注册但 job 暂停、待自托管实例/密钥/出口 IP)/ disabled; 注册 ≠ 可用, 审计才是真相"),
+                node("pulse", "Sincy Pulse (情报插件框架)", "sincy-intel::pulse · manifest 驱动 · migration 0030",
+                     "Provider manifest 注册(pulse_providers, 含 legal_status 红线: 非 public/commercial_ok 不调度) → 调度器按 dataset.update_frequency 触发 → adapter 归一化成 IntelligenceEntity → 跨源聚合(估计值+范围+cross_source_score+置信度)写 pulse_entities, 原始保留 pulse_observations → 控制台 /pulse 产品化展示; 内置 3 个 provider(hotrank/hn/gnews) 复用 collector feed"),
                 node("witrend", "Trend Intelligence", "GET /intel/trends",
                      "intel_items 最近 24h 按 topic 聚合: 近 6h 速度 velocity/h, 相对前 18h 的 growth%, 跨平台数(platforms/sources), 样本标题; 输出 Trend(topic,growth,velocity,跨平台传播) 供机会引擎与数字员工"),
                 node("humanize", "人工化手势 humanize", "sincy-adapter::humanize · 确定性 SplitMix64 RNG",
@@ -247,6 +249,19 @@ async fn architecture(
         edge("api", "db", "全部业务读写 (RLS 按 agency 隔离)", "data"),
         edge("wi", "wisrc", "只读采集/搜索/趋势", "external"),
         edge(
+            "pulse",
+            "wisrc",
+            "provider 只走公开只读接口采集",
+            "external"
+        ),
+        edge(
+            "pulse",
+            "db",
+            "pulse_entities / pulse_observations / runs",
+            "data"
+        ),
+        edge("console", "api", "GET /pulse/* + 注册 provider", "http"),
+        edge(
             "collector",
             "wisrc",
             "定时拉取注册的只读公开源 (32 条默认 feed + 自托管扩展)",
@@ -342,6 +357,10 @@ async fn architecture(
         {
             "id": "F11", "title": "员工插件清单 (agents + skills 可解释)",
             "steps": "控制台数字员工页选中员工 → GET /employees/{id}/plugins → 6 内置 agents(带职责描述) + 绑定 skills(带 what_it_does/tools/handler/enabled) → 卡片渲染, 人可理解每个插件具体干什么; 启停 skill 走 /employees/{id}/skills"
+        },
+        {
+            "id": "F12", "title": "Sincy Pulse: 第三方情报源 → 统一情报产品",
+            "steps": "Provider manifest 注册(Admin 上传, legal_status 非合规不启用) → 调度器按 update_frequency 跑 builtin feed provider → 归一化成 IntelligenceEntity → 引擎跨源聚合(估计值/范围/cross_source_score/置信度)写 pulse_entities, 原始观测留 pulse_observations → 控制台 /pulse 展示 Sincy Pulse 产品层"
         },
         {
             "id": "F5", "title": "世界情报采集 → 路由 → 机会",
@@ -599,6 +618,7 @@ async fn architecture(
         ("F9", vec!["vercel", "worker", "proddb", "devfarm", "x"]),
         ("F10", vec!["console", "api", "rules", "thread", "pub"]),
         ("F11", vec!["console", "api", "de", "plugins"]),
+        ("F12", vec!["pulse", "wisrc", "db", "console"]),
     ];
     let flows = {
         let mut v = flows;
@@ -651,7 +671,7 @@ async fn architecture(
     let animation = json!({
         "cycle_steps": cycle_steps_model(),
         "step_to_agent": step_to_agent,
-        "flow_ids": ["F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11"],
+        "flow_ids": ["F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12"],
         "hint": "F4 数字员工周期按 cycle_steps 顺序高亮 step_to_agent 里的 agent 节点; 每步证据见 runtime.steps",
     });
 

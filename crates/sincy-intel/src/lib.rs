@@ -12,6 +12,7 @@
 pub mod adapter;
 pub mod model;
 pub mod opportunity;
+pub mod pulse;
 pub mod registry;
 pub mod router;
 

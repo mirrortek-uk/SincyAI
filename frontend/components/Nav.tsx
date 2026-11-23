@@ -35,6 +35,7 @@ export function Nav() {
       <Link href="/tasks">任务</Link>
       <Link href="/employees">数字员工</Link>
       <Link href="/intel">世界情报</Link>
+      <Link href="/pulse">Sincy Pulse</Link>
       <Link href="/devices">设备</Link>
       <Link href="/ai">AI 生成</Link>
       <Link href="/kill-switches">急停开关</Link>

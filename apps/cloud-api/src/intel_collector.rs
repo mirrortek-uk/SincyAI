@@ -550,6 +550,41 @@ async fn collect_feed(
     if !registered {
         return Err(format!("source {} not registered/enabled", f.source_id));
     }
+    let items = fetch_feed_items(client, f).await?;
+    let mut ins = 0usize;
+    let mut dup = 0usize;
+    for (dk, title, payload) in items {
+        let r = sqlx::query(
+            "INSERT INTO intel_items (id, source_id, kind, dedup_key, payload)
+             VALUES ($1, $2, $3, $4, $5) ON CONFLICT (dedup_key) DO NOTHING RETURNING id",
+        )
+        .bind(Uuid::new_v4())
+        .bind(&f.source_id)
+        .bind(&f.kind)
+        .bind(&dk)
+        .bind({
+            let mut p = payload;
+            p["title"] = json!(title);
+            p
+        })
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        if r.is_some() {
+            ins += 1;
+        } else {
+            dup += 1;
+        }
+    }
+    Ok((ins, dup))
+}
+
+/// 抓取并解析一个 feed (不查注册表、不写库), 供 Sincy Pulse provider 复用。
+/// 返回 [(dedup_key, title, payload)]。
+pub async fn fetch_feed_items(
+    client: &reqwest::Client,
+    f: &FeedConfig,
+) -> Result<Vec<(String, String, Value)>, String> {
     let resp = client.get(&f.url).send().await.map_err(|e| e.to_string())?;
     let status = resp.status();
     if !status.is_success() {
@@ -665,32 +700,7 @@ async fn collect_feed(
                 .collect()
         }
     };
-    let mut ins = 0usize;
-    let mut dup = 0usize;
-    for (dk, title, payload) in items {
-        let r = sqlx::query(
-            "INSERT INTO intel_items (id, source_id, kind, dedup_key, payload)
-             VALUES ($1, $2, $3, $4, $5) ON CONFLICT (dedup_key) DO NOTHING RETURNING id",
-        )
-        .bind(Uuid::new_v4())
-        .bind(&f.source_id)
-        .bind(&f.kind)
-        .bind(&dk)
-        .bind({
-            let mut p = payload;
-            p["title"] = json!(title);
-            p
-        })
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| e.to_string())?;
-        if r.is_some() {
-            ins += 1;
-        } else {
-            dup += 1;
-        }
-    }
-    Ok((ins, dup))
+    Ok(items)
 }
 
 async fn mark_job(
