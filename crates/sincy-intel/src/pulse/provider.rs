@@ -141,37 +141,90 @@ impl WebScrapeProvider {
     }
 }
 
-/// 从 HTML 里提取候选条目: 锚点 (href + 文本) 与话题标签, 附近数字作为 count 观测。
+/// 从 HTML 里提取候选条目: 先剥离 nav/header/footer/aside/script/style 页面 chrome,
+/// 再取锚点 (href + 文本); 话题标签要求带数字(热度)或高频出现, 避免把导航/语言名抓成实体。
 pub fn extract_html_items(html: &str, base_url: &str) -> Vec<(String, String, Value)> {
     use regex::Regex;
-    let mut out: Vec<(String, String, Value)> = Vec::new();
+    // 1) 剥离页面 chrome 与脚本样式
+    let mut stripped = html.to_string();
+    for t in ["nav", "header", "footer", "aside", "script", "style", "noscript"] {
+        let re = Regex::new(&format!("(?is)<{t}[^>]*>.*?</{t}>")).unwrap();
+        stripped = re.replace_all(&stripped, " ").into_owned();
+    }
+    let stripped = Regex::new(r"(?is)<!--.*?-->")
+        .unwrap()
+        .replace_all(&stripped, " ");
     let anchor = Regex::new(r#"<a\s[^>]*href="([^"]+)"[^>]*>(.*?)</a>"#).unwrap();
     let tag = Regex::new(r"<[^>]+>").unwrap();
     let num = Regex::new(r"[\d][\d,.]*\s*[KkMm]?").unwrap();
+    // 导航/语言/通用词黑名单 (多语言)
+    const STOP: &[&str] = &[
+        "首页",
+        "home",
+        "login",
+        "登录",
+        "sign up",
+        "注册",
+        "more",
+        "更多",
+        "blog",
+        "statistics",
+        "methodology",
+        "monitoring",
+        "faq",
+        "follow us",
+        "see the full",
+        "leaderboard",
+        "中文",
+        "日本語",
+        "한국어",
+        "english",
+        "español",
+        "français",
+        "português",
+        "ภาษาไทย",
+        "türkçe",
+        "language",
+        "privacy",
+        "terms",
+        "contact",
+        "about",
+        "help",
+        "support",
+        "careers",
+        "press",
+        "developers",
+        "status",
+    ];
+    let mut out: Vec<(String, String, Value)> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for cap in anchor.captures_iter(html) {
+    for cap in anchor.captures_iter(&stripped) {
         let href = cap[1].trim();
-        let text = tag.replace_all(&cap[2], "").trim().to_string();
+        if href.starts_with('#') || href.starts_with("javascript:") || href.starts_with("mailto:") {
+            continue;
+        }
+        let raw_text = cap[2].to_string();
+        let text = tag.replace_all(&raw_text, "").trim().to_string();
+        let tl = text.to_lowercase();
         if text.len() < 3 || text.len() > 120 || seen.contains(&text) {
             continue;
         }
-        // 跳过纯导航
-        if matches!(
-            text.as_str(),
-            "首页" | "Home" | "登录" | "Login" | "注册" | "Sign up" | "更多" | "More"
-        ) {
+        if STOP
+            .iter()
+            .any(|w| tl == *w || (tl.len() < 24 && tl.contains(w)))
+        {
             continue;
         }
         seen.insert(text.clone());
         let url = if href.starts_with("http") {
             href.to_string()
-        } else if let Some(stripped) = href.strip_prefix('/') {
-            format!("{}/{}", base_url.trim_end_matches('/'), stripped)
+        } else if let Some(stripped_href) = href.strip_prefix('/') {
+            format!("{}/{}", base_url.trim_end_matches('/'), stripped_href)
         } else {
             continue;
         };
         let mut payload = serde_json::json!({"url": url, "text": text});
-        if let Some(m) = num.find(&cap[2]) {
+        if let Some(m) = num.find(&raw_text) {
             payload["count"] = Value::from(m.as_str().to_string());
         }
         let key = format!("html:{}", url);
@@ -180,20 +233,33 @@ pub fn extract_html_items(html: &str, base_url: &str) -> Vec<(String, String, Va
             break;
         }
     }
-    // 话题标签 (#xxx) 单独成 trend 实体
-    let hashtag = Regex::new(r"#([\p{L}\p{N}_]{2,60})").unwrap();
-    let mut hseen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for cap in hashtag.captures_iter(html) {
-        let tag_text = format!("#{}", &cap[1]);
-        if hseen.contains(&tag_text) {
-            continue;
+    // 2) 话题标签: 只在纯文本 (剥离所有标签后, 避免 CSS 颜色/URL 残片) 里提取,
+    //    必须以字母开头, 出现 >=2 次或旁边带数字 (热度), 才认为是趋势词
+    let plain = tag.replace_all(&stripped, " ");
+    let hashtag = Regex::new(r"#([\p{L}][\p{L}\p{N}_]{1,60})").unwrap();
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut with_num: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for cap in hashtag.captures_iter(&plain) {
+        let t = cap[1].to_string();
+        *counts.entry(t.clone()).or_insert(0) += 1;
+        // 找标签后 40 字符内是否有数字
+        let start = cap.get(0).unwrap().end();
+        let tail = plain
+            .get(start..(start + 40).min(plain.len()))
+            .unwrap_or("");
+        if num.is_match(tail) {
+            with_num.insert(t);
         }
-        hseen.insert(tag_text.clone());
-        out.push((
-            format!("tag:{}", &cap[1]),
-            tag_text.clone(),
-            serde_json::json!({"hashtag": tag_text}),
-        ));
+    }
+    for (t, c) in &counts {
+        if *c >= 2 || with_num.contains(t) {
+            let tag_text = format!("#{t}");
+            out.push((
+                format!("tag:{t}"),
+                tag_text.clone(),
+                serde_json::json!({"hashtag": tag_text, "freq": c}),
+            ));
+        }
         if out.len() >= 300 {
             break;
         }
@@ -342,17 +408,25 @@ mod tests {
     }
 
     #[test]
-    fn html_extractor_pulls_anchors_and_hashtags() {
+    fn html_extractor_pulls_anchors_and_hashtags_but_not_nav_junk() {
         let html = r#"<html><body>
+            <nav><a href="/blog">Blog</a><a href="/faq">FAQ</a><a href="/lang">中文</a></nav>
+            <footer><a href="/privacy">Privacy</a><a href="https://x.com/follow">Follow us on X</a></footer>
             <a href="https://x.com/alice/status/1">Alice post</a>
             <a href="/accounts/">账号榜</a>
             <span>#AI热门 219K</span>
+            <span>#noise</span>
             <a href="https://x.com/bob/status/2">Bob post</a>
         </body></html>"#;
         let items = extract_html_items(html, "https://example.com");
         assert!(items.iter().any(|(_, t, _)| t == "Alice post"));
         assert!(items.iter().any(|(_, t, _)| t == "账号榜"));
-        assert!(items.iter().any(|(_, t, _)| t.starts_with('#')));
+        assert!(items.iter().any(|(_, t, _)| t == "#AI热门")); // 带数字 → 趋势词
+        assert!(!items.iter().any(|(_, t, _)| t == "Blog"
+            || t == "中文"
+            || t == "Follow us on X"
+            || t == "Privacy"));
+        assert!(!items.iter().any(|(_, t, _)| t == "#noise")); // 低频无数字 → 过滤
     }
 
     #[test]
