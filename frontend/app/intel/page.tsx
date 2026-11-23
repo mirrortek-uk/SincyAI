@@ -138,7 +138,27 @@ export default function IntelPage() {
       </section>
 
       <section className="panel">
-        <h2>信源健康审计 (Source Health Audit)</h2>
+        <h2>
+          信源健康审计 (Source Health Audit)
+          {" "}
+          <button
+            style={{ fontSize: 12 }}
+            onClick={async () => {
+              try {
+                const r = await api.enableAllIntelSources();
+                const j = await api.resumeAllIntelJobs();
+                setMsg(`已启用全部信源 (${r.enabled} 个), 恢复 paused 任务 ${j.resumed} 个`);
+                await load();
+              } catch (e) { setError(String(e)); }
+            }}
+          >
+            一键启用全部信源
+          </button>
+        </h2>
+        <p className="muted" style={{ marginTop: 0 }}>
+          状态含义: healthy=正常入库 · degraded=有错误但仍在跑 · failed=最近全失败 ·
+          not_configured=已启用但缺外部配置(自托管 RSSHub/SearXNG 或 provider key) · disabled=已停用。
+        </p>
         {health && (
           <>
             <p>
@@ -151,7 +171,7 @@ export default function IntelPage() {
               ))}
             </p>
             <table>
-              <thead><tr><th>信源</th><th>健康状态</th><th>jobs</th><th>已运行</th><th>累计入库</th><th>上轮新增</th><th>最近错误</th></tr></thead>
+              <thead><tr><th>信源</th><th>健康状态</th><th>jobs</th><th>已运行</th><th>累计入库</th><th>上轮新增</th><th>最近错误</th><th>操作</th></tr></thead>
               <tbody>
                 {health.sources.map((s) => (
                   <tr key={s.source_id}>
@@ -162,6 +182,19 @@ export default function IntelPage() {
                     <td>{s.items_total}</td>
                     <td>{s.last_new ?? "-"}</td>
                     <td className="muted" style={{ color: "#ef4444" }}>{s.last_error ? s.last_error.slice(0, 60) : ""}</td>
+                    <td>
+                      <button
+                        style={{ fontSize: 11 }}
+                        onClick={async () => {
+                          try {
+                            await api.toggleIntelSource(s.source_id, !s.enabled);
+                            await load();
+                          } catch (e) { setError(String(e)); }
+                        }}
+                      >
+                        {s.enabled ? "停用" : "启用"}
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>

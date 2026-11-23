@@ -611,6 +611,10 @@ export const api = {
   listIntelJobs: () => req<{ items: IntelJob[] }>("/intel/jobs"),
   intelStats: () => req<IntelStats>("/intel/stats"),
   intelHealth: () => req<IntelHealth>("/intel/health"),
+  toggleIntelSource: (id: string, enabled: boolean) =>
+    req<{ id: string; enabled: boolean }>(`/intel/sources/${id}/toggle`, { method: "POST", body: JSON.stringify({ enabled }) }),
+  enableAllIntelSources: () => req<{ enabled: number }>("/intel/sources/enable-all", { method: "POST" }),
+  resumeAllIntelJobs: () => req<{ resumed: number }>("/intel/jobs/resume-all", { method: "POST" }),
   intelTrends: () => req<IntelTrends>("/intel/trends"),
   collectNow: () =>
     req<CollectResult>("/intel/collect", { method: "POST" }),

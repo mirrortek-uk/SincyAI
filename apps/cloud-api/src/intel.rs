@@ -37,6 +37,72 @@ pub fn routes() -> Router<AppState> {
         .route("/intel/stats", get(stats))
         .route("/intel/health", get(health_audit))
         .route("/intel/trends", get(trends))
+        .route("/intel/sources/{id}/toggle", post(toggle_source))
+        .route("/intel/sources/enable-all", post(enable_all_sources))
+        .route("/intel/jobs/resume-all", post(resume_all_jobs))
+}
+
+/// POST /intel/sources/{id}/toggle {enabled} — 启用/停用单个信源。
+async fn toggle_source(
+    State(state): State<AppState>,
+    axum::extract::Extension(_auth): axum::extract::Extension<crate::auth::AuthCtx>,
+    Path(id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<Value>, axum::response::Response> {
+    let pool = state.pool().map_err(app_error_response)?;
+    let enabled = body
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .ok_or_else(|| {
+            app_error_response(sincy_common::AppError::non_retryable(
+                "bad_request",
+                "body.enabled (bool) required",
+            ))
+        })?;
+    let n = sqlx::query("UPDATE intelligence_sources SET enabled = $1 WHERE id = $2")
+        .bind(enabled)
+        .bind(&id)
+        .execute(pool)
+        .await
+        .map_err(err)?
+        .rows_affected();
+    if n == 0 {
+        return Err(app_error_response(sincy_common::AppError::non_retryable(
+            "not_found",
+            "source not found",
+        )));
+    }
+    Ok(Json(json!({"id": id, "enabled": enabled})))
+}
+
+/// POST /intel/sources/enable-all — 一键启用全部信源。
+/// 需要外部配置(自托管 RSSHub / SearXNG / provider key)的源启用后仍会
+/// 带具体原因显示 degraded/not_configured, 不会静默假装工作。
+async fn enable_all_sources(
+    State(state): State<AppState>,
+    axum::extract::Extension(_auth): axum::extract::Extension<crate::auth::AuthCtx>,
+) -> Result<Json<Value>, axum::response::Response> {
+    let pool = state.pool().map_err(app_error_response)?;
+    let n = sqlx::query("UPDATE intelligence_sources SET enabled = true")
+        .execute(pool)
+        .await
+        .map_err(err)?
+        .rows_affected();
+    Ok(Json(json!({"enabled": n})))
+}
+
+/// POST /intel/jobs/resume-all — 把所有 paused 任务恢复为 idle。
+async fn resume_all_jobs(
+    State(state): State<AppState>,
+    axum::extract::Extension(_auth): axum::extract::Extension<crate::auth::AuthCtx>,
+) -> Result<Json<Value>, axum::response::Response> {
+    let pool = state.pool().map_err(app_error_response)?;
+    let n = sqlx::query("UPDATE intel_collection_jobs SET status = 'idle' WHERE status = 'paused'")
+        .execute(pool)
+        .await
+        .map_err(err)?
+        .rows_affected();
+    Ok(Json(json!({"resumed": n})))
 }
 
 /// GET /intel/health — Source Health Audit (WI §28): 每个注册信源的健康状态
