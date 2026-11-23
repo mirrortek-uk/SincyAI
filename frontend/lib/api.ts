@@ -427,6 +427,25 @@ export interface SkillItem {
   bound_at?: string;
 }
 
+export interface PluginAgent {
+  type: "agent";
+  kind: string;
+  title: string;
+  description: string;
+}
+
+export interface PluginSkill extends SkillItem {
+  type: "skill";
+  what_it_does?: string | null;
+  handler?: boolean;
+}
+
+export interface PluginManifest {
+  employee: { id: string; name: string; role: string; status: string };
+  agents: PluginAgent[];
+  skills: PluginSkill[];
+}
+
 export const api = {
   health: () => req<Health>("/healthz"),
   version: () => req<VersionInfo>("/version"),
@@ -568,6 +587,7 @@ export const api = {
   registerSkill: (body: { domain: string; name: string; title?: string; description?: string; tools?: string[] }) =>
     req<{ id: string; name: string; domain: string; version: number }>("/skills", { method: "POST", body: JSON.stringify(body) }),
   listEmployeeSkills: (id: string) => req<{ items: SkillItem[] }>(`/employees/${id}/skills`),
+  listPlugins: (id: string) => req<PluginManifest>(`/employees/${id}/plugins`),
   bindSkill: (id: string, body: { skill_id?: string; name?: string; enabled?: boolean }) =>
     req<{ employee_id: string; skill_id: string; enabled: boolean }>(`/employees/${id}/skills`, { method: "POST", body: JSON.stringify(body) }),
   unbindSkill: (id: string, skillId: string) =>

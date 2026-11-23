@@ -12,6 +12,7 @@ import {
   type EmployeeItem,
   type InsightItem,
   type MemoryItem,
+  type PluginManifest,
   type SkillItem,
 } from "@/lib/api";
 
@@ -27,6 +28,7 @@ export default function EmployeesPage() {
   const [memory, setMemory] = useState<MemoryItem[]>([]);
   const [insights, setInsights] = useState<InsightItem[]>([]);
   const [skills, setSkills] = useState<SkillItem[]>([]);
+  const [plugins, setPlugins] = useState<PluginManifest | null>(null);
   const [name, setName] = useState("");
   const [brandId, setBrandId] = useState("");
   const [language, setLanguage] = useState("zh-CN");
@@ -51,16 +53,18 @@ export default function EmployeesPage() {
   const loadDetail = useCallback(async (id: string) => {
     if (!id || !getToken()) return;
     try {
-      const [c, m, i, sk] = await Promise.all([
+      const [c, m, i, sk, pl] = await Promise.all([
         api.listCycles(id),
         api.listMemory(id),
         api.listInsights(id),
         api.listEmployeeSkills(id),
+        api.listPlugins(id),
       ]);
       setCycles(c.items);
       setMemory(m.items);
       setInsights(i.items);
       setSkills(sk.items);
+      setPlugins(pl);
       setCycleDetail(null);
     } catch (e) {
       setError(String(e));
@@ -251,6 +255,79 @@ export default function EmployeesPage() {
             {insights.slice(0, 10).map((i) => (
               <p key={i.id} className="muted">{i.content}</p>
             ))}
+          </section>
+
+          <section className="panel">
+            <h2>插件清单 (Agents + Skills)</h2>
+            <p className="muted" style={{ marginTop: 0 }}>
+              该员工实际拥有的能力 = 内置 agents (运营周期各司其职) + 绑定的 skills (可被调用的具体工具)。
+              每个插件都标明了"具体干什么"。
+            </p>
+            {plugins && (
+              <>
+                <h3 style={{ marginBottom: 4 }}>内置 Agents ({plugins.agents.length})</h3>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 8 }}>
+                  {plugins.agents.map((a) => (
+                    <div key={a.kind} style={{ border: "1px solid var(--border)", borderRadius: 8, padding: "8px 10px" }}>
+                      <div style={{ fontWeight: 600, fontSize: 13 }}>
+                        🤖 {a.title} <span className="muted" style={{ fontWeight: 400, fontSize: 11 }}>[{a.kind}]</span>
+                      </div>
+                      <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>{a.description}</div>
+                    </div>
+                  ))}
+                </div>
+                <h3 style={{ marginBottom: 4, marginTop: 12 }}>
+                  绑定的 Skills ({plugins.skills.filter((s) => s.enabled !== false).length}/{plugins.skills.length})
+                </h3>
+                {Object.entries(
+                  plugins.skills.reduce<Record<string, typeof plugins.skills>>((acc, s) => {
+                    (acc[s.domain] ??= []).push(s);
+                    return acc;
+                  }, {}),
+                ).map(([domain, list]) => (
+                  <div key={domain} style={{ marginBottom: 8 }}>
+                    <strong style={{ fontSize: 13 }}>{domain}</strong>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 8, marginTop: 4 }}>
+                      {list.map((s) => (
+                        <div
+                          key={s.id}
+                          data-skill={s.name}
+                          style={{
+                            border: "1px solid var(--border)",
+                            borderRadius: 8,
+                            padding: "8px 10px",
+                            opacity: s.enabled === false ? 0.5 : 1,
+                          }}
+                        >
+                          <div style={{ fontWeight: 600, fontSize: 13 }}>
+                            🧩 {s.title || s.name}{" "}
+                            <span className="muted" style={{ fontWeight: 400, fontSize: 11 }}>
+                              {s.name} v{s.version}
+                            </span>
+                            {s.handler ? (
+                              <span style={{ fontSize: 10, color: "var(--accent)", marginLeft: 6 }}>可执行</span>
+                            ) : (
+                              <span className="muted" style={{ fontSize: 10, marginLeft: 6 }}>元数据</span>
+                            )}
+                            {s.enabled === false && (
+                              <span style={{ fontSize: 10, color: "var(--danger)", marginLeft: 6 }}>已停用</span>
+                            )}
+                          </div>
+                          <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+                            {s.what_it_does || s.description}
+                          </div>
+                          {s.tools?.length > 0 && (
+                            <div className="muted" style={{ fontSize: 10.5, marginTop: 4 }}>
+                              tools: {s.tools.join(", ")}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </>
+            )}
           </section>
 
           <section className="panel">
