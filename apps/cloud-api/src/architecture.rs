@@ -105,8 +105,6 @@ async fn architecture(
                      "超限且规则为 thread 时, 内容拆成多帖写入 publishing_packages.thread_chunks; publish_core 按 chunk 扇出多个 device_tasks(幂等键 :tN), agent brief 按 thread_index 取对应分块文本"),
                 node("wi", "世界情报 sincy-intel", "registry · router · opportunity · adapter",
                      "信源/Provider 注册表(28 个注册源, 支持 enable-all/单源 toggle); 路由打分 健康.45+可靠.30+限流.15+成本.10 + 降级链; ingest 按 dedup_key 去重; 机会引擎 0.35 支柱匹配+0.25 动量+0.15 量+0.15 稀缺+0.10 新鲜度, 过滤阈值 0.45, 周期行动阈值 0.30; wikipedia-rc 独占话题 ×0.5 防噪; DE 适配器(只给建议不改策略)"),
-                node("pipe", "情报管线 sincy-intel::pipeline (Sincy-05)", "Connector SPI · RawRecord · Type Router · Pipelines · Signals · migration 0035",
-                     "Connector 只负责接入产出统一 RawRecord (record_type, dedup_key, provenance, cursor 幂等); 每个 record_type 一个 bus 主题 intel.raw.*; Type Router 按 record_type 路由到独立 pipeline (article/trend/ranking/social_post/...); 每条 pipeline = 类型 processor + universal 富化(行业/主题/语言/质量/相关性); 输出统一 IntelEntity (四层存储: raw_records/entities/trend_series+ranking_snapshots/signals); 信号进 Opportunity Engine"),
                 node("pub", "发布管线 routing/execution/platform/content", "publish_core",
                      "急停 → 审批门(pending 包)→ 路由选择(device@10/api@50/assisted@90, device 路由按实时健康度选设备: 在线窗口 120s > 积压少 > 1h 失败率低, 并写回 assigned_device_id)→ 配额 → 幂等键 → 审计; thread 包按 chunk 扇出多任务; 任务租约/到期回收; side_effect 完成后失败记 FAILED_FINAL 且重试需 force=true, 不允许盲重试"),
                 node("adapter", "Adapter 引擎 sincy-adapter", "YAML 定义 · 解释器 · 漂移检测 · HMAC-SHA256 + Ed25519 双签名方案(signature_scheme)",
@@ -125,6 +123,24 @@ async fn architecture(
                      "共享手势计划器: tap 偏心高斯抖动(不出 10% 内缩框)+ 随机 hold/pre/post 延迟; swipe 二次贝塞尔弓形 + 逐点抖动 + ease-in-out 分段时序(中段快两端慢)+ 噪声; 每段带 pressure 模型(后端能写入才生效); APK 与 adb 两端执行同一份计划, --seed 可复现"),
                 node("ai", "AI sincy-ai", "LLM gateway · budget · analytics",
                      "SINCY_LLM_PROVIDER: mock(仅本地) / openai-compatible(任意兼容端点, 含 Mistral api.mistral.ai/v1, key 走 SINCY_LLM_API_KEY 环境变量不入库) / manual-file(本地把 Vibe 会话接入为 LLM: prompt 写文件等回写); 月度预算检查+熔断(FR-026); 成本落账; 指标回流内容版本(FR-016)"),
+            ]
+        },
+        {
+            "id": "pipeflow",
+            "title": "情报管线内部 sincy-intel::pipeline (Sincy-05)",
+            "nodes": [
+                node("pipe_conn", "① Connector 只负责采集", "Connector SPI · RSS / HTTP JSON / HTML / 无头浏览器 · cursor 幂等",
+                     "每个源一个 Connector: 认证/翻页/限流/重试/解析, 只产出统一信封不做判断; 新增数据源 = 只写一个新连接器, 零管道改动"),
+                node("pipe_raw", "② RawRecord 统一信封", "record_type + dedup_key + provenance + fetched_at/observed_at",
+                     "article / trend / ranking / social_post / event / metric …; 入口强类型校验后落 intelligence_raw_records (migration 0035), 原始永久保留支持历史重放"),
+                node("pipe_router", "③ Type Router 类型路由", "bus 主题 intel.raw.{record_type} (现进程内, 后续换 NATS)",
+                     "按 record_type 分发到独立 pipeline, 阶段间天然缓冲/背压/重试/可独立扩容; dedup_key 跨源去重, 重复轮询幂等"),
+                node("pipe_pl", "④ 专属 Pipeline ×12", "article / trend / ranking / social_post / research / search … · 13 个可注册 processor",
+                     "每条 pipeline = 类型 processor 链 + universal 富化 (实体解析/行业分类/主题分类/语言/去重/质量/相关性/趋势爆发检测); 同一形状的新源只写连接器, 真正新形状才新增一种 pipeline"),
+                node("pipe_ent", "⑤ 统一实体 + 行业标签", "IntelligenceEntity · industry_tags / topic_tags / language / quality / relevance / confidence",
+                     "四层存储: raw_records / intelligence_entities / trend_series + ranking_snapshots / intelligence_signals; 行业标签支撑千行千面的客户画像与相关性引擎"),
+                node("pipe_sig", "⑥ Intelligence Signals", "trend_rising / creator_growth / content_viral / industry_event / market_shift …",
+                     "下游只认 Signal: Opportunity Engine → Content Factory → 发布管线, 不关心信号来自 RSS 还是 xbangdan"),
             ]
         },
         {
@@ -250,17 +266,47 @@ async fn architecture(
         edge("wi", "db", "intel_items / opportunities", "data"),
         edge(
             "wi",
-            "pipe",
-            "collector/pulse 产出 RawRecord 双写",
+            "pipe_conn",
+            "collector 产出 RawRecord (双写 intel_items)",
             "inproc"
         ),
         edge(
-            "pipe",
+            "pipe_conn",
+            "pipe_raw",
+            "采集 → 统一信封 RawRecord",
+            "inproc"
+        ),
+        edge(
+            "pipe_raw",
+            "pipe_router",
+            "发布 bus intel.raw.{record_type}",
+            "inproc"
+        ),
+        edge(
+            "pipe_router",
+            "pipe_pl",
+            "按 record_type 路由到专属 pipeline",
+            "inproc"
+        ),
+        edge(
+            "pipe_pl",
+            "pipe_ent",
+            "processor 链 + universal 富化 → IntelEntity",
+            "inproc"
+        ),
+        edge(
+            "pipe_ent",
+            "pipe_sig",
+            "信号生成 (trend/viral/growth/event)",
+            "signal"
+        ),
+        edge(
+            "pipe_ent",
             "db",
             "raw_records / entities / signals / trend_series / ranking_snapshots",
             "data"
         ),
-        edge("pipe", "wi", "signals → 机会引擎", "signal"),
+        edge("pipe_sig", "wi", "signals → 机会引擎 → Content Factory", "signal"),
         edge("api", "db", "全部业务读写 (RLS 按 agency 隔离)", "data"),
         edge("wi", "wisrc", "只读采集/搜索/趋势", "external"),
         edge(
@@ -279,7 +325,7 @@ async fn architecture(
         edge("pulse", "wi", "聚合源 sincy-pulse 镜像 intel_items", "sql"),
         edge(
             "pulse",
-            "pipe",
+            "pipe_conn",
             "pulse 实体作为 RawRecord 进统一 pipeline 产出 signals",
             "inproc"
         ),
@@ -296,6 +342,7 @@ async fn architecture(
             "data"
         ),
         edge("collector", "wi", "新信号触发机会引擎重算", "internal"),
+        edge("collector", "pipe_conn", "feed 归一化为 RawRecord 进管线", "inproc"),
         edge(
             "api",
             "collector",
@@ -399,6 +446,10 @@ async fn architecture(
         {
             "id": "F8", "title": "设备端人工化触摸执行 (APK / adb 两路)",
             "steps": "解释器产出 Action → sincy-adapter::humanize 生成手势计划(偏心抖动 tap / 贝塞尔弓形+逐点抖动+ease-in-out 分段 swipe, 随机延迟, pressure 模型) → 手机 APK: JNI 下发计划, 无障碍 dispatchGesture 多段 willContinue 连续 stroke 注入真实触摸; 电脑: AdbIo 执行 `adb shell input tap/swipe` 分段 → 挑战屏/漂移/版本不符即停 (WAITING_USER / UiDrift), 不盲点"
+        },
+        {
+            "id": "F13", "title": "情报管线: Source → Connector → RawRecord → 路由 → Pipeline → 实体/行业标签 → Signals",
+            "steps": "Source(wisrc / pulse / collector) → Connector 只采集, 产出统一信封 RawRecord(record_type + dedup_key + provenance, cursor 幂等) → Type Router 按 record_type 发布 bus intel.raw.* → 专属 pipeline 跑类型 processor + universal 富化(行业/主题/语言/去重/质量/相关性) → 统一 IntelEntity 落四层存储(raw_records/entities/trend_series+ranking_snapshots/signals) → 生成 Intelligence Signals → Opportunity Engine → Content Factory; 新增数据源只写一个 Connector, 真正的新内容形状才新增一种 pipeline"
         },
         {
             "id": "F9", "title": "生产化路径 (SINCY_ENV=production)",
@@ -641,6 +692,12 @@ async fn architecture(
         ("F10", vec!["console", "api", "rules", "thread", "pub"]),
         ("F11", vec!["console", "api", "de", "plugins"]),
         ("F12", vec!["pulse", "wisrc", "db", "console"]),
+        (
+            "F13",
+            vec![
+                "wisrc", "pipe_conn", "pipe_raw", "pipe_router", "pipe_pl", "pipe_ent", "pipe_sig", "wi",
+            ],
+        ),
     ];
     let flows = {
         let mut v = flows;

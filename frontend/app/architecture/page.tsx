@@ -26,6 +26,9 @@ const KIND_COLOR: Record<string, string> = {
   internal: "#a78bfa",
   data: "#f59e0b",
   external: "#ef4444",
+  inproc: "#22d3ee",
+  signal: "#f472b6",
+  sql: "#a3e635",
 };
 
 interface Pos {
