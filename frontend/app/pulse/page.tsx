@@ -17,7 +17,9 @@ export default function PulsePage() {
   const [health, setHealth] = useState<PulseHealth | null>(null);
   const [entities, setEntities] = useState<PulseEntity[]>([]);
   const [selectedEntity, setSelectedEntity] = useState<string | null>(null);
+  const [selectedTitle, setSelectedTitle] = useState("");
   const [observations, setObservations] = useState<PulseObservation[]>([]);
+  const [obsLoading, setObsLoading] = useState(false);
   const [typeFilter, setTypeFilter] = useState("");
   const [classFilter, setClassFilter] = useState("");
   const [msg, setMsg] = useState<string | null>(null);
@@ -65,13 +67,18 @@ export default function PulsePage() {
     load();
   }, [load]);
 
-  async function showObservations(id: string) {
+  async function showObservations(id: string, title: string) {
+    setSelectedEntity(id);
+    setSelectedTitle(title);
+    setObservations([]);
+    setObsLoading(true);
     try {
       const r = await api.listPulseObservations(id);
       setObservations(r.items);
-      setSelectedEntity(id);
     } catch (e) {
       setError(String(e));
+    } finally {
+      setObsLoading(false);
     }
   }
 
@@ -216,32 +223,56 @@ export default function PulsePage() {
                   <td>{e.confidence.level ?? "-"} {e.confidence.score !== undefined ? `(${(e.confidence.score * 100).toFixed(0)}%)` : ""}</td>
                   <td>{e.trend.classification ?? "-"}{firstMetric?.estimated !== undefined ? ` · ${Math.round(firstMetric.estimated).toLocaleString()}` : ""}</td>
                   <td className="muted">{e.updated_at.slice(0, 19).replace("T", " ")}</td>
-                  <td><button style={{ fontSize: 11 }} onClick={() => showObservations(e.id)}>查看</button></td>
+                  <td><button style={{ fontSize: 11 }} onClick={() => showObservations(e.id, e.title)}>查看</button></td>
                 </tr>
               );
             })}
           </tbody>
         </table>
 
-        {selectedEntity && (
-          <div style={{ marginTop: 10 }}>
-            <h3>原始观测 (可审计)</h3>
-            <table>
-              <thead><tr><th>provider</th><th>metric</th><th>value</th><th>时间</th></tr></thead>
-              <tbody>
-                {observations.map((o, i) => (
-                  <tr key={i}>
-                    <td>{o.provider_id}</td>
-                    <td>{o.metric}</td>
-                    <td>{JSON.stringify(o.value)}</td>
-                    <td className="muted">{o.observed_at.slice(0, 19).replace("T", " ")}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
       </section>
+
+      {selectedEntity && (
+        <div
+          style={{
+            position: "fixed", inset: 0, background: "rgba(0,0,0,.45)",
+            display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50,
+          }}
+          onClick={() => setSelectedEntity(null)}
+        >
+          <div
+            className="panel"
+            style={{ maxWidth: 720, width: "90%", maxHeight: "80vh", overflow: "auto" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <h3 style={{ margin: 0 }}>原始观测 (可审计)</h3>
+              <button onClick={() => setSelectedEntity(null)}>关闭</button>
+            </div>
+            <p className="muted" style={{ margin: "6px 0" }}>
+              实体: {selectedTitle.slice(0, 80)} · 共 {observations.length} 条跨源观测
+            </p>
+            {obsLoading && <p className="muted">加载中…</p>}
+            {!obsLoading && observations.length === 0 && <p className="muted">该实体暂无原始观测。</p>}
+            {!obsLoading && observations.length > 0 && (
+              <table>
+                <thead><tr><th>provider</th><th>dataset</th><th>metric</th><th>value</th><th>时间</th></tr></thead>
+                <tbody>
+                  {observations.map((o, i) => (
+                    <tr key={i}>
+                      <td>{o.provider_id}</td>
+                      <td className="muted">{o.dataset_id}</td>
+                      <td>{o.metric}</td>
+                      <td>{JSON.stringify(o.value)}</td>
+                      <td className="muted">{o.observed_at.slice(0, 19).replace("T", " ")}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </div>
+      )}
     </main>
   );
 }
