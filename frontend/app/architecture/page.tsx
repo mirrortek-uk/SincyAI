@@ -62,8 +62,8 @@ export default function ArchitecturePage() {
     return map;
   }, [arch]);
 
-  if (error) return <main><h1>架构图</h1><p style={{ color: "#ef4444" }}>{error}</p></main>;
-  if (!arch) return <main><h1>架构图</h1><p className="muted">加载中…</p></main>;
+  if (error) return <main className="arch-root"><h1>架构图</h1><p style={{ color: "#ef4444" }}>{error}</p></main>;
+  if (!arch) return <main className="arch-root"><h1>架构图</h1><p className="muted">加载中…</p></main>;
 
   const width = PAD * 2 + arch.layers.length * LAYER_W + (arch.layers.length - 1) * LAYER_GAP;
   const height =
@@ -96,7 +96,7 @@ export default function ArchitecturePage() {
   };
 
   return (
-    <main>
+    <main className="arch-root">
       <h1>{arch.title}</h1>
       <p className="muted">
         {arch.service} v{arch.version} · 模型生成时间 {arch.generated_at.slice(0, 19).replace("T", " ")} ·

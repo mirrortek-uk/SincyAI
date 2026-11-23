@@ -46,6 +46,11 @@ body {
   max-width: 1100px;
 }
 
+/* 架构图页需要完整宽度渲染 SVG (比 1100px 宽), 不受全局 max-width 限制 */
+.content:has(> .arch-root) {
+  max-width: none;
+}
+
 .panel {
   background: var(--panel);
   border: 1px solid var(--border);
