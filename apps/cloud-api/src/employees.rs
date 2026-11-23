@@ -47,6 +47,68 @@ pub fn routes() -> Router<AppState> {
         .route("/cycles/{id}", get(get_cycle))
         .route("/employees/{id}/memory", get(list_memory))
         .route("/employees/{id}/insights", get(list_insights))
+        .route("/employees/{id}/plugins", get(list_plugins))
+}
+
+/// GET /api/v1/employees/{id}/plugins — 插件清单:该员工的内置 agents + 已绑定 skills,
+/// 每个条目都带 title/description,便于人理解"这个员工到底能干什么"。
+async fn list_plugins(
+    State(state): State<AppState>,
+    axum::extract::Extension(auth): axum::extract::Extension<crate::auth::AuthCtx>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, axum::response::Response> {
+    let pool = state.pool().map_err(app_error_response)?;
+    let r = sqlx::query("SELECT * FROM digital_employees WHERE id = $1 AND agency_id = $2")
+        .bind(id)
+        .bind(auth.agency_id.as_uuid())
+        .fetch_optional(pool)
+        .await
+        .map_err(err)?
+        .ok_or_else(|| {
+            app_error_response(sincy_common::AppError::non_retryable(
+                "not_found",
+                "employee not found",
+            ))
+        })?;
+    let e = row_to_employee(&r);
+    let skill_rows = sqlx::query(
+        "SELECT s.*, b.enabled, b.bound_at FROM employee_skill_bindings b \
+         JOIN skills s ON s.id = b.skill_id WHERE b.employee_id = $1 ORDER BY s.domain, s.name",
+    )
+    .bind(id)
+    .fetch_all(pool)
+    .await
+    .map_err(err)?;
+    let skills: Vec<Value> = skill_rows
+        .iter()
+        .map(|r| {
+            let tools: Value = r.get("tools");
+            json!({
+                "type": "skill",
+                "id": r.get::<Uuid, _>("id"),
+                "domain": r.get::<String, _>("domain"),
+                "name": r.get::<String, _>("name"),
+                "version": r.get::<i32, _>("version"),
+                "title": r.get::<String, _>("title"),
+                "description": r.get::<String, _>("description"),
+                "tools": tools.as_array().cloned().unwrap_or_default(),
+                "handler": sincy_employee::handlers::handler_skill_names()
+                    .contains(&r.get::<String, _>("name").as_str()),
+                "enabled": r.get::<bool, _>("enabled"),
+                "bound_at": r.get::<chrono::DateTime<chrono::Utc>, _>("bound_at"),
+            })
+        })
+        .collect();
+    Ok(Json(json!({
+        "employee": {
+            "id": e.id,
+            "name": e.name,
+            "role": e.role,
+            "status": e.status.as_str(),
+        },
+        "agents": AgentKind::all_plugin_json(),
+        "skills": skills,
+    })))
 }
 
 // ---------- helpers ----------
