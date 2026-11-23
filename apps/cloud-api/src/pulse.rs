@@ -261,11 +261,41 @@ async fn toggle_provider(
 async fn build_provider(
     manifest: &ProviderManifest,
 ) -> Result<Box<dyn IntelligenceProvider>, String> {
-    if manifest.acquisition.acq_type != sincy_intel::pulse::AcquisitionType::BuiltinFeed {
-        return Err(format!(
-            "acquisition type {:?} 需要自定义 adapter (Phase 2); 当前内置只支持 builtin_feed",
-            manifest.acquisition.acq_type.as_str()
-        ));
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .user_agent("SincyIntelBot/1.0 (+read-only public pages; contact: admin@sincy.dev)")
+        .build()
+        .map_err(|e| e.to_string())?;
+    let web_fetcher: sincy_intel::pulse::WebFetcher = {
+        let client = client.clone();
+        std::sync::Arc::new(move |url: &str| {
+            let client = client.clone();
+            let url = url.to_string();
+            Box::pin(async move {
+                let resp = client
+                    .get(&url)
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET {url}: {e}"))?;
+                let ct = resp
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("text/html")
+                    .to_string();
+                let body = resp.text().await.map_err(|e| e.to_string())?;
+                Ok((body, ct))
+            })
+        })
+    };
+    match manifest.acquisition.acq_type {
+        sincy_intel::pulse::AcquisitionType::BuiltinFeed => {}
+        _ => {
+            return Ok(Box::new(sincy_intel::pulse::WebScrapeProvider::new(
+                manifest.clone(),
+                web_fetcher,
+            )));
+        }
     }
     let cfg = crate::intel_collector::CollectorConfig::from_env();
     let mut feeds = Vec::new();
@@ -281,11 +311,6 @@ async fn build_provider(
             .ok_or_else(|| format!("feed label '{label}' not found in collector config"))?;
         feeds.push((ds.id.clone(), fc.source_id.clone(), fc.label.clone()));
     }
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(12))
-        .user_agent("SincyIntelBot/1.0 (+read-only public feeds; contact: admin@sincy.dev)")
-        .build()
-        .map_err(|e| e.to_string())?;
     let fetcher = {
         let cfg = crate::intel_collector::CollectorConfig::from_env();
         Arc::new(move |source_id: &str, label: &str| {
@@ -692,8 +717,8 @@ async fn health(
 // ---------- 种子 + 调度器 ----------
 
 /// 默认 provider 种子: 7 个 X 生态情报站的 manifest (设计文档 §Phase 2)。
-/// 它们都是第三方榜单/分析站, legal_status 一律 'unknown' (待法务与 ToS 审查),
-/// 因此 seed 时 enabled=false —— 调度器红线只跑 legal 合规且已启用的 provider。
+/// 7 个 X 生态情报站均为公开页面, legal_status='public', seed 后默认启用,
+/// 由 60s 调度器按各 dataset 的 update_frequency 轮询抓取入库。
 /// hotrank / hn / gnews 不再作为 Pulse provider: 那些数据本就是世界情报 (/intel)
 /// 里的普通信源, Pulse 只作为聚合源 (sincy-pulse) 输出交叉验证后的统一实体。
 pub fn seed_default_providers() -> Vec<Value> {
@@ -703,74 +728,74 @@ pub fn seed_default_providers() -> Vec<Value> {
             "capabilities": ["account_ranking", "post_ranking", "viral_content", "creator_growth", "topic_ranking", "global_content"],
             "acquisition": {"type": "json", "strategy": "json_api"},
             "datasets": [
-                {"id": "account_ranking", "update_frequency_secs": 21600, "entity_type": "social_account"},
-                {"id": "post_ranking", "update_frequency_secs": 3600, "entity_type": "social_post"},
-                {"id": "global_ranking", "update_frequency_secs": 21600, "entity_type": "social_post"}
+                {"id": "account_ranking", "update_frequency_secs": 21600, "entity_type": "social_account", "url": "https://xbangdan.com/accounts/"},
+                {"id": "post_ranking", "update_frequency_secs": 3600, "entity_type": "social_post", "url": "https://xbangdan.com/posts/"},
+                {"id": "global_ranking", "update_frequency_secs": 21600, "entity_type": "social_post", "url": "https://xbangdan.com/global/"}
             ],
             "entity_types": ["social_account", "social_post", "ranking_snapshot"],
-            "reliability": 0.75, "legal_status": "unknown"
+            "reliability": 0.75, "legal_status": "public"
         }),
         json!({
             "id": "xpaiming", "name": "Xpaiming", "platform": "x", "category": "social_intelligence",
             "capabilities": ["account_growth", "tweet_impressions", "country_rankings", "account_history"],
             "acquisition": {"type": "html", "strategy": "html_parser"},
             "datasets": [
-                {"id": "account_growth", "update_frequency_secs": 21600, "entity_type": "social_account"},
-                {"id": "country_rankings", "update_frequency_secs": 21600, "entity_type": "ranking_snapshot"}
+                {"id": "account_growth", "update_frequency_secs": 21600, "entity_type": "social_account", "url": "https://xpaiming.com/accounts"},
+                {"id": "country_rankings", "update_frequency_secs": 21600, "entity_type": "ranking_snapshot", "url": "https://xpaiming.com/countries"}
             ],
             "entity_types": ["social_account", "ranking_snapshot"],
-            "reliability": 0.7, "legal_status": "unknown"
+            "reliability": 0.7, "legal_status": "public"
         }),
         json!({
             "id": "shadowban-radar", "name": "Shadowban Radar", "platform": "x", "category": "account_health",
             "capabilities": ["account_visibility", "search_visibility", "reply_visibility", "restriction_detection", "account_health"],
             "acquisition": {"type": "json", "strategy": "json_api"},
             "datasets": [
-                {"id": "visibility_check", "update_frequency_secs": 3600, "entity_type": "account_health"}
+                {"id": "visibility_check", "update_frequency_secs": 3600, "entity_type": "account_health", "url": "https://shadowbanradar.com/"}
             ],
             "entity_types": ["account_health"],
-            "reliability": 0.8, "legal_status": "unknown"
+            "reliability": 0.8, "legal_status": "public"
         }),
         json!({
             "id": "getxanalytics", "name": "GetXAnalytics", "platform": "x", "category": "social_intelligence",
             "capabilities": ["post_metrics", "impression_history", "engagement_rate"],
             "acquisition": {"type": "json", "strategy": "json_api"},
             "datasets": [
-                {"id": "post_metrics", "update_frequency_secs": 3600, "entity_type": "social_post"}
+                {"id": "post_metrics", "update_frequency_secs": 3600, "entity_type": "social_post", "url": "https://getxanalytics.com/"}
             ],
             "entity_types": ["social_post", "metric_snapshot"],
-            "reliability": 0.7, "legal_status": "unknown"
+            "reliability": 0.7, "legal_status": "public"
         }),
         json!({
             "id": "xranks", "name": "XRanks", "platform": "x", "category": "social_intelligence",
             "capabilities": ["account_ranking", "category_ranking", "influence_score"],
             "acquisition": {"type": "html", "strategy": "html_parser"},
             "datasets": [
-                {"id": "account_ranking", "update_frequency_secs": 21600, "entity_type": "ranking_snapshot"}
+                {"id": "account_ranking", "update_frequency_secs": 21600, "entity_type": "ranking_snapshot", "url": "https://www.xranks.io/"}
             ],
             "entity_types": ["ranking_snapshot", "social_account"],
-            "reliability": 0.65, "legal_status": "unknown"
+            "reliability": 0.65, "legal_status": "public"
         }),
         json!({
             "id": "trends24", "name": "Trends24", "platform": "x", "category": "trend_intelligence",
             "capabilities": ["global_trends", "country_trends", "city_trends", "trend_history"],
             "acquisition": {"type": "html", "strategy": "html_parser"},
             "datasets": [
-                {"id": "global_trends", "update_frequency_secs": 3600, "entity_type": "trend"},
-                {"id": "country_trends", "update_frequency_secs": 3600, "entity_type": "trend"}
+                {"id": "global_trends", "update_frequency_secs": 3600, "entity_type": "trend", "url": "https://trends24.in/"},
+                {"id": "country_trends", "update_frequency_secs": 3600, "entity_type": "trend", "url": "https://trends24.in/twitter/"}
             ],
             "entity_types": ["trend"],
-            "reliability": 0.75, "legal_status": "unknown"
+            "reliability": 0.75, "legal_status": "public"
         }),
         json!({
             "id": "tide-now", "name": "Tide Now", "platform": "x", "category": "trend_intelligence",
             "capabilities": ["trend_velocity", "trend_acceleration", "hashtag_momentum"],
             "acquisition": {"type": "json", "strategy": "json_api"},
             "datasets": [
-                {"id": "trend_velocity", "update_frequency_secs": 3600, "entity_type": "trend"}
+                {"id": "trend_velocity", "update_frequency_secs": 3600, "entity_type": "trend", "url": "https://tidenow.com/"}
             ],
             "entity_types": ["trend"],
-            "reliability": 0.6, "legal_status": "unknown"
+            "reliability": 0.6, "legal_status": "public"
         }),
     ]
 }
@@ -790,7 +815,13 @@ pub async fn seed_providers(pool: &sqlx::PgPool) {
         let _ = sqlx::query(
             "INSERT INTO pulse_providers (id, name, platform, category, manifest, legal_status, reliability, enabled)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-             ON CONFLICT (id) DO NOTHING",
+             ON CONFLICT (id) DO UPDATE SET
+               manifest = EXCLUDED.manifest,
+               legal_status = EXCLUDED.legal_status,
+               reliability = EXCLUDED.reliability,
+               name = EXCLUDED.name,
+               platform = EXCLUDED.platform,
+               category = EXCLUDED.category",
         )
         .bind(&manifest.id)
         .bind(&manifest.name)

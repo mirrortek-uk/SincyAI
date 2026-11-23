@@ -73,6 +73,9 @@ pub struct Dataset {
     /// 对 builtin_feed provider: 对应 intel_collector 里的 feed label
     #[serde(default)]
     pub feed_label: Option<String>,
+    /// 对 web 类 provider (json/html/api): 该 dataset 抓取的 URL
+    #[serde(default)]
+    pub url: Option<String>,
     #[serde(default)]
     pub entity_type: String,
 }

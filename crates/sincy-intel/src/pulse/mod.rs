@@ -11,4 +11,7 @@ pub mod provider;
 
 pub use entity::{AggregateMetrics, IntelligenceEntity, Observation, aggregate, classify_trend};
 pub use manifest::{Acquisition, AcquisitionType, Dataset, LegalStatus, ProviderManifest};
-pub use provider::{BuiltinFeedProvider, FeedFetcher, IntelligenceProvider, ProviderHealth};
+pub use provider::{
+    BuiltinFeedProvider, FeedFetcher, IntelligenceProvider, ProviderHealth, WebFetcher,
+    WebScrapeProvider, extract_html_items, extract_json_items,
+};
