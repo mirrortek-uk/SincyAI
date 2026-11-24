@@ -38,6 +38,14 @@ export function EmployeesView() {
   const [fExplore, setFExplore] = useState<string>("0.2");
   const [fAuto, setFAuto] = useState(false);
   const [fPillars, setFPillars] = useState<string>("");
+  // 编辑/删除员工
+  const [editing, setEditing] = useState(false);
+  const [eName, setEName] = useState("");
+  const [eRole, setERole] = useState("");
+  const [eChannel, setEChannel] = useState("");
+  const [eVoice, setEVoice] = useState("");
+  const [eFocus, setEFocus] = useState("");
+  const [eMission, setEMission] = useState("");
 
   useEffect(() => {
     api.listEmployees().then((d) => {
@@ -65,8 +73,9 @@ export function EmployeesView() {
       }
     }).catch(() => {});
     api.listInsights(sel).then((d) => setInsights(d.items.slice(0, 5))).catch(() => {});
+    api.getEmployee(sel).then((d) => { const idn = (d as Record<string, unknown>).identity as Record<string, unknown> | undefined; if (idn) setEVoice(String(idn.voice ?? "")); }).catch(() => {});
     const emp = emps?.find((e) => e.id === sel);
-    if (emp) setFAuto(emp.auto_publish);
+    if (emp) { setFAuto(emp.auto_publish); setEName(emp.name); setERole(emp.role); setEChannel(emp.channel); setEFocus(JSON.stringify(emp.focus ?? { scope: "general" }, null, 2)); }
   }, [sel]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (err) return <Err e={err} />;
@@ -92,6 +101,32 @@ export function EmployeesView() {
       if (emp) await api.patchEmployee(sel, { auto_publish: fAuto });
       setSaved("已保存为新策略版本 ✅");
     } catch (e) { setSaved(`保存失败: ${e}`); }
+  };
+
+  const saveEdit = async () => {
+    if (!sel) return;
+    setSaved(null);
+    try {
+      let focus: unknown = undefined;
+      if (eFocus.trim()) focus = JSON.parse(eFocus);
+      await api.patchEmployee(sel, {
+        name: eName, role: eRole, channel: eChannel,
+        focus,
+        identity: eVoice.trim() ? { voice: eVoice } : undefined,
+        mission: eMission.trim() ? { statement: eMission } : undefined,
+      });
+      setSaved("员工已更新 ✅");
+      setEditing(false);
+      const d = await api.listEmployees(); setEmps(d.items);
+    } catch (e) { setSaved(`保存失败: ${e}`); }
+  };
+  const removeEmp = async () => {
+    if (!sel) return;
+    if (!window.confirm("确认删除该员工? (软归档为 ARCHIVED, 数据保留, 可手工恢复; RUNNING 状态需先停止)")) return;
+    try {
+      await api.deleteEmployee(sel);
+      const d = await api.listEmployees(); setEmps(d.items); setSel(d.items[0]?.id ?? null);
+    } catch (e) { setSaved(`删除失败: ${e}`); }
   };
 
   return (
@@ -126,6 +161,8 @@ export function EmployeesView() {
         <div className="card" style={{ gridColumn: "span 2" }}>
           <h3>{emp?.name ?? "—"} · 本周期
             <span className="sp" />
+            <button className="btn sm" onClick={() => setEditing((v) => !v)}>✏️ 编辑</button>
+            <button className="btn sm danger" style={{ marginLeft: 6 }} onClick={removeEmp}>🗑 删除</button>
             <span className="sub">{cycles?.[0] ? `cycle ${cycles[0].id.slice(0, 8)} · ${cycles[0].trigger} · ${cycles[0].created_at.slice(0, 16).replace("T", " ")}` : ""}</span>
           </h3>
           <div className="cycle mt14">
@@ -140,6 +177,26 @@ export function EmployeesView() {
           </div>
         </div>
       </div>
+
+      {editing && emp && (
+        <div className="card mt14">
+          <h3>✏️ 编辑员工 {emp.name}</h3>
+          <div className="grid g3">
+            <div className="field"><div><label>姓名</label></div><input value={eName} onChange={(e) => setEName(e.target.value)} /></div>
+            <div className="field"><div><label>角色 role</label></div><input value={eRole} onChange={(e) => setERole(e.target.value)} /></div>
+            <div className="field"><div><label>渠道 channel</label></div><input value={eChannel} onChange={(e) => setEChannel(e.target.value)} style={{ width: 80 }} /></div>
+            <div className="field"><div><label>Voice 单字段</label></div><input value={eVoice} onChange={(e) => setEVoice(e.target.value)} placeholder="neutral" /></div>
+            <div className="field"><div><label>使命 statement</label></div><input value={eMission} onChange={(e) => setEMission(e.target.value)} style={{ width: 260 }} /></div>
+          </div>
+          <div className="field"><div><label>领域画像 focus (JSON)</label><div className="hint">改完自动校验; niche 必须带合法 industry</div></div></div>
+          <textarea rows={6} value={eFocus} onChange={(e) => setEFocus(e.target.value)} />
+          <div style={{ marginTop: 8 }}>
+            <button className="btn emp sm" onClick={saveEdit}>保存修改</button>
+            <button className="btn sm" style={{ marginLeft: 8 }} onClick={() => setEditing(false)}>取消</button>
+            {saved && <span className="sub" style={{ marginLeft: 8 }}>{saved}</span>} 
+          </div>
+        </div>
+      )}
 
       <div className="grid g3 mt14">
         <div className="card">

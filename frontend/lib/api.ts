@@ -731,11 +731,13 @@ export const api = {
     strategy?: unknown;
     focus?: unknown;
   }) => req<{ id: string; status: string }>("/employees", { method: "POST", body: JSON.stringify(body) }),
-  patchEmployee: (id: string, body: { name?: string; auto_publish?: boolean; language?: string; focus?: unknown }) =>
-    req<{ id: string; patched: boolean }>(`/employees/${id}`, {
+  patchEmployee: (id: string, body: { name?: string; role?: string; channel?: string; auto_publish?: boolean; language?: string; focus?: unknown; identity?: unknown; mission?: unknown }) =>
+    req<{ id: string; patched: boolean }>(`/employees/${id}`, {
       method: "PATCH",
       body: JSON.stringify(body),
     }),
+  getEmployee: (id: string) => req<Record<string, unknown>>(`/employees/${id}`),
+  deleteEmployee: (id: string) => req<{ id: string; status: string; deleted: boolean }>(`/employees/${id}`, { method: "DELETE" }),
   employeeAction: (id: string, action: "start" | "pause" | "resume" | "stop") =>
     req<{ id: string; status: string }>(`/employees/${id}/${action}`, { method: "POST" }),
   listCycles: (id: string, limit = 20) =>

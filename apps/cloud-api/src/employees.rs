@@ -32,7 +32,12 @@ use crate::state::AppState;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/employees", get(list_employees).post(create_employee))
-        .route("/employees/{id}", get(get_employee).patch(patch_employee))
+        .route(
+            "/employees/{id}",
+            get(get_employee)
+                .patch(patch_employee)
+                .delete(delete_employee),
+        )
         .route("/employees/{id}/start", post(transition_employee))
         .route("/employees/{id}/pause", post(transition_employee))
         .route("/employees/{id}/resume", post(transition_employee))
@@ -375,27 +380,33 @@ async fn get_employee(
     .await
     .map_err(err)?
     .flatten();
-    let foc: Option<Value> = sqlx::query_scalar(
-        "SELECT identity->'focus' FROM employee_identity_versions WHERE employee_id = $1 AND status = 'active' ORDER BY version DESC LIMIT 1",
+    let ident: Value = sqlx::query_scalar(
+        "SELECT identity FROM employee_identity_versions WHERE employee_id = $1 AND status = 'active' ORDER BY version DESC LIMIT 1",
     )
     .bind(id)
     .fetch_optional(pool)
     .await
     .map_err(err)?
-    .flatten();
+    .unwrap_or_else(|| json!({}));
     Ok(Json(
-        json!({"id": e.id, "name": e.name, "role": e.role, "status": e.status.as_str(), "channel": e.channel, "auto_publish": e.auto_publish, "brand_id": e.brand_id, "config_version": e.config_version, "language": lang.unwrap_or_else(default_language), "focus": foc.unwrap_or_else(|| json!({"scope":"general"})), "created_at": e.created_at}),
+        json!({"id": e.id, "name": e.name, "role": e.role, "status": e.status.as_str(), "channel": e.channel, "auto_publish": e.auto_publish, "brand_id": e.brand_id, "config_version": e.config_version, "language": lang.unwrap_or_else(default_language), "focus": ident.get("focus").cloned().unwrap_or_else(|| json!({"scope":"general"})), "identity": ident, "created_at": e.created_at}),
     ))
 }
 
 #[derive(Debug, Deserialize)]
 struct PatchBody {
     name: Option<String>,
+    role: Option<String>,
+    channel: Option<String>,
     auto_publish: Option<bool>,
     /// 修改领域画像 — 校验后写入新的 identity 版本
     focus: Option<Value>,
     /// 修改输出语言 — 会写入新的 identity 版本 (DE §6 identity 版本化)
     language: Option<String>,
+    /// identity 局部字段合并 (personality/voice/voice_profile/audience/expertise/values/boundaries) — 写入新 identity 版本
+    identity: Option<Value>,
+    /// 使命 statement 等局部字段合并 — 写入新的 mission 版本
+    mission: Option<Value>,
 }
 
 async fn patch_employee(
@@ -408,7 +419,9 @@ async fn patch_employee(
     let upd = sqlx::query(
         "UPDATE digital_employees SET
            name = COALESCE($3, name),
-           auto_publish = COALESCE($4, auto_publish),
+           role = COALESCE($4, role),
+           channel = COALESCE($5, channel),
+           auto_publish = COALESCE($6, auto_publish),
            config_version = config_version + 1,
            updated_at = now()
          WHERE id = $1 AND agency_id = $2",
@@ -416,6 +429,8 @@ async fn patch_employee(
     .bind(id)
     .bind(auth.agency_id.as_uuid())
     .bind(&body.name)
+    .bind(&body.role)
+    .bind(&body.channel)
     .bind(body.auto_publish)
     .execute(pool)
     .await
@@ -458,6 +473,86 @@ async fn patch_employee(
             .await
             .map_err(err)?;
     }
+    // identity 局部合并 (voice/voice_profile/personality/audience/…) — 版本化写入
+    if let Some(patch) = &body.identity {
+        if !patch.is_object() {
+            return Err(app_error_response(sincy_common::AppError::non_retryable(
+                "bad_request",
+                "identity must be a JSON object",
+            )));
+        }
+        let cur = sqlx::query(
+            "SELECT version, identity FROM employee_identity_versions WHERE employee_id = $1 AND status = 'active' ORDER BY version DESC LIMIT 1",
+        )
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(err)?;
+        let (version, mut identity) = match cur {
+            Some(r) => (
+                r.get::<i32, _>("version") + 1,
+                r.get::<Value, _>("identity"),
+            ),
+            None => (1, json!({})),
+        };
+        for (k, v) in patch.as_object().unwrap() {
+            identity[k] = v.clone();
+        }
+        if let Some(f) = identity.get("focus") {
+            crate::focus::validate_focus(f).map_err(|e| {
+                app_error_response(sincy_common::AppError::non_retryable("invalid_focus", e))
+            })?;
+        }
+        sqlx::query("UPDATE employee_identity_versions SET status = 'superseded' WHERE employee_id = $1 AND status = 'active'")
+            .bind(id)
+            .execute(pool)
+            .await
+            .map_err(err)?;
+        sqlx::query("INSERT INTO employee_identity_versions (employee_id, version, identity, status) VALUES ($1, $2, $3, 'active')")
+            .bind(id)
+            .bind(version)
+            .bind(&identity)
+            .execute(pool)
+            .await
+            .map_err(err)?;
+    }
+    // mission 局部合并 — 版本化写入
+    if let Some(patch) = &body.mission {
+        if !patch.is_object() {
+            return Err(app_error_response(sincy_common::AppError::non_retryable(
+                "bad_request",
+                "mission must be a JSON object",
+            )));
+        }
+        let cur = sqlx::query(
+            "SELECT version, mission FROM employee_missions WHERE employee_id = $1 AND active ORDER BY version DESC LIMIT 1",
+        )
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(err)?;
+        let (version, mut mission) = match cur {
+            Some(r) => (r.get::<i32, _>("version") + 1, r.get::<Value, _>("mission")),
+            None => (1, json!({})),
+        };
+        for (k, v) in patch.as_object().unwrap() {
+            mission[k] = v.clone();
+        }
+        sqlx::query(
+            "UPDATE employee_missions SET active = false WHERE employee_id = $1 AND active",
+        )
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(err)?;
+        sqlx::query("INSERT INTO employee_missions (employee_id, version, mission, active) VALUES ($1, $2, $3, true)")
+            .bind(id)
+            .bind(version)
+            .bind(&mission)
+            .execute(pool)
+            .await
+            .map_err(err)?;
+    }
     if let Some(lang) = &body.language {
         crate::api::validate_language(lang).map_err(crate::api::app_error_response)?;
         // version the identity change: supersede current active, insert new version
@@ -490,6 +585,49 @@ async fn patch_employee(
             .map_err(err)?;
     }
     Ok(Json(json!({ "id": id, "patched": true })))
+}
+
+/// DELETE /employees/{id} — 软删除 (归档为 ARCHIVED, 可手工改回; 数据全留)。RUNNING 的员工先 stop 再删。
+async fn delete_employee(
+    State(state): State<AppState>,
+    axum::extract::Extension(auth): axum::extract::Extension<crate::auth::AuthCtx>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, axum::response::Response> {
+    let pool = state.pool().map_err(app_error_response)?;
+    let row = sqlx::query("SELECT status FROM digital_employees WHERE id = $1 AND agency_id = $2")
+        .bind(id)
+        .bind(auth.agency_id.as_uuid())
+        .fetch_optional(pool)
+        .await
+        .map_err(err)?;
+    let Some(r) = row else {
+        return Err(app_error_response(sincy_common::AppError::non_retryable(
+            "not_found",
+            "employee not found",
+        )));
+    };
+    let status: String = r.get("status");
+    if status == "RUNNING" {
+        return Err(app_error_response(sincy_common::AppError::non_retryable(
+            "conflict",
+            "employee is RUNNING — stop it first (POST /employees/{id}/stop), then delete",
+        )));
+    }
+    let upd = sqlx::query("UPDATE digital_employees SET status = 'ARCHIVED', config_version = config_version + 1, updated_at = now() WHERE id = $1 AND agency_id = $2")
+        .bind(id)
+        .bind(auth.agency_id.as_uuid())
+        .execute(pool)
+        .await
+        .map_err(err)?;
+    if upd.rows_affected() == 0 {
+        return Err(app_error_response(sincy_common::AppError::non_retryable(
+            "not_found",
+            "employee not found",
+        )));
+    }
+    Ok(Json(
+        json!({ "id": id, "status": "ARCHIVED", "deleted": true }),
+    ))
 }
 
 /// start/pause/resume/stop — lifecycle transitions (DE §5.1), illegal ones 409.
