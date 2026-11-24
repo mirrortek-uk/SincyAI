@@ -2696,7 +2696,51 @@ async fn approve_package(
             "package not found or not pending approval",
         )));
     }
-    Ok(Json(json!({ "id": id, "approval_status": "approved" })))
+    // 审批通过即派发发布 (FR-024 闭环: 人工审核后自动进入发布/执行链路,
+    // 与数字员工 auto_publish 走同一条 publish_core: 急停/路由/配额/审计一致)。
+    // 幂等键固定为 包+版本, 重复批准不会重复发布。
+    let pkg = sqlx::query(
+        "SELECT brand_id, platform, action, version FROM publishing_packages WHERE id = $1 AND agency_id = $2",
+    )
+    .bind(id)
+    .bind(auth.agency_id.as_uuid())
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| app_error_response(AppError::retryable("db", e.to_string())))?;
+    let mut publish_outcome: Value = json!({ "dispatched": false });
+    if let Some(p) = pkg {
+        let body = PublishTaskBody {
+            agency_id: None,
+            brand_id: p.get("brand_id"),
+            platform: p.get("platform"),
+            action: p.get("action"),
+            package_id: id,
+            package_version: p.get::<i32, _>("version") as u32,
+            idempotency_key: format!("pkg-{id}-v{}", p.get::<i32, _>("version")),
+        };
+        match publish_core(pool, auth.agency_id, body, state.allow_mock_adapters).await {
+            Ok(Json(res)) => {
+                publish_outcome = json!({
+                    "dispatched": true,
+                    "task_id": res.task_id,
+                    "route": res.route,
+                    "status": res.status,
+                });
+            }
+            Err(_) => {
+                // 发布派发失败不回滚审批结果, 但必须显式告诉调用方
+                publish_outcome = json!({
+                    "dispatched": false,
+                    "error": "publish dispatch rejected (kill switch / route / quota) — see server logs",
+                });
+            }
+        }
+    }
+    Ok(Json(json!({
+        "id": id,
+        "approval_status": "approved",
+        "publish": publish_outcome,
+    })))
 }
 
 /// platform+action -> quota kind (FR-020 共享配额池按种类记账)
