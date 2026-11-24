@@ -888,6 +888,21 @@ export const api = {
     req<LedgerToday>("/kpi/ledger/today?" + new URLSearchParams({ platform, account_id: accountId })),
   getKpiPlan: (platform: string, accountId: string) =>
     req<LedgerToday & { posting_windows: unknown; timezone: unknown }>("/kpi/plan?" + new URLSearchParams({ platform, account_id: accountId })),
+
+  // --- Voice Profile 语气档案 ---
+  getEmployeeVoice: (id: string) =>
+    req<{ employee_id: string; voice: string; voice_profile: VoiceProfileJson }>(`/voice/employee/${id}`),
+  putEmployeeVoice: (id: string, body: { voice?: string; voice_profile?: VoiceProfileJson }) =>
+    req<{ employee_id: string; version: number; voice_profile: VoiceProfileJson }>(`/voice/employee/${id}`, { method: "PUT", body: JSON.stringify(body) }),
+  listVoiceAccounts: (employeeId?: string) =>
+    req<{ items: VoiceAccount[] }>("/voice/accounts" + (employeeId ? `?employee_id=${employeeId}` : "")),
+  putVoiceAccount: (body: { employee_id?: string; platform: string; account_id: string; voice_profile: VoiceProfileJson }) =>
+    req<{ platform: string; account_id: string; saved: boolean }>("/voice/account", { method: "PUT", body: JSON.stringify(body) }),
+  getVoiceEffective: (employeeId: string, platform: string, accountId?: string) =>
+    req<{ base: VoiceProfileJson; account_override: VoiceProfileJson; effective: VoiceProfileJson; prompt_block: string }>(
+      "/voice/effective?" + new URLSearchParams({ employee_id: employeeId, platform, ...(accountId ? { account_id: accountId } : {}) })),
+  distillVoice: (samples: string[], handles: string[] = []) =>
+    req<{ profile: VoiceProfileJson; prompt_block: string }>("/voice/distill", { method: "POST", body: JSON.stringify({ samples, handles }) }),
 };
 
 
@@ -1011,4 +1026,15 @@ export interface LedgerToday {
   daily_ceiling: number | null;
   ceiling_remaining: number | null;
   ceiling_blocked: boolean;
+}
+
+
+// ===== Voice Profile 语气档案 =====
+export type VoiceProfileJson = Record<string, unknown>;
+export interface VoiceAccount {
+  id: string;
+  employee_id: string;
+  platform: string;
+  account_id: string;
+  voice_profile: VoiceProfileJson;
 }

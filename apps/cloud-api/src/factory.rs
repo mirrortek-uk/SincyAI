@@ -18,8 +18,8 @@ use sqlx::Row;
 
 use sincy_content::{
     AiLabel, Brief, LocalStubProvider, MediaJob, MediaProvider, MetricEvent, PublishingPackage,
-    QualityGate, TextGenerator, TriggerSource, adapt_master, create_master, default_adapters,
-    learn, plan_strategy_with_learnings,
+    QualityGate, TextGenerator, TriggerSource, adapt_master, create_master_with_voice,
+    default_adapters, learn, plan_strategy_with_learnings,
 };
 
 use crate::api::app_error_response;
@@ -424,6 +424,40 @@ fn default_media_provider() -> Box<dyn MediaProvider> {
     Box::new(LocalStubProvider)
 }
 
+/// Voice Profile: 加载有效语气 = merge_opt(员工基线 identity.voice_profile, 账号覆盖 employee_accounts.voice_profile)。
+/// 品牌下找不到员工/账号时退回空对象 (调用方退回旧 Voice 单字段)。
+async fn load_effective_voice(pool: &sqlx::PgPool, brand_id: &str, platform: &str) -> Value {
+    let emp = sqlx::query(
+        "SELECT e.id FROM digital_employees e WHERE e.brand_id = $1::uuid AND e.status = 'RUNNING' ORDER BY e.created_at LIMIT 1",
+    )
+    .bind(brand_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+    let Some(emp) = emp else { return json!({}) };
+    let emp_id: uuid::Uuid = emp.get("id");
+    let base: Value = sqlx::query_scalar(
+        "SELECT COALESCE(identity->'voice_profile', '{}'::jsonb) FROM employee_identity_versions WHERE employee_id = $1 AND status = 'active' ORDER BY version DESC LIMIT 1",
+    )
+    .bind(emp_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| json!({}));
+    let over: Value = sqlx::query_scalar(
+        "SELECT voice_profile FROM employee_accounts WHERE employee_id = $1 AND platform = $2 ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(emp_id)
+    .bind(platform)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(Value::Null);
+    sincy_content::voice::effective_voice(&base, &over)
+}
 pub async fn run_brief_by_id(
     pool: &sqlx::PgPool,
     agency_id: uuid::Uuid,
@@ -498,9 +532,12 @@ pub async fn run_brief_by_id(
     .await
     .unwrap_or_default();
 
-    // 工序1 策略 (带回灌) + 工序2 母稿
+    // 工序1 策略 (带回灌) + 工序2 母稿 (Voice Profile 注入软约束)
     let plan = plan_strategy_with_learnings(&brief, &signals, &learnings, &llm).await?;
-    let master = create_master(&brief, &plan, &signals, &llm).await?;
+    let voice_platform = brief.platforms.first().cloned().unwrap_or_default();
+    let voice_eff = load_effective_voice(pool, &brief.brand_id, &voice_platform).await;
+    let voice_block = sincy_content::voice::compile_voice_prompt(&voice_eff, 3);
+    let master = create_master_with_voice(&brief, &plan, &signals, &llm, &voice_block).await?;
 
     // 工序3→7: 每平台 适配 →(4)媒体 →(5)质量门 →(6)审批 →(7)打包落库
     let agency = sincy_common::AgencyId::from_uuid(agency_id);
@@ -550,7 +587,9 @@ pub async fn run_brief_by_id(
             json!({}),
         ) {
             Ok(pkg) => {
-                let v = QualityGate::new(rules).check(&pkg, pkg.ai_label());
+                let v = QualityGate::new(rules)
+                    .with_voice_profile(voice_eff.clone())
+                    .check(&pkg, pkg.ai_label());
                 json!({ "passed": v.passed(), "issues": v.issues })
             }
             Err(e) => json!({

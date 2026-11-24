@@ -41,33 +41,14 @@ pub fn routes() -> axum::Router<AppState> {
         .route("/kpi/plan", get(daily_plan))
 }
 
-/// 深合并: 对象递归, 标量/数组/None 直接覆盖 (overrides 赢)
+/// 深合并: 委托给 sincy_content::voice::deep_merge (统一实现, voice/KPI 共用)
 pub fn deep_merge(base: &Value, over: &Value) -> Value {
-    match (base, over) {
-        (Value::Object(a), Value::Object(b)) => {
-            let mut m = a.clone();
-            for (k, v) in b {
-                m.insert(
-                    k.clone(),
-                    match m.get(k) {
-                        Some(old) => deep_merge(old, v),
-                        None => v.clone(),
-                    },
-                );
-            }
-            Value::Object(m)
-        }
-        _ => over.clone(),
-    }
+    sincy_content::voice::deep_merge(base, over)
 }
 
 /// deep_merge 但 over 为 Null 时保留 base (空 overrides 不擦掉模板)
 fn merge_opt(base: &Value, over: &Value) -> Value {
-    if over.is_null() {
-        base.clone()
-    } else {
-        deep_merge(base, over)
-    }
+    sincy_content::voice::merge_opt(base, over)
 }
 
 /// 算 effective: category 默认 ⊕ platform 模板 ⊕ account overrides

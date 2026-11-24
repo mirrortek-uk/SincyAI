@@ -85,6 +85,9 @@ pub struct Identity {
     pub personality: Value,
     #[serde(default = "default_voice")]
     pub voice: String,
+    /// 结构化语气档案 (Voice Profile 基线, 见 sincy-content::voice); 账号级覆盖在 employee_accounts.voice_profile
+    #[serde(default)]
+    pub voice_profile: Value,
     /// 输出语言 (BCP-47), 默认中文; 由品牌 language 或创建时显式指定
     #[serde(default = "default_language")]
     pub language: String,

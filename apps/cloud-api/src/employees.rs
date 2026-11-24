@@ -176,6 +176,7 @@ async fn load_full(
             role: emp.role.clone(),
             personality: json!({}),
             voice: "neutral".into(),
+            voice_profile: json!({}),
             language: default_language(),
             audience: vec![],
             expertise: vec![],
@@ -744,6 +745,7 @@ pub(crate) async fn run_skill_by_name(
                     role: "content_operator".into(),
                     personality: json!({}),
                     voice: "casual, human".into(),
+                    voice_profile: json!({}),
                     language: "zh-CN".into(),
                     audience: vec![],
                     boundaries: vec![],
@@ -766,6 +768,7 @@ pub(crate) async fn run_skill_by_name(
         "name": identity.name, "role": identity.role,
         "mission": mission.statement, "audience": identity.audience,
         "voice": identity.voice, "pillars": strategy.pillars,
+        "voice_block": sincy_content::voice::compile_voice_prompt(&identity.voice_profile, 3),
         "language": identity.language,
     });
     // 品牌 no_go 列表
@@ -1324,6 +1327,21 @@ impl CycleStore for PgCycleStore {
         .map_err(|e| e.to_string())
     }
 
+    async fn account_voice_profile(
+        &self,
+        employee_id: uuid::Uuid,
+        platform: &str,
+    ) -> Result<Option<serde_json::Value>, String> {
+        let row = sqlx::query(
+            "SELECT voice_profile FROM employee_accounts WHERE employee_id = $1 AND platform = $2 ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(employee_id)
+        .bind(platform)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(row.and_then(|r| r.try_get::<serde_json::Value, _>("voice_profile").ok()))
+    }
     async fn review_rule(
         &self,
         platform: &str,

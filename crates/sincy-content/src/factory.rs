@@ -297,12 +297,23 @@ pub struct MasterAsset {
     pub fact_check: Vec<String>,
 }
 
-/// 工序2 核心创作: 把策略方案 + 信号证据 grounding 进母稿, 并要求模型列出事实核查点
+/// 工序2 核心创作 (薄包装): 无语气档案时的默认入口, 保持既有调用点不变。
 pub async fn create_master(
     brief: &Brief,
     plan: &StrategyPlan,
     signals: &[Value],
     llm: &dyn TextGenerator,
+) -> Result<MasterAsset, String> {
+    create_master_with_voice(brief, plan, signals, llm, "").await
+}
+
+/// 工序2 核心创作 + Voice Profile 注入 (语气档案编译块前置进 prompt, 软约束母稿语气)
+pub async fn create_master_with_voice(
+    brief: &Brief,
+    plan: &StrategyPlan,
+    signals: &[Value],
+    llm: &dyn TextGenerator,
+    voice_block: &str,
 ) -> Result<MasterAsset, String> {
     let evidence: Vec<String> = signals
         .iter()
@@ -314,8 +325,13 @@ pub async fn create_master(
                 .map(String::from)
         })
         .collect();
+    let voice_section = if voice_block.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\n{voice_block}\n")
+    };
     let prompt = format!(
-        "You are the core creation step (工序2) of a content factory. Write the platform-agnostic master content.          Ground every claim in the provided signals. End with a JSON block: {{fact_check: [claims to verify]}}.          Output: master text, then the JSON block on the last line.
+        "You are the core creation step (工序2) of a content factory. Write the platform-agnostic master content.          Ground every claim in the provided signals. End with a JSON block: {{fact_check: [claims to verify]}}.          Output: master text, then the JSON block on the last line.\n{voice_section}
 
          Brief: goal={} angle={} audience={} cta={}
 Plan: angle={} key_points={:?} outline={:?}

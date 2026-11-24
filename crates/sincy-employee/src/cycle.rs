@@ -118,6 +118,14 @@ pub trait CycleStore: Send + Sync {
     async fn review_rule(&self, platform: &str) -> Result<PlatformReviewRule, String> {
         Ok(PlatformReviewRule::default_for(platform))
     }
+    /// 账号级语气覆盖 (employee_accounts.voice_profile, 0047)。默认 None, 由云端 PG 实现读表。
+    async fn account_voice_profile(
+        &self,
+        _employee_id: Uuid,
+        _platform: &str,
+    ) -> Result<Option<Value>, String> {
+        Ok(None)
+    }
     /// 把 thread 拆分结果写回发布包。默认不支持, 由云端 PG 实现写 publishing_packages.thread_chunks。
     async fn set_thread_chunks(&self, _package_id: Uuid, _chunks: &[String]) -> Result<(), String> {
         Ok(())
@@ -529,12 +537,22 @@ pub async fn run_cycle(
             ctx.pillars = pillars;
         }
     }
+    // Voice Profile: 有效语气 = merge_opt(员工基线 identity.voice_profile, 账号覆盖 employee_accounts.voice_profile)
+    let acct_voice = deps
+        .store
+        .account_voice_profile(employee.id, &employee.channel)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(Value::Null);
+    let voice_eff = sincy_content::voice::effective_voice(&identity.voice_profile, &acct_voice);
+    let voice_block = sincy_content::voice::compile_voice_prompt(&voice_eff, 3);
     // skill handler 运行时上下文: persona 供 llm 类 handler 组 prompt
     let persona = json!({
         "name": identity.name, "role": identity.role,
         "mission": mission.statement, "audience": identity.audience,
         "voice": identity.voice, "pillars": strategy.pillars,
-        "language": identity.language,
+        "language": identity.language, "voice_block": voice_block,
     });
     let hctx = SkillRunCtx {
         deps,
@@ -683,8 +701,13 @@ pub async fn run_cycle(
         .unwrap_or_else(|_| PlatformReviewRule::default_for(&employee.channel));
 
     // --- Create: LLM draft via Content Factory port
+    let voice_line = if voice_block.is_empty() {
+        String::new()
+    } else {
+        format!("\n{voice_block}")
+    };
     let prompt = format!(
-        "You are {name} ({role}). Mission: {mission}. Audience: {audience:?}. Voice: {voice}. Pillars: {pillars:?}. Language: {language}.\n\
+        "You are {name} ({role}). Mission: {mission}. Audience: {audience:?}. Voice: {voice}.{voice_line} Pillars: {pillars:?}. Language: {language}.\n\
          Write ONE {channel} post (max {limit} weighted chars; CJK counts double) entirely in {language}, about: {topic}. Evidence: {evidence:?}.\n\
          Do NOT repeat these recent topics: {recent:?}.{kpi_line}",
         name = identity.name,
@@ -692,6 +715,7 @@ pub async fn run_cycle(
         mission = mission.statement,
         audience = identity.audience,
         voice = identity.voice,
+        voice_line = voice_line,
         pillars = strategy.pillars,
         language = identity.language,
         channel = employee.channel,
@@ -740,9 +764,15 @@ Follower KPI: {k}. If behind target, bias toward growth-friendly angle (hot_take
             let plan = sincy_content::factory::plan_strategy(&brief, &signals, &llm_gen)
                 .await
                 .ok()?;
-            let master = sincy_content::factory::create_master(&brief, &plan, &signals, &llm_gen)
-                .await
-                .ok()?;
+            let master = sincy_content::factory::create_master_with_voice(
+                &brief,
+                &plan,
+                &signals,
+                &llm_gen,
+                &voice_block,
+            )
+            .await
+            .ok()?;
             Some(master.text)
         }
         .await
@@ -826,6 +856,15 @@ Follower KPI: {k}. If behind target, bias toward growth-friendly angle (hot_take
         if !pass || score < 60.0 {
             verdict["pass"] = json!(false);
         }
+    }
+    // Voice 硬约束: 命中语气档案的 avoid_words / banned_moves 直接判负
+    let vv = sincy_content::voice::voice_violations(&voice_eff, &draft);
+    if !vv.is_empty() {
+        verdict["pass"] = json!(false);
+        verdict["checks"]["voice"] = json!({
+            "ok": false,
+            "violations": vv.iter().map(|v| json!({"code": v.code, "message": v.message})).collect::<Vec<_>>(),
+        });
     }
     verdict["handlers"] = json!([
         review_run

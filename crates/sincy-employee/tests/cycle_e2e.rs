@@ -189,6 +189,7 @@ fn identity() -> Identity {
         role: "AI content operator".into(),
         personality: json!({}),
         voice: "sharp, practical".into(),
+        voice_profile: json!({}),
         language: "zh-CN".into(),
         audience: vec!["developers".into()],
         expertise: vec!["ai".into()],

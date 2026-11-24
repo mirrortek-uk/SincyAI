@@ -3,9 +3,11 @@
 //! AI label. The gate never relies on LLM self-assessment alone for rights.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::ai_label::AiLabel;
 use crate::package::PublishingPackage;
+use crate::voice::voice_violations;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QualityIssue {
@@ -54,6 +56,8 @@ pub struct QualityGate {
     pub brand_rules: BrandRules,
     /// sha256 of already-published assets in this brand (duplicate detection)
     pub known_hashes: Vec<String>,
+    /// 语气档案硬约束 (avoid_words / banned_moves), 命中即 Block (Voice Profile §3⑤)
+    pub voice_profile: Option<Value>,
 }
 
 impl QualityGate {
@@ -61,11 +65,17 @@ impl QualityGate {
         Self {
             brand_rules,
             known_hashes: Vec::new(),
+            voice_profile: None,
         }
     }
 
     pub fn with_known_hashes(mut self, hashes: Vec<String>) -> Self {
         self.known_hashes = hashes;
+        self
+    }
+
+    pub fn with_voice_profile(mut self, profile: Value) -> Self {
+        self.voice_profile = Some(profile);
         self
     }
 
@@ -150,6 +160,23 @@ impl QualityGate {
                         "媒体 sha256 {} 与已发布内容重复",
                         &m.sha256[..m.sha256.len().min(12)]
                     ),
+                    severity: Severity::Block,
+                });
+            }
+        }
+
+        // voice profile 硬约束 (avoid_words / banned_moves) — 违反直接 Block
+        if let Some(vp) = &self.voice_profile
+            && !vp.is_null()
+        {
+            for v in voice_violations(vp, pkg.text()) {
+                let code: &'static str = match v.code.as_str() {
+                    "voice_avoid_word" => "voice_avoid_word",
+                    _ => "voice_banned_move",
+                };
+                issues.push(QualityIssue {
+                    code,
+                    message: v.message,
                     severity: Severity::Block,
                 });
             }

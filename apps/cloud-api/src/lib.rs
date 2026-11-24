@@ -20,6 +20,7 @@ pub mod pulse;
 pub mod skills;
 pub mod source_status;
 pub mod state;
+pub mod voice;
 
 pub use api::routes;
 pub use state::AppState;

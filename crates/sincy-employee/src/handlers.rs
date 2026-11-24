@@ -364,7 +364,7 @@ impl SkillHandler for BuiltinHandlers {
                 let topic = input.get("topic").and_then(|v| v.as_str()).unwrap_or("");
                 let p = &ctx.persona;
                 let prompt = format!(
-                    "You are {name} ({role}). Mission: {mission}. Audience: {audience}. Voice: {voice}. Pillars: {pillars}. Language: {language}.\n\
+                    "You are {name} ({role}). Mission: {mission}. Audience: {audience}. Voice: {voice}.{voice_block} Pillars: {pillars}. Language: {language}.\n\
                      Task: {skill} about \"{topic}\" for channel {channel} (max {limit} weighted chars, CJK counts double), entirely in {language}.\n\
                      Evidence: {evidence}\nDo NOT repeat these recent topics: {recent}.\nOutput ONLY the content text.",
                     name = p
@@ -378,6 +378,7 @@ impl SkillHandler for BuiltinHandlers {
                     mission = p.get("mission").and_then(|v| v.as_str()).unwrap_or(""),
                     audience = p.get("audience").cloned().unwrap_or(json!([])),
                     voice = p.get("voice").and_then(|v| v.as_str()).unwrap_or("casual"),
+                    voice_block = p.get("voice_block").and_then(|v| v.as_str()).unwrap_or(""),
                     pillars = p.get("pillars").cloned().unwrap_or(json!([])),
                     language = p
                         .get("language")

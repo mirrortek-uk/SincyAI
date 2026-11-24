@@ -13,6 +13,7 @@ import { FactoryView } from "@/components/views/Factory";
 import { AnalyticsView, DevicesView, LineageView } from "@/components/views/Runtime";
 import { ArchView, KillView, SettingsView } from "@/components/views/Config";
 import { KpiView } from "@/components/views/Kpi";
+import { VoiceView } from "@/components/views/Voice";
 
 function ConsoleInner() {
   const search = useSearchParams();
@@ -43,6 +44,7 @@ function ConsoleInner() {
       <div className={view === "arch" ? "view active" : "view"}><ArchView /></div>
       <div className={view === "kill" ? "view active" : "view"}><KillView /></div>
       <div className={view === "kpi" ? "view active" : "view"}><KpiView /></div>
+      <div className={view === "voice" ? "view active" : "view"}><VoiceView /></div>
     </>
   );
 }

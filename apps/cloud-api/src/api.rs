@@ -89,6 +89,7 @@ pub fn routes() -> Router<AppState> {
         .merge(crate::pipeline::routes())
         .merge(crate::factory::routes())
         .merge(crate::kpi::routes())
+        .merge(crate::voice::routes())
         .merge(crate::account_metrics::routes())
         .merge(crate::skills::routes())
         .layer(axum::middleware::from_fn(request_id_middleware))
