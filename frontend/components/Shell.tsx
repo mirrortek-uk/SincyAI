@@ -106,9 +106,9 @@ export function Shell({ children }: { children: React.ReactNode }) {
         setRail({
           sources: status ? status.sources.length : null,
           healthy: status ? status.sources.filter((s) => s.health === "healthy").length : null,
-          entities: stats ? stats.total_items : null,
-          signals: sig ? sig.items.length : null,
-          opportunities: stats ? stats.opportunities : null,
+          entities: stats ? stats.entities_total : null,
+          signals: stats ? stats.signals_total : null,
+          opportunities: stats ? stats.opportunities_new : null,
           factory: briefs ? briefs.briefs.filter((b) => b.status === "draft" || b.status === "running").length : null,
           pending: pkgs ? pkgs.items.filter((p) => p.approval_status === "pending").length : null,
           publishedToday: pkgs
@@ -139,8 +139,8 @@ export function Shell({ children }: { children: React.ReactNode }) {
     </div>
   );
 
-  const railItem = (n: string, v: number | null, vw: ViewId, cls?: string) => (
-    <div className={`rstage ${cls ?? ""}`} onClick={() => (pathname !== "/" ? router.push(`/?v=${vw}`) : goView(vw))}>
+  const railItem = (n: string, v: number | null, vw: ViewId, cls?: string, tip?: string) => (
+    <div className={`rstage ${cls ?? ""}`} title={tip} onClick={() => (pathname !== "/" ? router.push(`/?v=${vw}`) : goView(vw))}>
       <span className="n">{n}</span>
       <span className="v">{v === null ? "—" : v}</span>
     </div>
@@ -164,15 +164,15 @@ export function Shell({ children }: { children: React.ReactNode }) {
         </div>
         <div className="rail">
           <div className="railwrap">
-            {railItem("信源", rail.sources, "sources")}<span className="rarrow">→</span>
-            {railItem("healthy", rail.healthy, "sources")}<span className="rarrow">→</span>
-            {railItem("实体", rail.entities, "intel")}<span className="rarrow">→</span>
-            {railItem("信号", rail.signals, "signals")}<span className="rarrow">→</span>
-            {railItem("机会", rail.opportunities, "signals")}<span className="rarrow">⇒</span>
-            {railItem("工厂", rail.factory, "factory", "fac")}<span className="rarrow">→</span>
-            {railItem("待审", rail.pending, "approvals", "fac")}<span className="rarrow">→</span>
-            {railItem("发布", rail.publishedToday, "analytics")}<span className="rarrow">↺</span>
-            {railItem("学习", rail.running, "employees", "emp")}
+            {railItem("信源", rail.sources, "sources", undefined, "已注册信源总数 (含未配置)")}<span className="rarrow">→</span>
+            {railItem("healthy", rail.healthy, "sources", undefined, "健康信源数 (最近一次抓取成功)")}<span className="rarrow">→</span>
+            {railItem("实体", rail.entities, "intel", undefined, "intelligence_entities 累计实体数")}<span className="rarrow">→</span>
+            {railItem("信号", rail.signals, "signals", undefined, "intelligence_signals 累计信号数")}<span className="rarrow">→</span>
+            {railItem("机会", rail.opportunities, "signals", undefined, "status=new 待处理机会数 (累计总量见情报页)")}<span className="rarrow">⇒</span>
+            {railItem("工厂", rail.factory, "factory", "fac", "进行中 Brief 数 (draft+running)")}<span className="rarrow">→</span>
+            {railItem("待审", rail.pending, "approvals", "fac", "待人工审批的内容包")}<span className="rarrow">→</span>
+            {railItem("发布", rail.publishedToday, "analytics", undefined, "今日已发布数")}<span className="rarrow">↺</span>
+            {railItem("学习", rail.running, "employees", "emp", "RUNNING 状态的数字员工数")}
           </div>
         </div>
         <button

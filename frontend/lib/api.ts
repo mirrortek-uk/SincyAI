@@ -427,6 +427,9 @@ export interface IntelStats {
   by_kind: { kind: string; n: number }[];
   by_source: { source_id: string; n: number; last_at: string | null }[];
   opportunities: number;
+  opportunities_new: number;
+  entities_total: number;
+  signals_total: number;
   last_pass_inserted_total: number;
   last_run_at: string | null;
 }

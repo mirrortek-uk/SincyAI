@@ -301,6 +301,19 @@ async fn stats(State(state): State<AppState>) -> Result<Json<Value>, axum::respo
         .fetch_one(pool)
         .await
         .map_err(err)?;
+    let opps_new: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM intel_opportunities WHERE status = 'new'")
+            .fetch_one(pool)
+            .await
+            .map_err(err)?;
+    let entities: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM intelligence_entities")
+        .fetch_one(pool)
+        .await
+        .map_err(err)?;
+    let signals_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM intelligence_signals")
+        .fetch_one(pool)
+        .await
+        .map_err(err)?;
     let jobs: i64 = sqlx::query_scalar(
         "SELECT COALESCE(SUM(last_inserted), 0)::int8 FROM intel_collection_jobs",
     )
@@ -331,6 +344,9 @@ async fn stats(State(state): State<AppState>) -> Result<Json<Value>, axum::respo
         "by_kind": kinds,
         "by_source": sources,
         "opportunities": opps,
+        "opportunities_new": opps_new,
+        "entities_total": entities,
+        "signals_total": signals_total,
         "last_pass_inserted_total": jobs,
         "last_run_at": last_run,
     })))
