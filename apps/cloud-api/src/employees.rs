@@ -1552,6 +1552,38 @@ pub(crate) struct PgStatsPort {
 
 #[async_trait]
 impl sincy_employee::StatsPort for PgStatsPort {
+    async fn account_growth(&self, employee_id: Uuid, window_days: i64) -> Result<Value, String> {
+        let rows = sqlx::query(
+            "SELECT followers, observed_at FROM account_metric_samples
+             WHERE employee_id = $1 AND followers IS NOT NULL
+             ORDER BY observed_at DESC LIMIT 200",
+        )
+        .bind(employee_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        let latest = rows.first();
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(window_days.clamp(1, 365));
+        let baseline = rows
+            .iter()
+            .filter(|r| r.get::<chrono::DateTime<chrono::Utc>, _>("observed_at") <= cutoff)
+            .last();
+        let now = latest.and_then(|r| r.get::<Option<i64>, _>("followers"));
+        let base = baseline.and_then(|r| r.get::<Option<i64>, _>("followers"));
+        Ok(json!({
+            "employee_id": employee_id,
+            "window_days": window_days,
+            "samples": rows.len(),
+            "followers_now": now,
+            "followers_base": base,
+            "delta": match (now, base) { (Some(n), Some(b)) => json!(n - b), _ => Value::Null },
+            "delta_pct": match (now, base) {
+                (Some(n), Some(b)) if b != 0 => json!(((n - b) as f64 / b as f64 * 100.0).round() / 100.0),
+                _ => Value::Null,
+            },
+        }))
+    }
+
     async fn metrics(&self) -> Result<Value, String> {
         let tasks = sqlx::query(
             "SELECT state, count(*)::int8 AS n FROM device_tasks GROUP BY state ORDER BY n DESC",

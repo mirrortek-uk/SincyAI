@@ -68,6 +68,10 @@ async fn main() {
         tokio::spawn(cloud_api::pipeline::connectors::run_scheduler(pool.clone()));
         // 内容工厂后台 runner: 消费 draft Brief (断点①自动行真正被消费)
         tokio::spawn(cloud_api::factory::draft_runner_loop(pool.clone()));
+        // 粉丝数测量回流 (patch-A): 周期派发 read_followers + harvest 设备回执写样本
+        tokio::spawn(cloud_api::account_metrics::account_metrics_loop(
+            pool.clone(),
+        ));
     }
 
     // Digital Employee scheduler (DE §cadence): auto-runs operating cycles for

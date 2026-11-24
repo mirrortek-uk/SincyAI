@@ -1,5 +1,6 @@
 //! cloud-api library surface (so integration tests can drive the router).
 
+pub mod account_metrics;
 pub mod api;
 pub mod architecture;
 pub mod auth;

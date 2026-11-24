@@ -308,6 +308,11 @@ pub trait StatsPort: Send + Sync {
     async fn metrics(&self) -> Result<Value, String> {
         Err("metrics not supported by this StatsPort".into())
     }
+    /// 粉丝增量 (patch-A): 读 account_metric_samples 按窗口现算 {followers_now, delta, delta_pct}。
+    /// 默认不支持, 由云端 PG 实现; mock 不受影响。
+    async fn account_growth(&self, _employee_id: Uuid, _window_days: i64) -> Result<Value, String> {
+        Err("account_growth not supported by this StatsPort".into())
+    }
 }
 
 /// Content Factory / LLM port (DE §11: employee decides what/why, factory how).
@@ -420,6 +425,9 @@ impl IntelPort for Box<dyn IntelPort> {
 impl StatsPort for Box<dyn StatsPort> {
     async fn metrics(&self) -> Result<Value, String> {
         (**self).metrics().await
+    }
+    async fn account_growth(&self, employee_id: Uuid, window_days: i64) -> Result<Value, String> {
+        (**self).account_growth(employee_id, window_days).await
     }
 }
 

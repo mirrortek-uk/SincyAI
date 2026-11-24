@@ -1,0 +1,33 @@
+# X (Twitter) 粉丝数只读测量适配器 (patch-A 契约草稿, patch-B/Kotlin 侧落地 read/capture 原语后生效)。
+#
+# 纯读、无 side_effect: 只读自己账号(已登录会话), challenge 一律 -> WAITING_USER 绝不自动过
+# (与 x.reply_comment.yaml 同一守 ToS 立场: 纯感知, 不是反检测)。
+#
+# 需要 AdapterRuntime 新增的原语 (非纯 YAML, Kotlin 侧实现):
+#   - action: read + capture 键: 把命中节点文本抓进 task 输出
+#   - target.near_text_any: 取某标签旁边的数字节点
+#   - action: open_self_profile: 导航到自己资料页
+#   - 数字归一化: 1.2万 / 12.3K / 1,234 -> 整数 (原始串留存 raw 审计)
+adapter: x.read_followers
+version: 1
+app: { package: com.twitter.android, version_range: ">=10.0" }
+screens:
+  main_nav:
+    anchors:
+      - { text_any: ["主页", "Home"] }
+      - { text_any: ["通知标签", "Notifications"] }
+  profile:
+    anchors:
+      - { text_any: ["正在关注", "Following"] }
+      - { text_any: ["关注者", "Followers"] }
+  challenge:
+    anchors:
+      - { text_any: ["人机验证", "Verify you are human"] }   # -> WAITING_USER, 绝不自动过
+flow:
+  - { expect: main_nav, action: open_self_profile }
+  - { expect: profile, action: wait, value: "2000" }
+  - { expect: profile, action: read, target: { near_text_any: ["关注者", "Followers"] }, capture: "followers" }
+  - { expect: profile, action: read, target: { near_text_any: ["正在关注", "Following"] }, capture: "following" }
+# 契约输出 (所有平台统一, 写入 account_metric_samples):
+#   { "platform":"x", "account_id":"...", "followers":1234, "following":321,
+#     "posts_count":null, "raw":{"followers":"1,234"}, "observed_at":"..." }
