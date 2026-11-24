@@ -9,7 +9,7 @@ use sincy_protocol::{Envelope, MessageType};
 use thiserror::Error;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
-use crate::execute::{AdapterExecution, TaskOutcome, execute_signed_adapter_ctx};
+use crate::execute::{AdapterExecution, TaskOutcome, execute_signed_adapter_ctx_v2};
 
 #[derive(Debug, Error)]
 pub enum AgentError {
@@ -37,9 +37,16 @@ pub struct TaskBrief {
     pub adapter_version: i32,
     pub adapter_yaml: String,
     pub signature: String,
+    /// 签名方案: hmac-sha256 (host/sim 用对称 key) / ed25519 (用烧录公钥验签)
+    #[serde(default = "default_scheme")]
+    pub signature_scheme: String,
     /// free-form task context (e.g. agentic goal) from device_tasks.context
     #[serde(default)]
     pub task_context: serde_json::Value,
+}
+
+fn default_scheme() -> String {
+    "hmac-sha256".into()
 }
 
 pub struct AgentClient {
@@ -145,10 +152,17 @@ impl AgentClient {
         } else {
             Some(brief.task_context.clone())
         };
-        let result = execute_signed_adapter_ctx(
+        // 与手机端 rust-core 一致: ed25519 用烧录公钥验签, hmac 用本地对称 key
+        let key: Vec<u8> = if brief.signature_scheme == "ed25519" {
+            sincy_adapter::sign::pinned_verifying_key_bytes().to_vec()
+        } else {
+            self.signing_key.clone()
+        };
+        let result = execute_signed_adapter_ctx_v2(
             &brief.adapter_yaml,
             &brief.signature,
-            &self.signing_key,
+            &key,
+            &brief.signature_scheme,
             app_version,
             &mut *io,
             0,

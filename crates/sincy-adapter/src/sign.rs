@@ -11,6 +11,19 @@ pub enum SigningError {
     BadSignature,
 }
 
+/// 设备端烧录的 Ed25519 公钥 (base64), 与 android/rust-core 的
+/// PINNED_VERIFYING_KEY_B64 保持一致 —— 设备只持公钥, 私钥只在云端签名端。
+pub const PINNED_VERIFYING_KEY_B64: &str = "PBiZF2NoULhRKTsdvX68s7ygJEOQYXUyBRUvPU3tMSg=";
+
+/// PINNED_VERIFYING_KEY_B64 解码后的 32 字节公钥 (与 rust-core 内嵌数组一致)。
+pub fn pinned_verifying_key_bytes() -> [u8; 32] {
+    [
+        0x3c, 0x18, 0x99, 0x17, 0x63, 0x68, 0x50, 0xb8, 0x51, 0x29, 0x3b, 0x1d, 0xbd, 0x7e, 0xbc,
+        0xb3, 0xbc, 0xa0, 0x24, 0x43, 0x90, 0x61, 0x75, 0x32, 0x05, 0x15, 0x2f, 0x3d, 0x4d, 0xed,
+        0x31, 0x28,
+    ]
+}
+
 fn hmac(key: &[u8], data: &[u8]) -> String {
     // HMAC-SHA256
     let mut key_block = [0u8; 64];

@@ -1,0 +1,42 @@
+# X (Twitter) 关注设备自动化 App Adapter (v1)。
+# 与 x.publish_post 同一策略: 不走付费 API, 走设备自动化; Sincy 签名发布,
+# 设备只执行签名有效且 App 版本在范围内的版本。锚点为占位, 真机核验后替换。
+# 关注目标账号来自 task_context.target_handle (数据, 不参与签名)。
+adapter: x.follow
+version: 1
+app:
+  package: com.twitter.android
+  version_range: ">=10.0"
+screens:
+  main_nav:
+    anchors:
+      - { text_any: ["主页", "Home"] }
+      - { text_any: ["探索", "Explore", "搜索", "Search"] }
+  search:
+    anchors:
+      - { text_any: ["搜索", "Search", "Search on X"] }
+  search_results:
+    anchors:
+      - { text_any: ["用户", "People", "账号", "Accounts"] }
+  profile:
+    anchors:
+      - { text_any: ["关注", "Follow"] }
+      - { text_any: ["粉丝", "followers", "正在关注", "Following"] }
+  following_confirm:
+    anchors:
+      - { text_any: ["正在关注", "Following"] }
+  challenge:
+    anchors:
+      - { text_any: ["Verify you are human", "unusual activity", "安全验证", "人机验证"] }   # always -> WAITING_USER
+  update_dialog:
+    anchors:
+      - { text_any: ["Update now", "立即更新"] }
+flow:
+  - { expect: main_nav, action: tap, target: { text_any: ["搜索", "Search", "探索", "Explore"] } }
+  - { expect: search, action: set_text, target: { id: "search_input" }, value: "ctx.target_handle" }
+  - { expect: search, action: tap, target: { text_any: ["搜索", "Search"] } }
+  - { expect: search_results, action: tap, target: { text_any: ["用户", "People"] } }
+  - { expect: profile, action: tap, target: { text_any: ["关注", "Follow"] }, side_effect: true }
+  - { expect: following_confirm, action: back, verify: true }
+known_interrupts:
+  - { screen: update_dialog, action: tap, target: { text_any: ["Not now", "以后再说", "暂不", "取消"] } }

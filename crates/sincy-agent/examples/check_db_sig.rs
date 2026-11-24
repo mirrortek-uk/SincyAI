@@ -23,8 +23,13 @@ fn main() {
         );
     }
     println!("db sig={}", &sig[..24.min(sig.len())]);
-    println!(
-        "RESIGN {}",
-        sign_definition(b"sincy-dev-adapter-signing-key", &canonical)
-    );
+    if let Some(k) = args.get(3) {
+        let kb = if let Some(path) = k.strip_prefix('@') {
+            std::fs::read(path).unwrap()
+        } else {
+            k.as_bytes().to_vec()
+        };
+        println!("RESIGN {}", sign_definition(&kb, &canonical));
+    }
+    println!("CANONICAL {canonical}");
 }

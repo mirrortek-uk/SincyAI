@@ -156,16 +156,25 @@ fn execute_verified(
     media_count: usize,
     task_context: Option<serde_json::Value>,
 ) -> Result<AdapterExecution, ExecuteError> {
-    // 验签之后才注入内容包文本: flow 里 value == "package.text" 的占位符
-    // 替换为 task_context.package_text (数据, 不参与签名)
+    // 验签之后才注入任务上下文: flow 里 value 形如 "package.text" / "ctx.<field>"
+    // 的占位符替换为 task_context 里对应字段 (package.text -> package_text,
+    // ctx.target_handle -> target_handle; 数据, 不参与签名)
     let mut def = def;
-    if let Some(pkg) = task_context
-        .as_ref()
-        .and_then(|c| c.get("package_text").and_then(|v| v.as_str()))
-    {
+    if let Some(ctx) = task_context.as_ref() {
         for step in def.flow.iter_mut() {
-            if step.value.as_deref() == Some("package.text") {
-                step.value = Some(pkg.to_string());
+            if let Some(v) = step.value.as_deref() {
+                let key = if v == "package.text" {
+                    Some("package_text".to_string())
+                } else if let Some(rest) = v.strip_prefix("ctx.") {
+                    Some(rest.to_string())
+                } else {
+                    None
+                };
+                if let Some(k) = key
+                    && let Some(val) = ctx.get(&k).and_then(|x| x.as_str())
+                {
+                    step.value = Some(val.to_string());
+                }
             }
         }
     }
