@@ -855,6 +855,88 @@ pub(crate) async fn run_cycle_for(
     .await
 }
 
+/// 后台 drain 循环 (b): 到期的 cycle_measurements 读 device_tasks 真实终态,
+/// 写回 metrics + insight (喂 Learn), 并产出一条数据驱动 adjustment → 下周期消费。
+/// 与员工调度器并行 spawn; 表不走 RLS, 显式按 employee_id scope。
+pub async fn measurement_drain_loop(pool: sqlx::PgPool) {
+    let interval_secs: u64 = std::env::var("SINCY_MEASURE_DRAIN_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60);
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+    loop {
+        tick.tick().await;
+        let rows = match sqlx::query(
+            "SELECT id, cycle_id, employee_id, package_id, task_id FROM cycle_measurements \
+             WHERE status = 'pending' AND due_at <= now() ORDER BY due_at LIMIT 50",
+        )
+        .fetch_all(&pool)
+        .await
+        {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        for row in rows {
+            let mid: Uuid = row.get("id");
+            let cycle_id: Uuid = row.get("cycle_id");
+            let employee_id: Uuid = row.get("employee_id");
+            let task_id: Option<Uuid> = row.get("task_id");
+            let store = PgCycleStore { pool: pool.clone() };
+            // 读发布任务真实终态 (device_tasks), 不信提交时的状态
+            let task_state = match task_id {
+                Some(tid) => sqlx::query_scalar::<_, Option<String>>(
+                    "SELECT state FROM device_tasks WHERE id = $1",
+                )
+                .bind(tid)
+                .fetch_optional(&pool)
+                .await
+                .ok()
+                .flatten()
+                .flatten(),
+                None => None,
+            };
+            let metrics = json!({
+                "task_id": task_id,
+                "task_state": task_state,
+                // engagement 指标接入点: device_tasks 回执/平台侧拉取 engagement
+                // (likes/comments/shares) 在此并入 metrics, 例如从 adapter evidence 或平台 API 回采
+                "engagement": null,
+            });
+            let insight =
+                format!("delayed measurement of cycle {cycle_id}: task state = {task_state:?}");
+            store
+                .add_insight(employee_id, cycle_id, &insight, &metrics, 0.6)
+                .await
+                .ok();
+            // 数据驱动 adjustment: 真实结果驱动下一轮 (覆盖 in-cycle 临时值)
+            let adjustment = json!({
+                "angle": match task_state.as_deref() {
+                    Some("FAILED") | Some("FAILED_FINAL") => "how_to",
+                    Some("COMPLETED") => "hot_take",
+                    _ => "explanation",
+                },
+                "pillar_boost": {},
+                "source": "delayed measurement",
+                "metrics": metrics,
+            });
+            store
+                .add_experiment_adjustment(
+                    employee_id,
+                    &format!("delayed measurement result: task_state={task_state:?}"),
+                    "delayed_measurement",
+                    &adjustment,
+                )
+                .await
+                .ok();
+            store
+                .complete_measurement(mid, &metrics, &insight)
+                .await
+                .ok();
+            tracing::info!(measurement = %mid, employee = %employee_id, task_state = ?task_state, "cycle measurement drained");
+        }
+    }
+}
+
 /// 后台调度器 (DE: strategy.cadence_per_week 决定周期节奏)。
 /// 每 SINCY_EMPLOYEE_SCHEDULER_INTERVAL_SECS (默认 60s) 扫描一次 RUNNING 员工,
 /// 上次周期(或创建时间)超过 cadence 间隔的就自动跑一个 trigger=scheduled 的周期。
@@ -1131,7 +1213,7 @@ impl CycleStore for PgCycleStore {
         let id = Uuid::new_v4();
         sqlx::query(
             "INSERT INTO employee_experiments (id, employee_id, hypothesis, variable, status) \
-             VALUES ($1, $2, $3, $4, 'proposed')",
+             VALUES ($1, $2, $3, $4, 'PROPOSED')",
         )
         .bind(id)
         .bind(employee_id)
@@ -1141,6 +1223,91 @@ impl CycleStore for PgCycleStore {
         .await
         .map_err(|e| e.to_string())?;
         Ok(id)
+    }
+
+    async fn add_experiment_adjustment(
+        &self,
+        employee_id: Uuid,
+        hypothesis: &str,
+        variable: &str,
+        adjustment: &Value,
+    ) -> Result<Uuid, String> {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO employee_experiments (id, employee_id, hypothesis, variable, status, adjustment) \
+             VALUES ($1, $2, $3, $4, 'PROPOSED', $5)",
+        )
+        .bind(id)
+        .bind(employee_id)
+        .bind(hypothesis)
+        .bind(variable)
+        .bind(adjustment)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(id)
+    }
+
+    async fn take_pending_adjustment(&self, employee_id: Uuid) -> Result<Option<Value>, String> {
+        // 原子取用: 标 applied_at 防止重复消费 (并发周期安全)
+        let row = sqlx::query(
+            "UPDATE employee_experiments SET applied_at = now() \
+             WHERE id = (SELECT id FROM employee_experiments \
+                         WHERE employee_id = $1 AND adjustment IS NOT NULL AND applied_at IS NULL \
+                         ORDER BY created_at DESC LIMIT 1) \
+             RETURNING adjustment",
+        )
+        .bind(employee_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(row.and_then(|r| r.get::<Option<Value>, _>("adjustment")))
+    }
+
+    async fn enqueue_measurement(
+        &self,
+        m: &sincy_employee::cycle::MeasurementRequest,
+    ) -> Result<(), String> {
+        // agency_id 落库供显式 scope (表不走 RLS, 后台 drain 无租户上下文)
+        let agency: Option<Uuid> =
+            sqlx::query_scalar("SELECT agency_id FROM digital_employees WHERE id = $1")
+                .bind(m.employee_id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| e.to_string())?
+                .flatten();
+        sqlx::query(
+            "INSERT INTO cycle_measurements (cycle_id, employee_id, agency_id, package_id, task_id, due_at) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(m.cycle_id)
+        .bind(m.employee_id)
+        .bind(agency)
+        .bind(m.package_id)
+        .bind(m.task_id)
+        .bind(m.due_at)
+        .execute(&self.pool)
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    }
+
+    async fn complete_measurement(
+        &self,
+        id: Uuid,
+        metrics: &Value,
+        insight: &str,
+    ) -> Result<(), String> {
+        sqlx::query(
+            "UPDATE cycle_measurements SET status = 'done', metrics = $2, insight = $3, measured_at = now() WHERE id = $1",
+        )
+        .bind(id)
+        .bind(metrics)
+        .bind(insight)
+        .execute(&self.pool)
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
     }
 
     async fn review_rule(

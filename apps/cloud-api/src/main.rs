@@ -79,6 +79,10 @@ async fn main() {
     {
         tracing::info!("employee scheduler starting");
         cloud_api::employees::spawn_scheduler(state.clone());
+        // 延迟测量后台 drain (与员工调度并行): 到期读 device_tasks 真实终态回写
+        if let Some(pool) = pool.clone() {
+            tokio::spawn(cloud_api::employees::measurement_drain_loop(pool));
+        }
     }
 
     let addr = SocketAddr::from(([0, 0, 0, 0], cfg.http.port));

@@ -122,6 +122,46 @@ pub trait CycleStore: Send + Sync {
     async fn set_thread_chunks(&self, _package_id: Uuid, _chunks: &[String]) -> Result<(), String> {
         Ok(())
     }
+    /// 落实验假说 + 结构化调整 (learning 闭环 a): adjustment = {"angle","pillar_boost"},
+    /// 下周期由 take_pending_adjustment 原子取用。默认不支持, 由云端 PG 实现。
+    async fn add_experiment_adjustment(
+        &self,
+        _employee_id: Uuid,
+        _hypothesis: &str,
+        _variable: &str,
+        _adjustment: &Value,
+    ) -> Result<Uuid, String> {
+        Err("add_experiment_adjustment not supported by this CycleStore".into())
+    }
+    /// 原子取用最近一条未应用的调整 (SELECT → 标 applied_at → 返回)。
+    /// 默认返回 None, 由云端 PG 实现。
+    async fn take_pending_adjustment(&self, _employee_id: Uuid) -> Result<Option<Value>, String> {
+        Ok(None)
+    }
+    /// 发布后登记延迟测量 (b): due_at 到期后由后台 drain 读真实终态。默认空实现。
+    async fn enqueue_measurement(&self, _m: &MeasurementRequest) -> Result<(), String> {
+        Ok(())
+    }
+    /// drain 完成一条测量: 写回 metrics + insight。默认空实现。
+    async fn complete_measurement(
+        &self,
+        _id: Uuid,
+        _metrics: &Value,
+        _insight: &str,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// 延迟测量登记项: 发布成功后 enqueue, due_at 后由后台 drain 消费
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MeasurementRequest {
+    pub cycle_id: Uuid,
+    pub employee_id: Uuid,
+    pub agency_id: Option<Uuid>,
+    pub package_id: Option<Uuid>,
+    pub task_id: Option<Uuid>,
+    pub due_at: chrono::DateTime<Utc>,
 }
 
 /// 平台审核门规则: 加权字数上限 + 超限行为 (reject=打回 / thread=拆串行帖)。
@@ -449,7 +489,7 @@ pub async fn run_cycle(
         .recent_topics(employee.id, 20)
         .await
         .unwrap_or_default();
-    let ctx = EmployeeContext {
+    let mut ctx = EmployeeContext {
         employee_id: employee.id.to_string(),
         mission: mission.statement.clone(),
         audience: identity.audience.clone(),
@@ -458,6 +498,29 @@ pub async fn run_cycle(
         recent_topics: recent.clone(),
         max_cost_usd_per_cycle: None,
     };
+    // 学习闭环 (a): 周期开头原子取用上一周期留下的结构化调整, 真正改掉 pillars / angle
+    let pending_adjustment = deps
+        .store
+        .take_pending_adjustment(employee.id)
+        .await
+        .ok()
+        .flatten();
+    let mut applied_angle: Option<String> = None;
+    if let Some(adj) = &pending_adjustment {
+        if let Some(angle) = adj.get("angle").and_then(|v| v.as_str()) {
+            applied_angle = Some(angle.to_string());
+        }
+        if let Some(boost) = adj.get("pillar_boost").and_then(|v| v.as_object()) {
+            // 加权相关支柱前置: 命中 boost 的支柱按 boost 值降序排到最前
+            let mut pillars = ctx.pillars.clone();
+            pillars.sort_by(|a, b| {
+                let wa = boost.get(a).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let wb = boost.get(b).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                wb.partial_cmp(&wa).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            ctx.pillars = pillars;
+        }
+    }
     // skill handler 运行时上下文: persona 供 llm 类 handler 组 prompt
     let persona = json!({
         "name": identity.name, "role": identity.role,
@@ -564,7 +627,8 @@ pub async fn run_cycle(
         .collect();
     let plan = json!({
         "topic": opp.topic,
-        "angle": "explanation",
+        "angle": applied_angle.clone().unwrap_or_else(|| "explanation".into()),
+        "applied_adjustment": pending_adjustment.clone(),
         "channel": employee.channel,
         "format": strategy.formats.first().cloned().unwrap_or_else(|| "text".into()),
         "evidence": opp.evidence,
@@ -719,6 +783,16 @@ pub async fn run_cycle(
         verdict["pass"] = json!(false);
         verdict["checks"]["platform_compliance"] = c.output.clone();
     }
+    // 质量门真拦截 (c): 解析 content_quality_review 的 LLM 判定 {score, pass},
+    // pass=false 或 score<60 直接判负; 解析失败 fail-open (不误拦)
+    if let Some(r) = &review_run
+        && let Some((score, pass)) = parse_llm_review(&r.output)
+    {
+        verdict["checks"]["llm_review"] = json!({"score": score, "pass": pass});
+        if !pass || score < 60.0 {
+            verdict["pass"] = json!(false);
+        }
+    }
     verdict["handlers"] = json!([
         review_run
             .as_ref()
@@ -773,6 +847,23 @@ pub async fn run_cycle(
         // content_publishing handler = PublishPort 真派发 (设备任务入队)
         let r = deps.publish.publish(employee, package_id).await?;
         task_id = Some(r.task_id);
+        // 延迟测量 (b): 发布后登记, 默认 6h 后到期 (SINCY_MEASURE_DELAY_SECS 可调),
+        // 由后台 drain 读 device_tasks 真实终态回写指标与数据驱动 adjustment
+        let delay_secs: i64 = std::env::var("SINCY_MEASURE_DELAY_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(6 * 3600);
+        let _ = deps
+            .store
+            .enqueue_measurement(&MeasurementRequest {
+                cycle_id,
+                employee_id: employee.id,
+                agency_id: None,
+                package_id: Some(package_id),
+                task_id: Some(r.task_id),
+                due_at: Utc::now() + chrono::Duration::seconds(delay_secs),
+            })
+            .await;
         // --- Measure: verify outcome via task state, never trust the submit
         task_state = Some(
             deps.publish
@@ -910,15 +1001,29 @@ pub async fn run_cycle(
         .and_then(|r| r.output.get("raw").and_then(|v| v.as_str()))
         .map(|s| s.chars().take(400).collect::<String>())
         .unwrap_or_else(|| format!("increase weight of pillar related to '{}'", opp.topic));
+    // 结构化调整: 行为真的随上周期结果变 (angle 不再写死 explanation);
+    // 延迟测量回采真实指标后会再写一条数据驱动的调整覆盖它
+    let adjustment = json!({
+        "angle": if task_state.as_deref() == Some("FAILED") || task_state.as_deref() == Some("FAILED_FINAL") {
+            "how_to"
+        } else if draft.chars().count() > 200 {
+            "hot_take"
+        } else {
+            "explanation"
+        },
+        "pillar_boost": { opp.topic.clone(): 0.2 },
+        "source": "in-cycle adapt",
+    });
     let experiment_id = deps
         .store
-        .add_experiment(employee.id, &hypothesis, "hook_structure")
+        .add_experiment_adjustment(employee.id, &hypothesis, "hook_structure", &adjustment)
         .await
         .ok();
     let adapt = json!({
         "recommendation": hypothesis,
         "hypothesis": hypothesis,
         "experiment_id": experiment_id,
+        "adjustment": adjustment,
         "handler": hyp_run.as_ref().map(|r| json!({"skill": r.skill, "duration_ms": r.duration_ms})),
         "requires_approval": true,
     });
@@ -953,6 +1058,23 @@ pub async fn run_cycle(
         task_state,
         summary,
     })
+}
+
+/// 解析 content_quality_review handler 输出里的 LLM 判定 {score, pass}。
+/// 找不到或解析失败返回 None (调用方 fail-open)。
+pub fn parse_llm_review(output: &Value) -> Option<(f64, bool)> {
+    let cand = output
+        .get("llm_review")
+        .or_else(|| output.get("review"))
+        .or_else(|| output.get("raw"))
+        .or_else(|| output.get("text"))?;
+    let v = match cand {
+        Value::String(s) => serde_json::from_str::<Value>(s).ok()?,
+        other => other.clone(),
+    };
+    let score = v.get("score").and_then(|x| x.as_f64())?;
+    let pass = v.get("pass").and_then(|x| x.as_bool())?;
+    Some((score, pass))
 }
 
 async fn step(
@@ -1015,5 +1137,21 @@ mod thread_tests {
         assert_eq!(r.on_over_limit, "thread");
         let r2 = PlatformReviewRule::default_for("youtube");
         assert_eq!(r2.on_over_limit, "reject");
+    }
+
+    #[test]
+    fn llm_review_parsed_and_missing() {
+        use serde_json::json;
+        // 直接是对象
+        let out = json!({"llm_review": {"score": 82.0, "pass": true}});
+        assert_eq!(parse_llm_review(&out), Some((82.0, true)));
+        // raw 里包 JSON 字符串
+        let out = json!({"raw": r#"{"score": 41.5, "pass": false}"#});
+        assert_eq!(parse_llm_review(&out), Some((41.5, false)));
+        // 解析失败 → None (fail-open)
+        let out = json!({"raw": "not json at all"});
+        assert_eq!(parse_llm_review(&out), None);
+        let out = json!({"text": "ok"});
+        assert_eq!(parse_llm_review(&out), None);
     }
 }
