@@ -162,9 +162,16 @@ export function EmployeesView() {
   };
   const removeEmp = async () => {
     if (!sel) return;
-    if (!window.confirm("确认删除该员工? (软归档为 ARCHIVED, 数据保留, 之后可点「恢复」; RUNNING 状态需先停止)")) return;
+    const st = emp?.status ?? "";
+    const running = st === "RUNNING" || st === "PAUSED";
+    const msg = running
+      ? `该员工当前是 ${st}，删除前会先自动停止它。确认删除? (软归档为 ARCHIVED, 数据保留, 之后可点「🔄 恢复」)`
+      : "确认删除该员工? (软归档为 ARCHIVED, 数据保留, 之后可点「🔄 恢复」)";
+    if (!window.confirm(msg)) return;
     try {
+      if (running) await api.employeeAction(sel, "stop");
       await api.deleteEmployee(sel);
+      setSaved("已删除 (ARCHIVED) ✅");
       const d = await api.listEmployees(); setEmps(d.items); setSel(d.items[0]?.id ?? null);
     } catch (e) { setSaved(`删除失败: ${e}`); }
   };

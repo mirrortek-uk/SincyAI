@@ -218,7 +218,15 @@ export default function EmployeesPage() {
             {e.status === "PAUSED" && <button disabled={busy} onClick={() => act(() => api.employeeAction(e.id, "resume"))}>恢复</button>}
             {(e.status === "RUNNING" || e.status === "PAUSED") && <button disabled={busy} onClick={() => act(() => api.employeeAction(e.id, "stop"))}>停止</button>}
             <button disabled={busy} onClick={() => { setEditId(e.id === editId ? "" : e.id); setEName(e.name); setERole(e.role); setEChannel(e.channel); setEFocus(JSON.stringify(e.focus ?? { scope: "general" }, null, 2)); }}>✏️ 编辑</button>
-            <button disabled={busy} style={{ color: "var(--danger)" }} onClick={() => act(async () => { if (window.confirm("确认删除该员工? (软归档 ARCHIVED, 可恢复)")) await api.deleteEmployee(e.id); })}>🗑 删除</button>
+            <button disabled={busy} style={{ color: "var(--danger)" }} onClick={() => act(async () => {
+              const running = e.status === "RUNNING" || e.status === "PAUSED";
+              const msg = running
+                ? `该员工当前是 ${e.status}，删除前会先自动停止它。确认删除? (软归档 ARCHIVED, 可恢复)`
+                : "确认删除该员工? (软归档 ARCHIVED, 可恢复)";
+              if (!window.confirm(msg)) return;
+              if (running) await api.employeeAction(e.id, "stop");
+              await api.deleteEmployee(e.id);
+            })}>🗑 删除</button>
             <button
               disabled={busy}
               onClick={() => act(async () => api.patchEmployee(e.id, { auto_publish: !e.auto_publish }))}
