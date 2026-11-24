@@ -72,6 +72,8 @@ async fn main() {
         tokio::spawn(cloud_api::pulse::run_scheduler(pool.clone()));
         // Connector 调度器 (Sincy-05): manifest 驱动的可抓取连接器, 与 collector 双写
         tokio::spawn(cloud_api::pipeline::connectors::run_scheduler(pool.clone()));
+        // 内容工厂后台 runner: 消费 draft Brief (断点①自动行真正被消费)
+        tokio::spawn(cloud_api::factory::draft_runner_loop(pool.clone()));
     }
 
     // Digital Employee scheduler (DE §cadence): auto-runs operating cycles for

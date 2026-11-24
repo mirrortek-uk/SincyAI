@@ -790,10 +790,17 @@ async fn list_opportunities(
 /// POST /intel/opportunities — run the opportunity engine (WI §19).
 async fn refresh_opportunities(
     State(state): State<AppState>,
+    axum::extract::Extension(auth): axum::extract::Extension<crate::auth::AuthCtx>,
 ) -> Result<Json<Value>, axum::response::Response> {
     let pool = state.pool().map_err(app_error_response)?;
     let (n, up) = refresh_opportunities_db(pool).await?;
-    Ok(Json(json!({ "opportunities": n, "upserted": up })))
+    // 断点①: 机会命中阈值(0.45)自动建工序0 Brief, 绑定调用方 agency + 其品牌
+    let auto =
+        crate::factory::auto_briefs_from_opportunities(pool, *auth.agency_id.as_uuid(), 0.45).await;
+    tracing::info!(auto_briefs = auto, "opportunity-driven briefs auto-created");
+    Ok(Json(
+        json!({ "opportunities": n, "upserted": up, "auto_briefs": auto }),
+    ))
 }
 
 /// Shared opportunity-engine pass (REST route + collector after new items
@@ -886,9 +893,6 @@ pub(crate) async fn refresh_opportunities_db(
             upserted += 1;
         }
     }
-    // 断点①: 机会命中阈值(0.45)自动建工序0 Brief (落库 factory_briefs)
-    let auto = crate::factory::auto_briefs_from_opportunities(pool, 0.45).await;
-    tracing::info!(auto_briefs = auto, "opportunity-driven briefs auto-created");
     Ok((ranked.len(), upserted))
 }
 

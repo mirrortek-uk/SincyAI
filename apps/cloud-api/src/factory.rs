@@ -22,6 +22,7 @@ use sincy_content::{
 };
 
 use crate::api::app_error_response;
+use crate::auth::AuthCtx;
 use crate::state::AppState;
 
 fn dberr(e: sqlx::Error) -> Response {
@@ -67,14 +68,27 @@ struct BriefReq {
 
 async fn create_brief(
     State(state): State<AppState>,
+    axum::extract::Extension(auth): axum::extract::Extension<AuthCtx>,
     Json(req): Json<BriefReq>,
 ) -> Result<Json<Value>, Response> {
     let pool = state.pool().map_err(app_error_response)?;
-    let agency_id: Option<uuid::Uuid> =
-        sqlx::query_scalar("SELECT id FROM agencies ORDER BY created_at LIMIT 1")
-            .fetch_optional(pool)
-            .await
-            .map_err(dberr)?;
+    let agency_id = *auth.agency_id.as_uuid();
+    // brand 必须属于调用方 agency, 否则 403 (防跨租户写)
+    if !req.brand_id.is_empty() {
+        let ok: Option<uuid::Uuid> =
+            sqlx::query_scalar("SELECT id FROM brands WHERE id = $1::uuid AND agency_id = $2")
+                .bind(&req.brand_id)
+                .bind(agency_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(dberr)?;
+        if ok.is_none() {
+            return Err(app_error_response(sincy_common::AppError::non_retryable(
+                "forbidden",
+                "brand does not belong to your agency",
+            )));
+        }
+    }
     let brief = match req.trigger {
         TriggerSource::OpportunityDriven => {
             let opp = req.opportunity_id.clone().ok_or_else(|| {
@@ -148,12 +162,16 @@ async fn create_brief(
     Ok(Json(json!(brief)))
 }
 
-async fn list_briefs(State(state): State<AppState>) -> Result<Json<Value>, Response> {
+async fn list_briefs(
+    State(state): State<AppState>,
+    axum::extract::Extension(auth): axum::extract::Extension<AuthCtx>,
+) -> Result<Json<Value>, Response> {
     let pool = state.pool().map_err(app_error_response)?;
     let rows = sqlx::query(
         "SELECT brief_id, brand_id, trigger, seed_opportunity_id, seed_signal_id, goal, platforms, angle, status, created_at
-         FROM factory_briefs ORDER BY created_at DESC LIMIT 100",
+         FROM factory_briefs WHERE agency_id = $1 ORDER BY created_at DESC LIMIT 100",
     )
+    .bind(auth.agency_id.as_uuid())
     .fetch_all(pool)
     .await
     .map_err(dberr)?;
@@ -181,13 +199,15 @@ async fn list_briefs(State(state): State<AppState>) -> Result<Json<Value>, Respo
 async fn run_brief(
     Path(id): Path<String>,
     State(state): State<AppState>,
+    axum::extract::Extension(auth): axum::extract::Extension<AuthCtx>,
 ) -> Result<Json<Value>, Response> {
     let pool = state.pool().map_err(app_error_response)?;
     let row = sqlx::query(
         "SELECT brief_id, brand_id, trigger, seed_opportunity_id, seed_signal_id, goal, platforms, angle, audience, cta, constraints
-         FROM factory_briefs WHERE brief_id = $1",
+         FROM factory_briefs WHERE brief_id = $1 AND agency_id = $2",
     )
     .bind(&id)
+    .bind(auth.agency_id.as_uuid())
     .fetch_optional(pool)
     .await
     .map_err(dberr)?
@@ -276,7 +296,19 @@ async fn run_brief(
 }
 
 /// 断点①: 机会引擎刷新后, 为达到阈值且今天没有 Brief 的机会自动建 Brief
-pub async fn auto_briefs_from_opportunities(pool: &sqlx::PgPool, threshold: f64) -> usize {
+pub async fn auto_briefs_from_opportunities(
+    pool: &sqlx::PgPool,
+    agency_id: uuid::Uuid,
+    threshold: f64,
+) -> usize {
+    // 自动 Brief 绑定该 agency 的首个品牌, 避免孤儿行
+    let brand_id: Option<String> = sqlx::query_scalar(
+        "SELECT id::text FROM brands WHERE agency_id = $1 ORDER BY created_at LIMIT 1",
+    )
+    .bind(agency_id)
+    .fetch_optional(pool)
+    .await
+    .unwrap_or(None);
     let rows = sqlx::query(
         "SELECT o.id::text, o.topic, o.score
          FROM intel_opportunities o
@@ -293,7 +325,7 @@ pub async fn auto_briefs_from_opportunities(pool: &sqlx::PgPool, threshold: f64)
     let mut n = 0;
     for r in rows {
         let brief = Brief::from_opportunity(
-            "",
+            brand_id.as_deref().unwrap_or(""),
             &r.get::<String, _>("id"),
             None,
             &format!("opportunity: {}", r.get::<String, _>("topic")),
@@ -302,11 +334,12 @@ pub async fn auto_briefs_from_opportunities(pool: &sqlx::PgPool, threshold: f64)
         );
         let res = sqlx::query(
             "INSERT INTO factory_briefs
-               (brief_id, brand_id, trigger, seed_opportunity_id, goal, platforms, angle, status)
-             VALUES ($1,$2,'opportunity_driven',$3,$4,$5,$6,'draft')
+               (brief_id, agency_id, brand_id, trigger, seed_opportunity_id, goal, platforms, angle, status)
+             VALUES ($1,$2,$3,'opportunity_driven',$4,$5,$6,$7,'draft')
              ON CONFLICT (brief_id) DO NOTHING",
         )
         .bind(&brief.brief_id)
+        .bind(agency_id)
         .bind(&brief.brand_id)
         .bind(&brief.seed_opportunity_id)
         .bind(&brief.goal)
@@ -351,9 +384,11 @@ struct LearnReq {
 /// 工序9 Learn: 结论真写回 factory_learnings, 并镜像进 employee_experiments (断点②闭合)
 async fn run_learn(
     State(state): State<AppState>,
+    axum::extract::Extension(auth): axum::extract::Extension<AuthCtx>,
     Json(req): Json<LearnReq>,
 ) -> Result<Json<Value>, Response> {
     let pool = state.pool().map_err(app_error_response)?;
+    let agency_id = *auth.agency_id.as_uuid();
     let learnings = learn(&req.events);
     let employee_id: Option<uuid::Uuid> = match &req.brand_id {
         Some(b) => sqlx::query_scalar(
@@ -367,9 +402,10 @@ async fn run_learn(
     };
     for l in &learnings {
         sqlx::query(
-            "INSERT INTO factory_learnings (brand_id, employee_id, hypothesis, evidence, confidence, source)
-             VALUES ($1,$2,$3,$4,$5,'factory_learn')",
+            "INSERT INTO factory_learnings (agency_id, brand_id, employee_id, hypothesis, evidence, confidence, source)
+             VALUES ($1,$2,$3,$4,$5,$6,'factory_learn')",
         )
+        .bind(agency_id)
         .bind(req.brand_id.as_deref())
         .bind(employee_id)
         .bind(&l.hypothesis)
@@ -395,4 +431,104 @@ async fn run_learn(
         "count": learnings.len(),
         "written_to": ["factory_learnings", if employee_id.is_some() { "employee_experiments" } else { "" }],
     })))
+}
+
+/// 后台 runner: 消费 draft 状态的 Brief (断点①自动产出的行真正被消费)
+pub async fn run_draft_briefs(pool: &sqlx::PgPool, limit: i64) -> usize {
+    let rows = sqlx::query(
+        "SELECT brief_id FROM factory_briefs WHERE status='draft' ORDER BY created_at LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    let mut n = 0;
+    for r in rows {
+        let id: String = r.get("brief_id");
+        if run_brief_by_id(pool, &id).await.is_ok() {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// 共享执行体: HTTP 端点与后台 runner 都走它
+pub async fn run_brief_by_id(pool: &sqlx::PgPool, id: &str) -> Result<Value, String> {
+    let row = sqlx::query(
+        "SELECT brief_id, brand_id, trigger, seed_opportunity_id, seed_signal_id, goal, platforms, angle, audience, cta, constraints
+         FROM factory_briefs WHERE brief_id = $1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?
+    .ok_or_else(|| "brief not found".to_string())?;
+    let brief = Brief {
+        brief_id: row.get("brief_id"),
+        trigger: match row.get::<String, _>("trigger").as_str() {
+            "opportunity_driven" => TriggerSource::OpportunityDriven,
+            "calendar_driven" => TriggerSource::CalendarDriven,
+            _ => TriggerSource::Manual,
+        },
+        seed_opportunity_id: row.get("seed_opportunity_id"),
+        seed_signal_id: row.get("seed_signal_id"),
+        brand_id: row.get::<Option<String>, _>("brand_id").unwrap_or_default(),
+        goal: row.get("goal"),
+        platforms: serde_json::from_value(row.get("platforms")).unwrap_or_default(),
+        angle: row.get("angle"),
+        audience: row.get("audience"),
+        cta: row.get("cta"),
+        constraints: row.get("constraints"),
+        created_at: chrono::Utc::now(),
+    };
+    let signals: Vec<Value> = if let Some(sid) = &brief.seed_signal_id {
+        sqlx::query("SELECT to_jsonb(s.*) FROM intelligence_signals s WHERE signal_id = $1")
+            .bind(sid)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| e.to_string())?
+            .iter()
+            .map(|r| r.get::<Value, _>(0))
+            .collect()
+    } else {
+        sqlx::query("SELECT to_jsonb(s.*) FROM intelligence_signals s ORDER BY importance DESC, observed_at DESC LIMIT 8")
+            .fetch_all(pool).await.map_err(|e| e.to_string())?
+            .iter().map(|r| r.get::<Value, _>(0)).collect()
+    };
+    let llm = llm_gen();
+    sqlx::query("UPDATE factory_briefs SET status='running', updated_at=now() WHERE brief_id=$1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    let plan = plan_strategy(&brief, &signals, &llm).await?;
+    let master = create_master(&brief, &plan, &signals, &llm).await?;
+    let mut variants = Vec::new();
+    for a in default_adapters() {
+        if brief.platforms.is_empty() || brief.platforms.contains(&a.spec().platform) {
+            variants.push(json!({ "platform": a.spec().platform, "text": adapt_master(&master, a.as_ref(), &brief) }));
+        }
+    }
+    let result = json!({ "plan": plan, "master": master, "variants": variants, "signal_count": signals.len() });
+    sqlx::query(
+        "UPDATE factory_briefs SET status='done', result=$2, updated_at=now() WHERE brief_id=$1",
+    )
+    .bind(id)
+    .bind(&result)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(result)
+}
+
+/// 后台调度循环: 每 10 分钟消费一批 draft Brief
+pub async fn draft_runner_loop(pool: sqlx::PgPool) {
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(600));
+    loop {
+        tick.tick().await;
+        let n = run_draft_briefs(&pool, 5).await;
+        if n > 0 {
+            tracing::info!(ran = n, "factory draft runner consumed briefs");
+        }
+    }
 }

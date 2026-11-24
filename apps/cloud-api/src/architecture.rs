@@ -377,7 +377,7 @@ async fn architecture(
         edge(
             "collector",
             "wisrc",
-            "定时拉取注册的只读公开源 (32 条默认 feed + 自托管扩展)",
+            &format!("定时拉取注册的只读公开源 ({feed_count} 条默认 feed + 自托管扩展)"),
             "external"
         ),
         edge(
@@ -483,7 +483,7 @@ async fn architecture(
         },
         {
             "id": "F5", "title": "世界情报采集 → 路由 → 机会",
-            "steps": "信源注册表(intelligence_sources, 26 个注册源, 迁移 0017/0019/0022) → collector 定时拉取(默认 30min 一轮, 32 条默认 feed) → 归一化入 intel_items(dedup_key 去重) → POST /intel/route 按 健康/可靠/限流/成本 打分出 provider 降级链 → 机会引擎打分 → intel_opportunities → 数字员工经 DE 适配器消费"
+            "steps": &format!("信源注册表(intelligence_sources, {src_count} 个注册源, 迁移 0017/0019/0022) → collector 定时拉取(默认 30min 一轮, {feed_count} 条默认 feed) → 归一化入 intel_items(dedup_key 去重) → POST /intel/route 按 健康/可靠/限流/成本 打分出 provider 降级链 → 机会引擎打分 → intel_opportunities → 数字员工经 DE 适配器消费")
         },
         {
             "id": "F6", "title": "信源健康审计 (Source Health Audit)",

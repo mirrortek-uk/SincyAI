@@ -1030,6 +1030,9 @@ pub fn app_error_response(err: AppError) -> Response {
     if err.code == "unauthorized" || err.code == "auth_not_initialized" {
         status = StatusCode::UNAUTHORIZED;
     }
+    if err.code == "forbidden" {
+        status = StatusCode::FORBIDDEN;
+    }
     let mut body = err.to_body();
     if body.error.request_id.is_empty() {
         body.error.request_id = RequestId::new().to_string();
