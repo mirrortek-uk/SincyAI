@@ -513,7 +513,38 @@ pub async fn run_cycle(
         channel: employee.channel.clone(),
         recent_topics: recent.clone(),
         max_cost_usd_per_cycle: None,
+        focus: Some(identity.focus.clone()),
     };
+    // WS2: 空 pillars 时用领域画像 focus 填满 (否则 pillar_match 恒为中性 0.5)
+    if ctx.pillars.is_empty()
+        && let Some(f) = &ctx.focus
+    {
+        let mut p = f
+            .get("topics")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        p.extend(
+            f.get("sub_verticals")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+        );
+        if let Some(ind) = f.get("industry").and_then(|v| v.as_str())
+            && !ind.is_empty()
+        {
+            p.push(ind.to_string());
+        }
+        ctx.pillars = p;
+    }
     // 学习闭环 (a): 周期开头原子取用上一周期留下的结构化调整, 真正改掉 pillars / angle
     let pending_adjustment = deps
         .store

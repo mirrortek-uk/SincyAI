@@ -217,7 +217,8 @@ async fn employee_phase(pool: &sqlx::PgPool, port: &u16, token: &str, brand_id: 
         "auto_publish": false,
         "identity": {"name":"Aria","role":"content_operator","voice":"sharp","audience":["developers"],"expertise":["ai agents"],"values":[],"boundaries":[]},
         "mission": {"statement":"grow authority","domain":"content","audience":["developers"],"value_proposition":"practical","constraints":[],"success_definition":"engagement"},
-        "strategy": {"pillars":["ai agents"],"cadence_per_week":7,"formats":["text"],"risk_tolerance":0.3,"exploration_budget":0.2}
+        "strategy": {"pillars":["ai agents"],"cadence_per_week":7,"formats":["text"],"risk_tolerance":0.3,"exploration_budget":0.2},
+        "focus": {"scope":"niche","industry":"ai","sub_verticals":["llm ops"],"topics":["ai agents"],"audience":["developers"],"excluded_topics":["crypto"]}
     }))).send().await.unwrap().json::<serde_json::Value>().await.unwrap();
     let emp_id = emp["id"].as_str().unwrap().to_string();
     assert_eq!(emp["status"], "READY");

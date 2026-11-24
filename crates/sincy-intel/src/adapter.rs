@@ -17,6 +17,9 @@ pub struct EmployeeContext {
     /// recent topics already posted (anti-template, DE §10)
     pub recent_topics: Vec<String>,
     pub max_cost_usd_per_cycle: Option<f64>,
+    /// 领域画像 focus (identity.focus, WS1); 相关性路由据此现算 per-员工 relevance
+    #[serde(default)]
+    pub focus: Option<serde_json::Value>,
 }
 
 /// Research brief contract (DE §25.7).
@@ -105,6 +108,7 @@ mod tests {
             channel: "x".into(),
             recent_topics: vec!["ai agents".into()],
             max_cost_usd_per_cycle: None,
+            focus: None,
         };
         let opps = vec![
             Opportunity {

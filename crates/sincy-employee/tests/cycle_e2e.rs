@@ -190,6 +190,8 @@ fn identity() -> Identity {
         personality: json!({}),
         voice: "sharp, practical".into(),
         voice_profile: json!({}),
+
+        focus: json!({"scope":"general"}),
         language: "zh-CN".into(),
         audience: vec!["developers".into()],
         expertise: vec!["ai".into()],

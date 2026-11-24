@@ -822,6 +822,17 @@ async fn refresh_opportunities(
 /// land). Platform-level: pillar match defaults to 0.5 (no employee context);
 /// employee-specific re-scoring happens in the DE adapter (WI §20).
 /// Returns (opportunities scored, upserted rows).
+/// 过期清理: 超 7 天仍为 new 的机会标 dismissed (intel_opportunities 按 topic UNIQUE 无清理的已知问题)
+pub async fn expire_stale_opportunities(
+    pool: &sqlx::PgPool,
+) -> Result<u64, axum::response::Response> {
+    let n = sqlx::query("UPDATE intel_opportunities SET status = 'dismissed' WHERE status = 'new' AND created_at < now() - interval '7 days'")
+        .execute(pool)
+        .await
+        .map_err(|e| crate::api::app_error_response(sincy_common::AppError::retryable("db", e.to_string())))?
+        .rows_affected();
+    Ok(n)
+}
 pub(crate) async fn refresh_opportunities_db(
     pool: &sqlx::PgPool,
 ) -> Result<(usize, usize), axum::response::Response> {

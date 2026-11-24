@@ -8,6 +8,7 @@ pub mod bootstrap;
 pub mod employees;
 pub mod factory;
 pub mod feed_import;
+pub mod focus;
 pub mod gateway;
 pub mod industry;
 pub mod intel;

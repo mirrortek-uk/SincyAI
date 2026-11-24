@@ -422,6 +422,7 @@ pub async fn run_scheduler(pool: sqlx::PgPool) {
         if let Some(e) = cerr {
             tracing::warn!(connector = "rss-custom", error = %e, "connector run failed");
         }
+        let _ = crate::intel::expire_stale_opportunities(&pool).await;
         if total_new > 0
             && let Ok((n, up)) = crate::intel::refresh_opportunities_db(&pool).await
         {
@@ -556,6 +557,7 @@ pub async fn run_all_connectors(pool: &sqlx::PgPool) -> (usize, usize, Vec<Strin
     if let Some(e) = cerr {
         failures.push(format!("rss-custom: {e}"));
     }
+    let _ = crate::intel::expire_stale_opportunities(pool).await;
     if processed > 0
         && let Ok((n, up)) = crate::intel::refresh_opportunities_db(pool).await
     {

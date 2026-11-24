@@ -10,6 +10,7 @@ import {
   type CycleDetail,
   type CycleItem,
   type EmployeeItem,
+  type IntelBoard,
   type InsightItem,
   type StrategyVersion,
 } from "@/lib/api";
@@ -194,6 +195,87 @@ export function EmployeesView() {
           {insights?.length === 0 && <p className="sub">还没有学习结论 — 周期跑起来后由 Learn/Adapt 写入。</p>}
         </div>
       </div>
-    </section>
+      {sel && <IntelBoardPanel empId={sel} focus={emp?.focus} />}    </section>
+  );
+}
+
+// WS3: 领域情报仪表板 + 专属 feed (按 focus 过滤; general = 全量)
+function IntelBoardPanel({ empId, focus }: { empId: string; focus?: Record<string, unknown> }) {
+  const [win, setWin] = useState("24h");
+  const [board, setBoard] = useState<IntelBoard | null>(null);
+  const [feed, setFeed] = useState<{ signals: unknown[]; opportunities: unknown[]; filtered: boolean } | null>(null);
+  const [err, setErr] = useState("");
+  useEffect(() => {
+    api.getIntelBoard(empId, win).then(setBoard).catch((e) => setErr(String(e)));
+    api.getEmployeeFeed(empId).then(setFeed).catch(() => {});
+  }, [empId, win]);
+  const f = focus ?? {};
+  const scope = (f.scope as string) ?? "general";
+  return (
+    <div className="mt14">
+      <div className="card">
+        <h3>📡 情报板 <span className="sub">{scope === "niche" ? `细分领域: ${String(f.industry ?? "—")} (已按领域过滤)` : "不分领域 (全量)"}</span>
+          <span className="sp" />
+                    {["8h", "16h", "24h"].map((w) => (
+            <button key={w} className={`btn sm ${win === w ? "emp" : ""}`} style={{ marginLeft: 6 }} onClick={() => setWin(w)}>{w}</button>
+          ))}
+        </h3>
+        {err && <Err e={err} />}
+        {!board && <Loading />}    
+        {board && (
+          <div className="grid g2">
+            <div>
+              <h4>🔥 热帖/趋势 ({board.window})</h4>
+              {board.hot.slice(0, 8).map((h) => (
+                <div key={h.signal_id} style={{ fontSize: 12, marginBottom: 6 }}>
+                  <Badge kind="run">{h.signal_type}</Badge> {h.title ?? h.signal_id} <span className="sub">imp {h.importance.toFixed(2)}</span>
+                </div>
+              ))}
+              {board.hot.length === 0 && <p className="sub">窗口内本领域暂无信号</p>}
+            </div>
+            <div>
+              <h4>🚀 爆款话题 / 竞品动态</h4>
+              {board.viral.slice(0, 8).map((h) => (
+                <div key={h.signal_id} style={{ fontSize: 12, marginBottom: 6 }}>
+                  <Badge kind="warn">{h.signal_type}</Badge> {h.title ?? h.signal_id}
+                </div>
+              ))}
+              {board.viral.length === 0 && <p className="sub">窗口内无爆款/竞品信号</p>}
+            </div>
+            <div>
+              <h4>🌟 本领域 Top KOL</h4>
+              {board.kols.status !== "ok" && <p className="sub">{board.kols.note ?? "未配置"}</p>}
+              {board.kols.items.slice(0, 10).map((k) => (
+                <div key={k.entity_id} style={{ fontSize: 12, marginBottom: 6 }}>{k.title || k.entity_id} <span className="sub">{(k.industry_tags ?? []).join(",")}</span></div>
+              ))}
+            </div>
+            <div>
+              <h4>💡 选题缺口 (领域热点 ⊖ 已发)</h4>
+              {board.topic_gaps.slice(0, 8).map((h) => (
+                <div key={h.signal_id} style={{ fontSize: 12, marginBottom: 6 }}>{h.title ?? h.signal_id}</div>
+              ))}
+              {board.topic_gaps.length === 0 && <p className="sub">暂无缺口 (或近期已覆盖)</p>}
+            </div>
+          </div>
+        )}
+      </div>
+      {feed && (
+        <div className="card mt14">
+          <h3>📥 专属 feed <span className="sub">{feed.filtered ? "已按领域过滤" : "全量"}</span></h3>
+          <div className="grid g2">
+            <div>
+              <h4>信号 ({feed.signals.length})</h4>
+              {feed.signals.slice(0, 8).map((x) => { const s = x as { signal_id: string; signal_type: string; importance: number; payload?: { title?: string } };
+                return <div key={s.signal_id} style={{ fontSize: 12, marginBottom: 6 }}><Badge kind="run">{s.signal_type}</Badge> {s.payload?.title ?? s.signal_id}</div>; })}
+            </div>
+            <div>
+              <h4>机会 ({feed.opportunities.length})</h4>
+              {feed.opportunities.slice(0, 8).map((x) => { const o = x as { topic: string; score: number };
+                return <div key={o.topic} style={{ fontSize: 12, marginBottom: 6 }}>{o.topic} <span className="sub">score {typeof o.score === "number" ? o.score.toFixed(2) : String(o.score)}</span></div>; })}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }

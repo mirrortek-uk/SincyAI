@@ -47,6 +47,8 @@ pub fn routes() -> Router<AppState> {
         .route("/cycles/{id}", get(get_cycle))
         .route("/employees/{id}/memory", get(list_memory))
         .route("/employees/{id}/insights", get(list_insights))
+        .route("/employees/{id}/feed", get(employee_feed))
+        .route("/employees/{id}/intel-board", get(intel_board))
         .route("/employees/{id}/plugins", get(list_plugins))
 }
 
@@ -177,6 +179,7 @@ async fn load_full(
             personality: json!({}),
             voice: "neutral".into(),
             voice_profile: json!({}),
+            focus: json!({"scope":"general"}),
             language: default_language(),
             audience: vec![],
             expertise: vec![],
@@ -220,6 +223,8 @@ async fn load_full(
 #[derive(Debug, Deserialize)]
 struct CreateEmployeeBody {
     name: String,
+    /// 领域画像 (WS1, 必填): {scope:'niche'|'general', industry?, sub_verticals?, topics?, audience?, excluded_topics?}
+    focus: Option<Value>,
     role: Option<String>,
     brand_id: Option<Uuid>,
     channel: Option<String>,
@@ -256,6 +261,21 @@ async fn create_employee(
             }
         }
     }
+    // WS1: focus 必填; niche 时 industry 必填且须在分类法内 (422)
+    let focus = match &body.focus {
+        Some(f) => {
+            crate::focus::validate_focus(f).map_err(|e| {
+                app_error_response(sincy_common::AppError::non_retryable("invalid_focus", e))
+            })?;
+            f.clone()
+        }
+        None => {
+            return Err(app_error_response(sincy_common::AppError::non_retryable(
+                "focus_required",
+                "focus is required: {scope:'niche'|'general', industry?, sub_verticals?, topics?, audience?, excluded_topics?}",
+            )));
+        }
+    };
     let id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO digital_employees (id, agency_id, name, role, brand_id, channel, auto_publish, status)
@@ -276,6 +296,7 @@ async fn create_employee(
         "name": body.name, "role": body.role.clone().unwrap_or_else(|| "content_operator".into()),
         "personality": {}, "voice": "neutral", "audience": [], "expertise": [], "values": [], "boundaries": []
     }));
+    identity["focus"] = focus;
     if identity.get("language").and_then(|v| v.as_str()).is_none() {
         identity["language"] = json!(brand_language.unwrap_or_else(default_language));
     }
@@ -309,7 +330,9 @@ async fn list_employees(
     let pool = state.pool().map_err(app_error_response)?;
     let rows = sqlx::query(
         "SELECT e.*, (SELECT v.identity->>'language' FROM employee_identity_versions v
-                      WHERE v.employee_id = e.id AND v.status = 'active' ORDER BY v.version DESC LIMIT 1) AS language
+                      WHERE v.employee_id = e.id AND v.status = 'active' ORDER BY v.version DESC LIMIT 1) AS language,
+                      (SELECT v.identity->'focus' FROM employee_identity_versions v
+                      WHERE v.employee_id = e.id AND v.status = 'active' ORDER BY v.version DESC LIMIT 1) AS focus
          FROM digital_employees e WHERE e.agency_id = $1 ORDER BY e.created_at DESC",
     )
     .bind(auth.agency_id.as_uuid())
@@ -319,7 +342,8 @@ async fn list_employees(
     let items: Vec<Value> = rows.iter().map(|r| {
         let e = row_to_employee(r);
         let lang: Option<String> = r.try_get("language").ok().flatten();
-        json!({"id": e.id, "name": e.name, "role": e.role, "status": e.status.as_str(), "channel": e.channel, "auto_publish": e.auto_publish, "brand_id": e.brand_id, "config_version": e.config_version, "language": lang.unwrap_or_else(default_language)})
+        let focus: Option<Value> = r.try_get("focus").ok().flatten();
+        json!({"id": e.id, "name": e.name, "role": e.role, "status": e.status.as_str(), "channel": e.channel, "auto_publish": e.auto_publish, "brand_id": e.brand_id, "config_version": e.config_version, "language": lang.unwrap_or_else(default_language), "focus": focus.unwrap_or_else(|| json!({"scope":"general"}))})
     }).collect();
     Ok(Json(json!({ "items": items })))
 }
@@ -351,8 +375,16 @@ async fn get_employee(
     .await
     .map_err(err)?
     .flatten();
+    let foc: Option<Value> = sqlx::query_scalar(
+        "SELECT identity->'focus' FROM employee_identity_versions WHERE employee_id = $1 AND status = 'active' ORDER BY version DESC LIMIT 1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .map_err(err)?
+    .flatten();
     Ok(Json(
-        json!({"id": e.id, "name": e.name, "role": e.role, "status": e.status.as_str(), "channel": e.channel, "auto_publish": e.auto_publish, "brand_id": e.brand_id, "config_version": e.config_version, "language": lang.unwrap_or_else(default_language), "created_at": e.created_at}),
+        json!({"id": e.id, "name": e.name, "role": e.role, "status": e.status.as_str(), "channel": e.channel, "auto_publish": e.auto_publish, "brand_id": e.brand_id, "config_version": e.config_version, "language": lang.unwrap_or_else(default_language), "focus": foc.unwrap_or_else(|| json!({"scope":"general"})), "created_at": e.created_at}),
     ))
 }
 
@@ -360,6 +392,8 @@ async fn get_employee(
 struct PatchBody {
     name: Option<String>,
     auto_publish: Option<bool>,
+    /// 修改领域画像 — 校验后写入新的 identity 版本
+    focus: Option<Value>,
     /// 修改输出语言 — 会写入新的 identity 版本 (DE §6 identity 版本化)
     language: Option<String>,
 }
@@ -391,6 +425,38 @@ async fn patch_employee(
             "not_found",
             "employee not found",
         )));
+    }
+    if let Some(f) = &body.focus {
+        crate::focus::validate_focus(f).map_err(|e| {
+            app_error_response(sincy_common::AppError::non_retryable("invalid_focus", e))
+        })?;
+        let cur = sqlx::query(
+            "SELECT version, identity FROM employee_identity_versions WHERE employee_id = $1 AND status = 'active' ORDER BY version DESC LIMIT 1",
+        )
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(err)?;
+        let (version, mut identity) = match cur {
+            Some(r) => (
+                r.get::<i32, _>("version") + 1,
+                r.get::<Value, _>("identity"),
+            ),
+            None => (1, json!({})),
+        };
+        identity["focus"] = f.clone();
+        sqlx::query("UPDATE employee_identity_versions SET status = 'superseded' WHERE employee_id = $1 AND status = 'active'")
+            .bind(id)
+            .execute(pool)
+            .await
+            .map_err(err)?;
+        sqlx::query("INSERT INTO employee_identity_versions (employee_id, version, identity, status) VALUES ($1, $2, $3, 'active')")
+            .bind(id)
+            .bind(version)
+            .bind(&identity)
+            .execute(pool)
+            .await
+            .map_err(err)?;
     }
     if let Some(lang) = &body.language {
         crate::api::validate_language(lang).map_err(crate::api::app_error_response)?;
@@ -746,6 +812,7 @@ pub(crate) async fn run_skill_by_name(
                     personality: json!({}),
                     voice: "casual, human".into(),
                     voice_profile: json!({}),
+                    focus: json!({"scope":"general"}),
                     language: "zh-CN".into(),
                     audience: vec![],
                     boundaries: vec![],
@@ -1398,10 +1465,22 @@ impl IntelPort for PgIntelPort {
         limit: usize,
     ) -> Result<Vec<Opportunity>, String> {
         let rows = sqlx::query(
-            "SELECT topic, score, rationale, evidence FROM intel_opportunities WHERE status = 'new' ORDER BY score DESC LIMIT 400",
+            "SELECT topic, score, rationale, evidence FROM intel_opportunities WHERE status = 'new' AND created_at > now() - interval '7 days' ORDER BY score DESC LIMIT 400",
         )
         .fetch_all(&self.pool).await.map_err(|e| e.to_string())?;
         let mut out: Vec<Opportunity> = Vec::new();
+        // WS2: 领域画像 → 现算 per-员工相关性 (原则1: 不烤死在实体上)
+        let focus = ctx
+            .focus
+            .clone()
+            .map(crate::focus::focus_from_value)
+            .unwrap_or_default();
+        let niche = !focus.is_general();
+        let mut pillars = ctx.pillars.clone();
+        if pillars.is_empty() {
+            pillars = focus.pillars(); // 空 pillars 用 focus 填满, 避免中性 0.5
+        }
+        let cp = focus.customer_profile();
         for r in &rows {
             let topic: String = r.get("topic");
             let rationale: Value = r.get("rationale");
@@ -1412,7 +1491,45 @@ impl IntelPort for PgIntelPort {
                 .to_string();
             // 品牌相关性: topic + 标题 vs 支柱/受众
             let haystack = format!("{topic} {title}");
-            let pm = pillar_match(&haystack, &ctx.pillars, &ctx.audience);
+            // WS2 硬过滤: 负向主题直接丢弃
+            if niche && focus.excluded_hit(&haystack) {
+                continue;
+            }
+            // 候选行业标签: rationale.industry_tags ∪ 证据 intel_items.industries
+            let keys0: Vec<String> = r
+                .get::<Value, _>("evidence")
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut tags: Vec<String> = rationale
+                .get("industry_tags")
+                .and_then(|t| t.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !keys0.is_empty() {
+                let rows2 = sqlx::query(
+                    "SELECT DISTINCT jsonb_array_elements_text(industries) AS t FROM intel_items WHERE dedup_key = ANY($1) AND industries <> '[]'::jsonb",
+                )
+                .bind(&keys0)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| e.to_string())?;
+                for r2 in &rows2 {
+                    tags.push(r2.get::<String, _>("t"));
+                }
+            }
+            if niche && !tags.is_empty() && !focus.tags_intersect(&tags) {
+                continue; // industry_tags 与 focus 无交集 → 丢弃
+            }
+            let pm = pillar_match(&haystack, &pillars, &ctx.audience);
             if pm < 0.45 {
                 continue; // 与品牌支柱不沾边的直接不给员工看 (单关键词蹭分已不够)
             }
@@ -1445,7 +1562,15 @@ impl IntelPort for PgIntelPort {
                 sentiment: 0.5,
                 window_hours: 24,
             };
-            let mut score = score_opportunity(pm, &trend, 0.2, freshness);
+            // WS2: 保留者用 relevance_score 参与打分 (per-员工现算)
+            // relevance_score 返回 0..100, 归一化到 0..1
+            let rel = if niche {
+                (sincy_intel::industry::relevance_score(&tags, &haystack, &cp) / 100.0)
+                    .clamp(0.0, 1.0)
+            } else {
+                0.5
+            };
+            let mut score = score_opportunity(pm, &trend, 0.2, freshness) * (0.4 + 0.6 * rel);
             // 噪声信源降权: 只有 wikipedia-rc 这类百科流水的 topic 衰减 50%
             let plats = rationale
                 .get("platforms")
@@ -1458,6 +1583,7 @@ impl IntelPort for PgIntelPort {
                 score *= 0.5;
             }
             let mut rat = rationale.clone();
+            rat["focus_relevance"] = json!(rel);
             rat["pillar_match"] = json!(pm);
             // 证据解析成可读条目
             let keys: Vec<String> = r
@@ -1764,4 +1890,272 @@ impl PublishPort for PgPublishPort {
             .await
             .map_err(|e| e.to_string())
     }
+}
+
+// ---------- WS2: 员工专属 feed (按 focus 过滤 signals + 机会; general = 全量) ----------
+async fn employee_feed(
+    State(state): State<AppState>,
+    axum::extract::Extension(auth): axum::extract::Extension<crate::auth::AuthCtx>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, axum::response::Response> {
+    let pool = state.pool().map_err(app_error_response)?;
+    let identity = load_identity_of(pool, *auth.agency_id.as_uuid(), id).await?;
+    let focus = crate::focus::focus_from_identity(&identity);
+    // signals: 近 24h, 按 focus 过滤
+    let sig_rows = sqlx::query(
+        "SELECT signal_id, signal_type, industry_id, topic_id, strength, importance, observed_at, payload FROM intelligence_signals WHERE observed_at > now() - interval '24 hours' ORDER BY importance DESC LIMIT 300",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(err)?;
+    let mut signals: Vec<Value> = Vec::new();
+    for r in &sig_rows {
+        let payload: Value = r.get("payload");
+        let industry: Option<String> = r.try_get("industry_id").ok().flatten();
+        let text = format!(
+            "{} {}",
+            payload.get("title").and_then(|v| v.as_str()).unwrap_or(""),
+            payload
+                .get("summary")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+        );
+        if !focus.is_general() {
+            if focus.excluded_hit(&text) {
+                continue;
+            }
+            let tags: Vec<String> = industry.iter().cloned().collect();
+            let has_tag_info = !tags.is_empty();
+            if has_tag_info && !focus.tags_intersect(&tags) {
+                continue;
+            }
+            if !has_tag_info && !focus.keyword_hit(&text) {
+                continue;
+            }
+        }
+        signals.push(json!({
+            "signal_id": r.get::<String, _>("signal_id"),
+            "signal_type": r.get::<String, _>("signal_type"),
+            "industry_id": industry,
+            "topic_id": r.try_get::<Option<String>, _>("topic_id").ok().flatten(),
+            "strength": r.get::<f64, _>("strength"),
+            "importance": r.get::<f64, _>("importance"),
+            "observed_at": r.get::<chrono::DateTime<chrono::Utc>, _>("observed_at"),
+            "payload": payload,
+        }));
+        if signals.len() >= 50 {
+            break;
+        }
+    }
+    // 机会: 近 7 天未处理, 同样按 focus 硬过滤
+    let opp_rows = sqlx::query(
+        "SELECT topic, score, rationale, evidence FROM intel_opportunities WHERE status = 'new' AND created_at > now() - interval '7 days' ORDER BY score DESC LIMIT 200",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(err)?;
+    let mut opps: Vec<Value> = Vec::new();
+    for r in &opp_rows {
+        let topic: String = r.get("topic");
+        let rationale: Value = r.get("rationale");
+        let title = rationale
+            .get("title")
+            .and_then(|t| t.as_str())
+            .unwrap_or("");
+        let haystack = format!("{topic} {title}");
+        if !focus.is_general() {
+            if focus.excluded_hit(&haystack) {
+                continue;
+            }
+            let keys: Vec<String> = r
+                .get::<Value, _>("evidence")
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut tags: Vec<String> = rationale
+                .get("industry_tags")
+                .and_then(|t| t.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !keys.is_empty()
+                && let Ok(rows2) = sqlx::query("SELECT DISTINCT jsonb_array_elements_text(industries) AS t FROM intel_items WHERE dedup_key = ANY($1) AND industries <> '[]'::jsonb").bind(&keys).fetch_all(pool).await {
+                    for r2 in &rows2 { tags.push(r2.get::<String, _>("t")); }
+                }
+            if !tags.is_empty() && !focus.tags_intersect(&tags) {
+                continue;
+            }
+        }
+        opps.push(json!({
+            "topic": topic,
+            "score": r.get::<Value, _>("score"),
+            "rationale": rationale,
+        }));
+        if opps.len() >= 30 {
+            break;
+        }
+    }
+    Ok(Json(json!({
+        "employee_id": id,
+        "focus": focus.to_json(),
+        "filtered": !focus.is_general(),
+        "signals": signals,
+        "opportunities": opps,
+    })))
+}
+
+/// 读取员工 active identity (agency 隔离)
+async fn load_identity_of(
+    pool: &sqlx::PgPool,
+    agency: Uuid,
+    id: Uuid,
+) -> Result<Value, axum::response::Response> {
+    let row = sqlx::query(
+        "SELECT v.identity FROM digital_employees e JOIN employee_identity_versions v ON v.employee_id = e.id AND v.status = 'active' WHERE e.id = $1 AND e.agency_id = $2 ORDER BY v.version DESC LIMIT 1",
+    )
+    .bind(id)
+    .bind(agency)
+    .fetch_optional(pool)
+    .await
+    .map_err(err)?;
+    match row {
+        Some(r) => Ok(r.get::<Value, _>("identity")),
+        None => Err(app_error_response(sincy_common::AppError::non_retryable(
+            "not_found",
+            "employee not found",
+        ))),
+    }
+}
+
+// ---------- WS3: 领域情报仪表板 ----------
+#[derive(Debug, Deserialize)]
+struct BoardQuery {
+    window: Option<String>,
+}
+
+async fn intel_board(
+    State(state): State<AppState>,
+    axum::extract::Extension(auth): axum::extract::Extension<crate::auth::AuthCtx>,
+    Path(id): Path<Uuid>,
+    axum::extract::Query(q): axum::extract::Query<BoardQuery>,
+) -> Result<Json<Value>, axum::response::Response> {
+    let pool = state.pool().map_err(app_error_response)?;
+    let window = q.window.unwrap_or_else(|| "24h".into());
+    if !["8h", "16h", "24h"].contains(&window.as_str()) {
+        return Err(app_error_response(sincy_common::AppError::non_retryable(
+            "bad_request",
+            "window must be 8h|16h|24h",
+        )));
+    }
+    let identity = load_identity_of(pool, *auth.agency_id.as_uuid(), id).await?;
+    let focus = crate::focus::focus_from_identity(&identity);
+    let interval = format!("interval '{window}'");
+    // 热帖/趋势: 窗口内 signals 按 importance 排序
+    let hot_sql = format!(
+        "SELECT signal_id, signal_type, industry_id, strength, importance, observed_at, payload FROM intelligence_signals WHERE observed_at > now() - {interval} ORDER BY importance DESC LIMIT 300"
+    );
+    let hot_rows = sqlx::query(&hot_sql).fetch_all(pool).await.map_err(err)?;
+    let mut hot: Vec<Value> = Vec::new();
+    let mut viral: Vec<Value> = Vec::new();
+    for r in &hot_rows {
+        let payload: Value = r.get("payload");
+        let industry: Option<String> = r.try_get("industry_id").ok().flatten();
+        let stype: String = r.get("signal_type");
+        let text = format!(
+            "{} {}",
+            payload.get("title").and_then(|v| v.as_str()).unwrap_or(""),
+            payload
+                .get("summary")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+        );
+        if !focus.is_general() {
+            if focus.excluded_hit(&text) {
+                continue;
+            }
+            let tags: Vec<String> = industry.iter().cloned().collect();
+            if !tags.is_empty() && !focus.tags_intersect(&tags) {
+                continue;
+            }
+            if tags.is_empty() && !focus.keyword_hit(&text) {
+                continue;
+            }
+        }
+        let item = json!({"signal_id": r.get::<String,_>("signal_id"), "signal_type": stype, "importance": r.get::<f64,_>("importance"), "observed_at": r.get::<chrono::DateTime<chrono::Utc>,_>("observed_at"), "title": payload.get("title").cloned().unwrap_or(Value::Null), "url": payload.get("url").cloned().unwrap_or(Value::Null)});
+        if [
+            "trend_rising",
+            "content_going_viral",
+            "competitor_activity",
+            "topic_emerging",
+        ]
+        .contains(&stype.as_str())
+        {
+            viral.push(item.clone());
+        }
+        hot.push(item);
+        if hot.len() >= 20 {
+            break;
+        }
+    }
+    // Top20 KOL: social_account/creator 实体; 无数据 = provider 未配置, 明确占位
+    let kol_rows = if focus.is_general() {
+        sqlx::query("SELECT entity_id, title, payload, industry_tags FROM intelligence_entities WHERE entity_type IN ('social_account','creator') ORDER BY updated_at DESC LIMIT 20").fetch_all(pool).await.map_err(err)?
+    } else {
+        let keys = focus.keys();
+        sqlx::query("SELECT entity_id, title, payload, industry_tags FROM intelligence_entities WHERE entity_type IN ('social_account','creator') AND industry_tags ?| $1 ORDER BY updated_at DESC LIMIT 20").bind(&keys).fetch_all(pool).await.map_err(err)?
+    };
+    let kols: Vec<Value> = kol_rows
+        .iter()
+        .map(|r| {
+            json!({
+                "entity_id": r.get::<String,_>("entity_id"),
+                "title": r.get::<String,_>("title"),
+                "industry_tags": r.get::<Value,_>("industry_tags"),
+                "payload": r.get::<Value,_>("payload"),
+            })
+        })
+        .collect();
+    let kol_block = if kols.is_empty() {
+        json!({"status": "not_configured", "items": [], "note": "pulse creator_ranking/account_growth provider 未配置, 或本领域暂无 KOL 实体"})
+    } else {
+        json!({"status": "ok", "items": kols})
+    };
+    // 选题缺口: 窗口内热点话题 ⊖ 该员工近期已发
+    let recent_rows = sqlx::query(
+        "SELECT p.text_content FROM publishing_packages p JOIN digital_employees e ON e.brand_id = p.brand_id WHERE e.id = $1 ORDER BY p.created_at DESC LIMIT 20",
+    )
+    .bind(id)
+    .fetch_all(pool)
+    .await
+    .map_err(err)?;
+    let recent: Vec<String> = recent_rows.iter().map(|r| r.get::<String, _>(0)).collect();
+    let mut gaps: Vec<Value> = Vec::new();
+    for h in &hot {
+        if let Some(t) = h.get("title").and_then(|v| v.as_str())
+            && !t.is_empty()
+            && !recent.iter().any(|r| r.contains(t))
+        {
+            gaps.push(h.clone());
+        }
+        if gaps.len() >= 10 {
+            break;
+        }
+    }
+    Ok(Json(json!({
+        "employee_id": id,
+        "window": window,
+        "focus": focus.to_json(),
+        "filtered": !focus.is_general(),
+        "hot": hot,
+        "viral": viral,
+        "kols": kol_block,
+        "topic_gaps": gaps,
+    })))
 }

@@ -168,6 +168,7 @@ export interface EmployeeItem {
   brand_id: string | null;
   config_version: number;
   language?: string;
+  focus?: Record<string, unknown>;
 }
 
 export const LANGUAGES: { code: string; label: string }[] = [
@@ -728,8 +729,9 @@ export const api = {
     identity?: unknown;
     mission?: unknown;
     strategy?: unknown;
+    focus?: unknown;
   }) => req<{ id: string; status: string }>("/employees", { method: "POST", body: JSON.stringify(body) }),
-  patchEmployee: (id: string, body: { name?: string; auto_publish?: boolean; language?: string }) =>
+  patchEmployee: (id: string, body: { name?: string; auto_publish?: boolean; language?: string; focus?: unknown }) =>
     req<{ id: string; patched: boolean }>(`/employees/${id}`, {
       method: "PATCH",
       body: JSON.stringify(body),
@@ -889,6 +891,11 @@ export const api = {
   getKpiPlan: (platform: string, accountId: string) =>
     req<LedgerToday & { posting_windows: unknown; timezone: unknown }>("/kpi/plan?" + new URLSearchParams({ platform, account_id: accountId })),
 
+  // --- 细分领域员工: focus + feed + 情报板 ---
+  getEmployeeFeed: (id: string) =>
+    req<{ employee_id: string; focus: Record<string, unknown>; filtered: boolean; signals: unknown[]; opportunities: unknown[] }>(`/employees/${id}/feed`),
+  getIntelBoard: (id: string, window: string) =>
+    req<IntelBoard>(`/employees/${id}/intel-board?window=${encodeURIComponent(window)}`),
   // --- Voice Profile 语气档案 ---
   getEmployeeVoice: (id: string) =>
     req<{ employee_id: string; voice: string; voice_profile: VoiceProfileJson }>(`/voice/employee/${id}`),
@@ -1037,4 +1044,16 @@ export interface VoiceAccount {
   platform: string;
   account_id: string;
   voice_profile: VoiceProfileJson;
+}
+
+// ===== 领域情报仪表板 =====
+export interface IntelBoard {
+  employee_id: string;
+  window: string;
+  focus: Record<string, unknown>;
+  filtered: boolean;
+  hot: { signal_id: string; signal_type: string; importance: number; observed_at: string; title: string | null; url: string | null }[];
+  viral: IntelBoard["hot"];
+  kols: { status: string; items: { entity_id: string; title: string; industry_tags: string[]; payload: unknown }[]; note?: string };
+  topic_gaps: IntelBoard["hot"];
 }

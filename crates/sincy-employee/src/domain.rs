@@ -88,6 +88,9 @@ pub struct Identity {
     /// 结构化语气档案 (Voice Profile 基线, 见 sincy-content::voice); 账号级覆盖在 employee_accounts.voice_profile
     #[serde(default)]
     pub voice_profile: Value,
+    /// 领域画像 (WS1): {scope, industry, sub_verticals, topics, audience, excluded_topics}; 相关性路由据此现算
+    #[serde(default)]
+    pub focus: Value,
     /// 输出语言 (BCP-47), 默认中文; 由品牌 language 或创建时显式指定
     #[serde(default = "default_language")]
     pub language: String,

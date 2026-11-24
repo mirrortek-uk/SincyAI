@@ -35,14 +35,22 @@ export default function EmployeesPage() {
   const [autoPublish, setAutoPublish] = useState(false);
   const [lastCycle, setLastCycle] = useState<CycleOutcome | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // WS1 领域画像 focus 表单
+  const [industries, setIndustries] = useState<{ id: string; name: string }[]>([]);
+  const [fScope, setFScope] = useState("niche");
+  const [fIndustry, setFIndustry] = useState("");
+  const [fVerticals, setFVerticals] = useState("");
+  const [fTopics, setFTopics] = useState("");
+  const [fExcluded, setFExcluded] = useState("");
   const [busy, setBusy] = useState(false);
 
   const loadEmployees = useCallback(async () => {
     if (!getToken()) return;
     try {
-      const [e, b] = await Promise.all([api.listEmployees(), api.listBrands()]);
+      const [e, b, ind] = await Promise.all([api.listEmployees(), api.listBrands(), api.listIndustries().catch(() => ({ items: [] as { id: string; name: string }[] }))]);
       setEmployees(e.items);
       setBrands(b.items);
+      setIndustries(ind.items.map((x) => ({ id: x.id, name: x.name })));
       setSelected((cur) => (e.items.some((x) => x.id === cur) ? cur : (e.items[0]?.id ?? "")));
       if (!brandId && b.items.length > 0) setBrandId(b.items[0].id);
     } catch (e) {
@@ -130,8 +138,23 @@ export default function EmployeesPage() {
             <input type="checkbox" checked={autoPublish} onChange={(e) => setAutoPublish(e.target.checked)} />
             自动发布
           </label>
+          <select value={fScope} onChange={(e) => setFScope(e.target.value)} title="领域范围">
+            <option value="niche">细分领域 (niche)</option>
+            <option value="general">不分领域 (general)</option>
+          </select>
+          {fScope === "niche" && (
+            <>
+              <select value={fIndustry} onChange={(e) => setFIndustry(e.target.value)} title="行业 (必填)">
+                <option value="">选行业 *</option>
+                {industries.map((x) => <option key={x.id} value={x.id}>{x.name} ({x.id})</option>)})
+              </select>
+              <input placeholder="细分赛道 (逗号分隔, 如 llm_ops,vector_db)" value={fVerticals} onChange={(e) => setFVerticals(e.target.value)} style={{ width: 220 }} />
+              <input placeholder="关注话题 (逗号分隔)" value={fTopics} onChange={(e) => setFTopics(e.target.value)} style={{ width: 180 }} />
+              <input placeholder="排除话题 (逗号分隔)" value={fExcluded} onChange={(e) => setFExcluded(e.target.value)} style={{ width: 160 }} />
+            </>
+          )}
           <button
-            disabled={busy || !name || !brandId}
+            disabled={busy || !name || !brandId || (fScope === "niche" && !fIndustry)}
             onClick={() =>
               act(async () => {
                 const r = await api.createEmployee({
@@ -143,6 +166,14 @@ export default function EmployeesPage() {
                   identity: { name, role: "content_operator", voice: "neutral", language, audience: ["developers"], expertise: ["ai agents"], values: [], boundaries: [] },
                   mission: { statement: "在 X 上建立品牌在 AI agents 领域的权威", domain: "content", audience: ["developers"], value_proposition: "实用、不灌水", constraints: ["280 字以内"], success_definition: "互动增长" },
                   strategy: { pillars: ["ai agents", "llm ops", "multi-agent"], cadence_per_week: 7, formats: ["text"], risk_tolerance: 0.3, exploration_budget: 0.2 },
+                  focus: {
+                    scope: fScope,
+                    industry: fScope === "niche" ? fIndustry : undefined,
+                    sub_verticals: fVerticals.split(",").map((x) => x.trim()).filter(Boolean),
+                    topics: fTopics.split(",").map((x) => x.trim()).filter(Boolean),
+                    audience: ["developers"],
+                    excluded_topics: fExcluded.split(",").map((x) => x.trim()).filter(Boolean),
+                  },
                 });
                 setSelected(r.id);
                 setName("");
