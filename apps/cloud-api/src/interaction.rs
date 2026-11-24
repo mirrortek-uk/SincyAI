@@ -243,6 +243,29 @@ async fn reply_pass(pool: &sqlx::PgPool, allow_mock_llm: bool) {
              in ONE short, friendly sentence (same language as the mention, max 120 chars). \
              Mention: {text}\nReply only, no quotes, no explanation."
         );
+        // KPI 配额压顶 (kpi-schema §5): 达额/健康红线则停派, 不标记 replied (明日再试)
+        let emp_id: Option<uuid::Uuid> = m.get("employee_id");
+        match crate::kpi::record_action(
+            pool,
+            agency_id,
+            emp_id,
+            &platform,
+            &account_id,
+            "reply",
+            None,
+        )
+        .await
+        {
+            Ok(v) if v["blocked"].as_bool().unwrap_or(false) => {
+                tracing::info!(%mention_id, platform, reason = %v["reason"], "reply blocked by KPI quota/guardrail");
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "kpi record_action failed, skip mention this tick");
+                continue;
+            }
+            _ => {}
+        }
         let reply = match llm.generate(&prompt, 128).await {
             Ok(t) => t.trim().trim_matches('"').to_string(),
             Err(e) => {

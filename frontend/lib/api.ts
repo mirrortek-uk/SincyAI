@@ -872,6 +872,22 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ strategy }),
     }),
+  // --- KPI 配额 ---
+  listKpiCategories: () => req<{ items: KpiCategory[] }>("/kpi/categories"),
+  listKpiPlatforms: (category?: string) =>
+    req<{ items: KpiPlatform[] }>("/kpi/platforms" + (category ? `?category=${encodeURIComponent(category)}` : "")),
+  getKpiPlatform: (p: string) => req<KpiEffective>(`/kpi/platforms/${encodeURIComponent(p)}`),
+  getKpiEffective: (platform: string, accountId: string, employeeId?: string) =>
+    req<{ platform: string; account_id: string; overrides: Record<string, unknown>; effective: KpiEffective }>(
+      "/kpi/effective?" + new URLSearchParams({ platform, account_id: accountId, ...(employeeId ? { employee_id: employeeId } : {}) }),
+    ),
+  listKpiAccounts: () => req<{ items: AccountKpi[] }>("/kpi/accounts"),
+  putKpiAccount: (body: { employee_id?: string; platform: string; account_id: string; overrides: Record<string, unknown> }) =>
+    req<{ platform: string; account_id: string; effective: KpiEffective }>("/kpi/accounts", { method: "PUT", body: JSON.stringify(body) }),
+  getKpiLedgerToday: (platform: string, accountId: string) =>
+    req<LedgerToday>("/kpi/ledger/today?" + new URLSearchParams({ platform, account_id: accountId })),
+  getKpiPlan: (platform: string, accountId: string) =>
+    req<LedgerToday & { posting_windows: unknown; timezone: unknown }>("/kpi/plan?" + new URLSearchParams({ platform, account_id: accountId })),
 };
 
 
@@ -926,4 +942,73 @@ export interface StrategyVersion {
     exploration_budget?: number;
     target_followers?: number | null;
   };
+}
+
+// ===== KPI 配额 (claude/kpi-schema.md) =====
+
+export interface KpiCategory {
+  category: string;
+  label: string;
+  growth_metric: string;
+  engagement_formula: string;
+  available_actions: string[];
+  default_quotas: Record<string, number | string[] | null>;
+  quality_gates: Record<string, unknown>;
+  health_guardrails: Record<string, unknown>;
+}
+
+export interface KpiPlatform {
+  platform: string;
+  label: string;
+  category: string;
+  growth_metric: string;
+  engagement_formula: string;
+  available_actions: string[];
+  default_quotas: Record<string, number | string[] | null>;
+  secondary_metrics: string[];
+  health_signals: string[];
+  rate_caps: Record<string, unknown>;
+  adapter_requirements: string[];
+}
+
+export interface KpiEffective {
+  platform: string;
+  category: string;
+  growth_metric: string;
+  engagement_formula: string;
+  available_actions: string[];
+  secondary_metrics: string[];
+  health_signals: string[];
+  activity_quotas: Record<string, number | string[] | null>;
+  quality_gates: Record<string, unknown>;
+  growth_targets: Record<string, unknown>;
+  health_guardrails: Record<string, unknown>;
+}
+
+export interface AccountKpi {
+  employee_id: string | null;
+  platform: string;
+  account_id: string;
+  overrides: Record<string, unknown>;
+  effective: KpiEffective;
+  updated_at: string;
+}
+
+export interface LedgerAction {
+  quota: number | null;
+  used: number;
+  remaining: number | null;
+  disabled: boolean;
+  not_applicable: boolean;
+}
+
+export interface LedgerToday {
+  platform: string;
+  account_id: string;
+  date: string;
+  actions: Record<string, LedgerAction>;
+  daily_total: number;
+  daily_ceiling: number | null;
+  ceiling_remaining: number | null;
+  ceiling_blocked: boolean;
 }

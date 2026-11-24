@@ -13,6 +13,7 @@ pub mod industry;
 pub mod intel;
 pub mod intel_collector;
 pub mod interaction;
+pub mod kpi;
 pub mod metrics;
 pub mod pipeline;
 pub mod pulse;

@@ -10,7 +10,7 @@ import { api, getToken, setToken, type Me } from "@/lib/api";
 
 export type ViewId =
   | "employees" | "factory" | "command" | "approvals" | "intel" | "signals"
-  | "sources" | "devices" | "analytics" | "lineage" | "settings" | "arch" | "kill";
+  | "sources" | "devices" | "analytics" | "lineage" | "settings" | "arch" | "kill" | "kpi";
 
 const NAV: { group: string; items: { v: ViewId; ic: string; label: string; core?: "emp" | "fac" }[] }[] = [
   { group: "核心 · 业务围绕这两个", items: [
@@ -20,6 +20,7 @@ const NAV: { group: string; items: { v: ViewId; ic: string; label: string; core?
   { group: "指挥", items: [
     { v: "command", ic: "🎛️", label: "指挥台" },
     { v: "approvals", ic: "✅", label: "待你处理" },
+    { v: "kpi", ic: "🎯", label: "KPI / 配额" },
   ]},
   { group: "数据流 · 情报", items: [
     { v: "intel", ic: "🌐", label: "世界情报" },
