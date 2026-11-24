@@ -20,7 +20,8 @@ Content Factory 生产多模态内容，经质量与合规门禁后封装为不�
 
 - **采集层 Connectors (可插拔)**: `crates/sincy-intel/src/pipeline/manifest.rs` 声明 15 个内置
   Connector（44 个内容源，含 GDELT/RSSHub/SearXNG 可选扩展），`apps/cloud-api/src/pipeline/connectors.rs`
-  的 `HttpConnector` 实现真正抓取（RSS/JSON/HTML，cursor 幂等），`GET /intel/connectors` 查询、
+  的 `HttpConnector` 实现真正抓取（RSS/JSON/HTML/Firecrawl，cursor 幂等；老 intel_collector
+  定时循环已退役，连接器调度器是唯一抓取方），`GET /intel/connectors` 查询、
   `POST /intel/connectors/{id}/run` 手动触发，另有 30min 调度器。开源工具按架构落位为端口:
   MediaCrawler→SocialProvider、TrendRadar→热榜、RSSAggregatorforWeb3→RSS 清单（均为适配层，红线内只走公开只读）
 - **摄取 Ingestion**: 统一 `RawRecord` 信封 + `RecordType`，归一化/跨源去重/dedup_key 幂等后按类型路由
@@ -28,7 +29,7 @@ Content Factory 生产多模态内容，经质量与合规门禁后封装为不�
 - **情报管线 (按内容形状可插拔)**: 12 条 pipeline（article/social_post/social_account/trend/ranking/
   research/video/search/…）+ 13 个可注册 processor；通用处理器（实体解析/行业分类/主题分类/趋势爆款检测）
   在所有管线末端共用，输出统一 `intelligence_entities` + `intelligence_signals`
-  （migration 0035/0036 四层存储；旧 `intel_items` 保留双写）
+  （migration 0035/0036 四层存储；连接器同时镜像写旧 `intel_items`，机会引擎/健康审计不受影响）
 - **内容工厂 (工序0–7)**: `crates/sincy-content/src/factory.rs` —— 工序0 `Brief`
   （`POST /factory/briefs`，三入口: 机会驱动/计划驱动/人工驱动，断点①已接通）、工序3 平台适配器注册表
   （x/小红书/抖音/IG/TikTok/YouTube/LinkedIn/FB，`GET /factory/adapters`，加新平台=加一个 adapter）、
@@ -48,7 +49,7 @@ Sincy 不是"AI 生成一段文案"的工具，而是 **AI Digital Employee（�
 
 - **数字员工运营周期**: 6 个逻辑 Agent × 10 步周期，9 个 skill 域 / 77 个 skill 中 59 个已落地真 handler
   （research 直查情报库、content/creative 走 LLM、publishing 真派设备任务），每步证据落库可审计
-- **世界情报 World Intelligence**: 26 个注册信源、定时采集入库（dedup 去重）、趋势聚合（velocity/growth/跨平台）、
+- **世界情报 World Intelligence**: 26 个注册信源、由 Connector 调度器唯一抓取入库（dedup 去重）、趋势聚合（velocity/growth/跨平台）、
   机会引擎打分、信源健康审计（healthy/degraded/failed/not_configured)
 - **手机 Agent 真机执行**: 无障碍节点树 + Set-of-Mark 截图视觉融合，云端 LLM 逐步决策，
   人工化手势（贝塞尔滑动/抖动/压力变化）注入真实触摸；已在真实小米设备上验证通过 X 回帖全流程

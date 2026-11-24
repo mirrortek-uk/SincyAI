@@ -53,8 +53,10 @@ impl HttpConnector {
         if !status.is_success() {
             return Err(ConnectorError::Http(format!("{} {}", status, src.url)));
         }
-        let items = match self.manifest.descriptor.connector_type.as_str() {
-            "rss" => crate::intel_collector::parse_rss(&body)
+        let cid = self.manifest.descriptor.id.as_str();
+        let items = match (cid, self.manifest.descriptor.connector_type.as_str()) {
+            ("aggregator", _) => vec![], // pulse provider 现役采集, 这里不重复抓
+            (_, "rss") => crate::intel_collector::parse_rss(&body)
                 .into_iter()
                 .map(|(title, url, summary, published)| {
                     (
@@ -64,7 +66,21 @@ impl HttpConnector {
                     )
                 })
                 .collect::<Vec<_>>(),
-            "aggregator" => vec![], // pulse provider 现役采集, 这里不重复抓
+            (_, "website") => vec![website_extract(&self.client, src, &body).await],
+            ("hn-algolia", _) => crate::intel_collector::parse_hn(&body, &src.kind)
+                .into_iter().map(|(t, p)| (t, p["url"].as_str().unwrap_or("").to_string(), p)).collect(),
+            ("devto-api", _) => crate::intel_collector::parse_devto(&body)
+                .into_iter().map(|(t, p)| (t, p["url"].as_str().unwrap_or("").to_string(), p)).collect(),
+            ("github-trending", _) => crate::intel_collector::parse_github_trending(&body)
+                .into_iter().map(|(t, p)| (t, p["url"].as_str().unwrap_or("").to_string(), p)).collect(),
+            ("bilibili-rank", _) => crate::intel_collector::parse_bili_rank(&body)
+                .into_iter().map(|(t, p)| (t, p["url"].as_str().unwrap_or("").to_string(), p)).collect(),
+            ("wikipedia-rc", _) => crate::intel_collector::parse_wiki_rc(&body)
+                .into_iter().map(|(t, p)| (t, p["url"].as_str().unwrap_or("").to_string(), p)).collect(),
+            ("gdelt-api", _) => crate::intel_collector::parse_gdelt(&body)
+                .into_iter().map(|(t, p)| (t, p["url"].as_str().unwrap_or("").to_string(), p)).collect(),
+            ("searxng-ext", _) => crate::intel_collector::parse_searxng(&body, &src.label)
+                .into_iter().map(|(t, p)| (t, p["url"].as_str().unwrap_or("").to_string(), p)).collect(),
             _ => parse_json_items(&body, &src.label),
         };
         let mut out = Vec::new();
@@ -89,6 +105,56 @@ impl HttpConnector {
         }
         Ok(out)
     }
+}
+
+/// WebsiteConnector 抓取: 配了 SINCY_FIRECRAWL_API_KEY 走 Firecrawl scrape API,
+/// 否则本地去 script/style 后剥标签取正文 (纯 JS 渲染站需 Firecrawl/Crawl4AI 类服务)。
+async fn website_extract(
+    client: &reqwest::Client,
+    src: &sincy_intel::pipeline::SourceRef,
+    body: &str,
+) -> (String, String, Value) {
+    if let Ok(key) = std::env::var("SINCY_FIRECRAWL_API_KEY")
+        && !key.is_empty()
+        && let Ok(r) = client
+            .post("https://api.firecrawl.dev/v1/scrape")
+            .bearer_auth(key)
+            .json(&json!({"url": src.url, "formats": ["markdown"]}))
+            .send()
+            .await
+        && let Ok(v) = r.json::<Value>().await
+    {
+        let md = v["data"]["markdown"].as_str().unwrap_or("");
+        let title = md
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim_start_matches('#')
+            .trim()
+            .to_string();
+        let title = if title.is_empty() {
+            src.label.clone()
+        } else {
+            title
+        };
+        return (
+            title.clone(),
+            src.url.clone(),
+            json!({"title": title, "url": src.url, "content": md.chars().take(8000).collect::<String>(), "source": src.label}),
+        );
+    }
+    let no_script = regex::Regex::new(r"(?s)<script[^>]*>.*?</script>|<style[^>]*>.*?</style>")
+        .unwrap()
+        .replace_all(body, " ");
+    let text = regex::Regex::new(r"<[^>]+>")
+        .unwrap()
+        .replace_all(&no_script, " ");
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    (
+        src.label.clone(),
+        src.url.clone(),
+        json!({"title": src.label, "url": src.url, "content": text.chars().take(8000).collect::<String>(), "source": src.label}),
+    )
 }
 
 /// JSON 启发式抽取: 找第一个对象数组 (hits/items/data.list/results/...), 每个元素成一条记录
@@ -211,6 +277,15 @@ pub async fn run_connector(pool: &sqlx::PgPool, id: &str) -> Result<(usize, usiz
         .iter()
         .find(|c| c.descriptor().id == id)
         .ok_or_else(|| format!("connector {id} not found"))?;
+    run_connector_instance(pool, conn.as_ref()).await
+}
+
+/// 跑一个连接器实例 (注册表之外的自定义 manifest / 测试可直接调用)
+pub async fn run_connector_instance(
+    pool: &sqlx::PgPool,
+    conn: &dyn Connector,
+) -> Result<(usize, usize), String> {
+    let id = conn.descriptor().id.clone();
     let batch = conn
         .fetch(&FetchParams::default(), None)
         .await
@@ -219,10 +294,24 @@ pub async fn run_connector(pool: &sqlx::PgPool, id: &str) -> Result<(usize, usiz
     let mut processed = 0;
     for rec in &batch.records {
         match super::ingest_record(pool, rec).await {
-            Ok(true) => processed += 1,
+            Ok(true) => {
+                processed += 1;
+                mirror_legacy_item(pool, rec).await;
+            }
             Ok(false) => {}
             Err(e) => tracing::warn!(dedup = %rec.dedup_key, error = %e, "pipeline ingest failed"),
         }
+    }
+    // 健康审计: 给每个覆盖到的 source 续 intel_collection_jobs
+    for src in batch_record_sources(&batch) {
+        upsert_job(
+            pool,
+            &src,
+            "idle",
+            Some(fetched as i32),
+            Some(processed as i32),
+        )
+        .await;
     }
     // 记录游标 (幂等轮询)
     if let Some(c) = &batch.next_cursor {
@@ -240,19 +329,140 @@ pub async fn run_connector(pool: &sqlx::PgPool, id: &str) -> Result<(usize, usiz
     Ok((fetched, processed))
 }
 
-/// 调度器: 周期跑所有连接器 (与 intel_collector 双写, dedup_key 保证幂等)
+/// 调度器: 周期跑所有连接器 — 现役唯一抓取方 (老 intel_collector 定时循环已退役, dedup_key 保证幂等)
 pub async fn run_scheduler(pool: sqlx::PgPool) {
     let mut tick = tokio::time::interval(Duration::from_secs(1800));
     loop {
         tick.tick().await;
+        let mut total_new = 0usize;
         for conn in connector_registry() {
             let id = conn.descriptor().id.clone();
             match run_connector(&pool, &id).await {
                 Ok((f, p)) => {
+                    total_new += p;
                     tracing::info!(connector = %id, fetched = f, processed = p, "connector run done")
                 }
                 Err(e) => tracing::warn!(connector = %id, error = %e, "connector run failed"),
             }
         }
+        if total_new > 0
+            && let Ok((n, up)) = crate::intel::refresh_opportunities_db(&pool).await
+        {
+            tracing::info!(
+                new_items = total_new,
+                opportunities = n,
+                upserted = up,
+                "opportunity engine refreshed"
+            );
+        }
     }
+}
+
+fn batch_record_sources(batch: &Batch) -> Vec<String> {
+    let mut v: Vec<String> = batch.records.iter().map(|r| r.source_id.clone()).collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// legacy 镜像: intel_items 保留给机会引擎/趋势接口, 与 RawRecord 管线双写
+/// RecordType → legacy intel_items.kind (表上 CHECK 只认老 kind 枚举)
+fn legacy_kind(rt: sincy_intel::pipeline::RecordType) -> &'static str {
+    use sincy_intel::pipeline::RecordType as R;
+    match rt {
+        R::Article | R::SearchResult => "news",
+        R::Trend | R::Ranking | R::Metric => "trend",
+        R::SocialPost | R::SocialAccount | R::Video | R::Comment => "social_content",
+        R::Event => "event",
+        R::ResearchPaper => "knowledge",
+        R::Product | R::Dataset | R::Unknown => "topic",
+    }
+}
+
+async fn mirror_legacy_item(pool: &sqlx::PgPool, rec: &RawRecord) {
+    let title = rec
+        .payload
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let summary = rec
+        .payload
+        .get("summary")
+        .or_else(|| rec.payload.get("content"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let text = format!("{title} {summary}");
+    let inds = sincy_intel::industry::classify_industries(&text);
+    let industries: Vec<String> = inds.iter().map(|(id, _)| id.clone()).collect();
+    let tags = json!({"source_kind": rec.record_type.as_str(), "via": "connector"});
+    let mut payload = rec.payload.clone();
+    payload["title"] = json!(title);
+    let _ = sqlx::query(
+        "INSERT INTO intel_items (id, source_id, kind, dedup_key, payload, industries, tags)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (dedup_key) DO NOTHING",
+    )
+    .bind(uuid::Uuid::new_v4())
+    .bind(&rec.source_id)
+    .bind(legacy_kind(rec.record_type))
+    .bind(&rec.dedup_key)
+    .bind(&payload)
+    .bind(serde_json::to_value(&industries).unwrap_or(json!([])))
+    .bind(&tags)
+    .execute(pool)
+    .await;
+}
+
+async fn upsert_job(
+    pool: &sqlx::PgPool,
+    source_id: &str,
+    status: &str,
+    fetched: Option<i32>,
+    new: Option<i32>,
+) {
+    let _ = sqlx::query(
+        "INSERT INTO intel_collection_jobs (source_id, schedule, status, last_run_at, last_error, last_inserted, last_fetched, last_new)
+         VALUES ($1, $2, $3, now(), NULL, $4, $5, $6)
+         ON CONFLICT (source_id, schedule) DO UPDATE SET
+           status = EXCLUDED.status, last_run_at = now(),
+           last_inserted = COALESCE(EXCLUDED.last_inserted, intel_collection_jobs.last_inserted),
+           last_fetched = COALESCE(EXCLUDED.last_fetched, intel_collection_jobs.last_fetched),
+           last_new = COALESCE(EXCLUDED.last_new, intel_collection_jobs.last_new)",
+    )
+    .bind(source_id)
+    .bind("connector")
+    .bind(status)
+    .bind(new)
+    .bind(fetched)
+    .bind(new)
+    .execute(pool)
+    .await;
+}
+
+/// 手动触发一轮全部连接器 (替代老的 POST /intel/collect), 完成后刷新机会引擎
+pub async fn run_all_connectors(pool: &sqlx::PgPool) -> (usize, usize, Vec<String>) {
+    let mut fetched = 0;
+    let mut processed = 0;
+    let mut failures = Vec::new();
+    for conn in connector_registry() {
+        let id = conn.descriptor().id.clone();
+        match run_connector(pool, &id).await {
+            Ok((f, p)) => {
+                fetched += f;
+                processed += p;
+            }
+            Err(e) => failures.push(format!("{id}: {e}")),
+        }
+    }
+    if processed > 0
+        && let Ok((n, up)) = crate::intel::refresh_opportunities_db(pool).await
+    {
+        tracing::info!(
+            new_items = processed,
+            opportunities = n,
+            upserted = up,
+            "opportunity engine refreshed"
+        );
+    }
+    (fetched, processed, failures)
 }

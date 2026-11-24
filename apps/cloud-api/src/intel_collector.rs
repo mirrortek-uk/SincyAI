@@ -1,16 +1,17 @@
-//! World Intelligence collector (WI §9 scheduler): periodically pulls from
-//! REGISTERED read-only public sources, normalizes into the WI §11 unified
-//! model and upserts into intel_items with dedup_key (WI §12).
+//! 注册的只读公开情报源清单 + 归一化解析器 (WI §11)。
 //!
-//! Red line (WI §29): only public, read-only endpoints of registered sources;
-//! modest rate (one run per interval, per-feed item cap, polite User-Agent,
-//! short timeout). Never bypasses platform auth, CAPTCHA or rate limits —
-//! a failing source is recorded as failed, never retried aggressively.
+//! 注意: 本模块不再承担定时抓取 — 老的 run_loop 已退役, 现役唯一抓取方是
+//! `pipeline::connectors` 的 manifest 驱动 Connector 调度器 (HttpConnector)。
+//! 本模块保留两类东西:
+//! - `CollectorConfig::from_env()` 的 feed 清单: Sincy Pulse 的 BuiltinFeedProvider
+//!   用它把 dataset.feed_label 映射到具体信源并抓取;
+//! - `parse_*` / `dedup_key` / `fetch_feed_items`: 连接器与 pulse 复用的
+//!   解析/去重工具库 (传输层零件, 不是扩展单位)。
+//!
+//! 红线 (WI §29): 只走公开只读端点, 礼貌速率, 不绕过认证/CAPTCHA/限流。
 
 use serde_json::{Value, json};
 use sha2::Digest;
-use std::time::Duration;
-use uuid::Uuid;
 
 /// One fetch target. `parser` picks the normalizer: rss | atom | github_trending | searxng_json.
 #[derive(Debug, Clone)]
@@ -492,118 +493,6 @@ pub fn parse_wiki_rc(body: &str) -> Vec<(String, Value)> {
 }
 
 /// One collection run over all configured feeds. Returns (inserted, duplicates, failures).
-pub async fn collect_once(
-    pool: &sqlx::PgPool,
-    cfg: &CollectorConfig,
-) -> (usize, usize, Vec<String>) {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(12))
-        .user_agent("SincyIntelBot/1.0 (+read-only public feeds; contact: admin@sincy.dev)")
-        .build()
-        .unwrap();
-    let mut inserted = 0usize;
-    let mut dups = 0usize;
-    let mut failures = Vec::new();
-    for (i, f) in cfg.feeds.iter().enumerate() {
-        if i > 0 {
-            tokio::time::sleep(Duration::from_millis(800)).await;
-        }
-        match collect_feed(pool, &client, f).await {
-            Ok((ins, dup)) => {
-                inserted += ins;
-                dups += dup;
-                mark_job(
-                    pool,
-                    &f.source_id,
-                    &f.label,
-                    "idle",
-                    None,
-                    Some((ins + dup) as i32),
-                    Some(ins as i32),
-                )
-                .await;
-                tracing::info!(source = %f.source_id, label = %f.label, inserted = ins, dups = dup, "intel feed collected");
-            }
-            Err(e) => {
-                failures.push(format!("{}: {e}", f.label));
-                mark_job(pool, &f.source_id, &f.label, "failed", Some(&e), None, None).await;
-                tracing::warn!(source = %f.source_id, label = %f.label, error = %e, "intel feed failed (recorded, not retried aggressively)");
-            }
-        }
-    }
-    (inserted, dups, failures)
-}
-
-async fn collect_feed(
-    pool: &sqlx::PgPool,
-    client: &reqwest::Client,
-    f: &FeedConfig,
-) -> Result<(usize, usize), String> {
-    // source must be registered (registry check, WI §6)
-    let registered = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM intelligence_sources WHERE id = $1 AND enabled)",
-    )
-    .bind(&f.source_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|e| e.to_string())?;
-    if !registered {
-        return Err(format!("source {} not registered/enabled", f.source_id));
-    }
-    let items = fetch_feed_items(client, f).await?;
-    let mut ins = 0usize;
-    let mut dup = 0usize;
-    for (dk, title, payload) in items {
-        // Sincy-04 §7: 入库时做行业分类, 写入 industries + tags
-        let text_for_cls = format!(
-            "{} {}",
-            title,
-            payload
-                .get("summary")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-        );
-        let inds = sincy_intel::industry::classify_industries(&text_for_cls);
-        let industries: Vec<String> = inds.iter().map(|(id, _)| id.clone()).collect();
-        let tags = json!({"industries_detail": inds, "source_kind": f.kind});
-        let mut full_payload = payload;
-        full_payload["title"] = json!(title);
-        let r = sqlx::query(
-            "INSERT INTO intel_items (id, source_id, kind, dedup_key, payload, industries, tags)
-             VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (dedup_key) DO NOTHING RETURNING id",
-        )
-        .bind(Uuid::new_v4())
-        .bind(&f.source_id)
-        .bind(&f.kind)
-        .bind(&dk)
-        .bind(&full_payload)
-        .bind(serde_json::to_value(&industries).unwrap_or(json!([])))
-        .bind(&tags)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| e.to_string())?;
-        if r.is_some() {
-            ins += 1;
-            // Sincy-05 pipeline: 同一条记录同时进入 RawRecord 管线 (intel_items 保留为 legacy 层)
-            let rp = full_payload.clone();
-            let rec = sincy_intel::pipeline::RawRecord::new(
-                &f.source_id,
-                &f.source_id,
-                &f.label,
-                crate::pipeline::record_type_for_feed_kind(&f.kind),
-                &dk,
-                rp,
-            );
-            if let Err(e) = crate::pipeline::ingest_record(pool, &rec).await {
-                tracing::warn!(error = %e, dedup = %rec.dedup_key, "pipeline ingest failed");
-            }
-        } else {
-            dup += 1;
-        }
-    }
-    Ok((ins, dup))
-}
-
 /// 抓取并解析一个 feed (不查注册表、不写库), 供 Sincy Pulse provider 复用。
 /// 返回 [(dedup_key, title, payload)]。
 pub async fn fetch_feed_items(
@@ -726,59 +615,6 @@ pub async fn fetch_feed_items(
         }
     };
     Ok(items)
-}
-
-async fn mark_job(
-    pool: &sqlx::PgPool,
-    source_id: &str,
-    label: &str,
-    status: &str,
-    err: Option<&str>,
-    fetched: Option<i32>,
-    new: Option<i32>,
-) {
-    let _ = sqlx::query(
-        "INSERT INTO intel_collection_jobs (source_id, schedule, status, last_run_at, last_error, last_inserted, last_fetched, last_new)
-         VALUES ($1, $2, $3, now(), $4, $5, $6, $7)
-         ON CONFLICT (source_id, schedule) DO UPDATE SET
-           status = EXCLUDED.status, last_run_at = now(), last_error = EXCLUDED.last_error,
-           last_inserted = COALESCE(EXCLUDED.last_inserted, intel_collection_jobs.last_inserted),
-           last_fetched = COALESCE(EXCLUDED.last_fetched, intel_collection_jobs.last_fetched),
-           last_new = COALESCE(EXCLUDED.last_new, intel_collection_jobs.last_new)",
-    )
-    .bind(source_id)
-    .bind(format!("feed:{label}"))
-    .bind(status)
-    .bind(err)
-    .bind(fetched)
-    .bind(fetched)
-    .bind(new)
-    .execute(pool)
-    .await;
-}
-
-/// Background loop started by main.rs when a database is configured.
-pub async fn run_loop(pool: sqlx::PgPool, cfg: CollectorConfig) {
-    let mut ticker = tokio::time::interval(Duration::from_secs(cfg.interval_secs.max(30)));
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    loop {
-        ticker.tick().await;
-        let (ins, _dup, fails) = collect_once(&pool, &cfg).await;
-        if ins > 0 {
-            // new signals in: re-run the opportunity engine (WI §19)
-            if let Ok((n, up)) = crate::intel::refresh_opportunities_db(&pool).await {
-                tracing::info!(
-                    new_items = ins,
-                    opportunities = n,
-                    upserted = up,
-                    "opportunity engine refreshed"
-                );
-            }
-        }
-        if !fails.is_empty() {
-            tracing::warn!(?fails, "some intel feeds failed this run");
-        }
-    }
 }
 
 #[cfg(test)]

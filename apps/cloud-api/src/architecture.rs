@@ -79,9 +79,10 @@ async fn architecture(
         }
         Err(_) => (0, 0),
     };
-    let feed_count = crate::intel_collector::CollectorConfig::from_env()
-        .feeds
-        .len() as i64;
+    let feed_count = sincy_intel::pipeline::default_connector_manifests()
+        .iter()
+        .map(|m| m.sources.iter().filter(|x| x.enabled).count())
+        .sum::<usize>() as i64;
 
     let layers = json!([
         {
@@ -136,8 +137,6 @@ async fn architecture(
                      "x.publish_post v18: home→composer→set_text→Post(side effect)→posted_confirm 验证; 锚点匹配率判漂移 UiDrift; Ed25519 私钥只在云端签名, 设备端只嵌公钥验签 (migration 0027)"),
                 node("device", "设备管理 sincy-device", "配对码(4 位数字) · 会话 60 天有效期 · revoke/rotate",
                      "pairing code 配对换长期 device token, token 只存哈希; device_sessions.expires_at 60 天过期 (migration 0026), 支持吊销与轮换; 心跳保活, 超时判离线"),
-                node("collector", "情报采集器 intel_collector", &format!("tokio 定时任务(默认 30min) · {feed_count} 条默认 feed · WI §9"),
-                     &format!("{feed_count} 条默认 feed: arXiv×5 / HN Algolia×3 / dev.to×4 / Wikipedia RC / GitHub 趋势×3 / YouTube×3 / IT之家/少数派/掘金/V2EX RSS / Google News×5(en+zh) / Product Hunt×2 / B站排行榜×2; 可选: GDELT(SINCY_INTEL_GDELT=1)、自托管 RSSHub 扩展×8(Reddit/知乎/微博/抖音/百度热榜/36氪)、SearXNG 自托管×2; 归一化 WI §11 入 intel_items(dedup_key 去重), jobs 记 last_fetched/last_new; 失败记 jobs 不强攻; 红线: 只走公开只读 API, 礼貌间隔, 不绕认证/验证码/限流")),
                 node("wihealth", "Source Health Audit", "GET /intel/health",
                      "按 source 聚合 job 运行记录: healthy(有新入库)/ degraded(在跑但 0 新增或部分失败)/ failed(全部失败)/ not_configured(已注册但 job 暂停、待自托管实例/密钥/出口 IP)/ disabled; 注册 ≠ 可用, 审计才是真相"),
                 node("pulse", "Sincy Pulse (世界情报的聚合源)", "sincy-intel::pulse · manifest 驱动 · migration 0030/0031",
@@ -290,10 +289,10 @@ async fn architecture(
         edge("de", "db", "cycles/tasks/memory/insights", "data"),
         edge("wi", "db", "intel_items / opportunities", "data"),
         edge(
-            "wi",
             "pipe_conn",
-            "collector 产出 RawRecord (双写 intel_items)",
-            "inproc"
+            "db",
+            "RawRecord 入管线 + 镜像 legacy intel_items + jobs 记录",
+            "data"
         ),
         edge(
             "pipe_conn",
@@ -375,32 +374,21 @@ async fn architecture(
             "inproc"
         ),
         edge(
-            "collector",
+            "pipe_conn",
             "wisrc",
-            &format!("定时拉取注册的只读公开源 ({feed_count} 条默认 feed + 自托管扩展)"),
+            &format!(
+                "Connector 定时拉取只读公开源 ({feed_count} 个启用内容源: RSS / HTTP JSON / HTML / Firecrawl)"
+            ),
             "external"
         ),
         edge(
-            "collector",
-            "db",
-            "intel_items 归一化入库 (dedup_key 去重) + jobs last_fetched/last_new",
-            "data"
-        ),
-        edge("collector", "wi", "新信号触发机会引擎重算", "internal"),
-        edge(
-            "collector",
-            "pipe_conn",
-            "feed 归一化为 RawRecord 进管线",
-            "inproc"
-        ),
-        edge(
             "api",
-            "collector",
-            "POST /intel/collect 手动触发一轮",
+            "pipe_conn",
+            "POST /intel/collect 手动触发一轮全部连接器",
             "internal"
         ),
         edge(
-            "collector",
+            "pipe_conn",
             "wihealth",
             "jobs 运行记录 → 健康审计",
             "internal"
@@ -483,7 +471,7 @@ async fn architecture(
         },
         {
             "id": "F5", "title": "世界情报采集 → 路由 → 机会",
-            "steps": &format!("信源注册表(intelligence_sources, {src_count} 个注册源, 迁移 0017/0019/0022) → collector 定时拉取(默认 30min 一轮, {feed_count} 条默认 feed) → 归一化入 intel_items(dedup_key 去重) → POST /intel/route 按 健康/可靠/限流/成本 打分出 provider 降级链 → 机会引擎打分 → intel_opportunities → 数字员工经 DE 适配器消费")
+            "steps": &format!("信源注册表(intelligence_sources, {src_count} 个注册源, 迁移 0017/0019/0022) → Connector 调度器定时拉取(默认 30min 一轮, {feed_count} 个启用内容源, 唯一抓取方) → RawRecord 入管线并镜像 intel_items(dedup_key 去重) → POST /intel/route 按 健康/可靠/限流/成本 打分出 provider 降级链 → 机会引擎打分 → intel_opportunities → 数字员工经 DE 适配器消费")
         },
         {
             "id": "F6", "title": "信源健康审计 (Source Health Audit)",
@@ -499,7 +487,7 @@ async fn architecture(
         },
         {
             "id": "F13", "title": "情报管线: Source → Connector → RawRecord → 路由 → Pipeline → 实体/行业标签 → Signals",
-            "steps": "Source(wisrc / pulse / collector) → Connector 只采集, 产出统一信封 RawRecord(record_type + dedup_key + provenance, cursor 幂等) → Type Router 按 record_type 发布 bus intel.raw.* → 专属 pipeline 跑类型 processor + universal 富化(行业/主题/语言/去重/质量/相关性) → 统一 IntelEntity 落四层存储(raw_records/entities/trend_series+ranking_snapshots/signals) → 生成 Intelligence Signals → Opportunity Engine → Content Factory; 新增数据源只写一个 Connector, 真正的新内容形状才新增一种 pipeline"
+            "steps": "Source(wisrc / pulse) → Connector 只采集, 产出统一信封 RawRecord(record_type + dedup_key + provenance, cursor 幂等) → Type Router 按 record_type 发布 bus intel.raw.* → 专属 pipeline 跑类型 processor + universal 富化(行业/主题/语言/去重/质量/相关性) → 统一 IntelEntity 落四层存储(raw_records/entities/trend_series+ranking_snapshots/signals) → 生成 Intelligence Signals → Opportunity Engine → Content Factory; 新增数据源只写一个 Connector, 真正的新内容形状才新增一种 pipeline"
         },
         {
             "id": "F14", "title": "内容工厂全链路: 三入口 → 工序0 Brief → … → 工序9 Learn 闭环",
@@ -738,7 +726,19 @@ async fn architecture(
             ],
         ),
         ("F4", vec!["api", "de", "wi", "ai", "pub", "db"]),
-        ("F5", vec!["wisrc", "collector", "db", "wi"]),
+        (
+            "F5",
+            vec![
+                "wisrc",
+                "pipe_conn",
+                "pipe_raw",
+                "pipe_router",
+                "pipe_pl",
+                "pipe_ent",
+                "pipe_sig",
+                "wi",
+            ],
+        ),
         ("F6", vec!["db", "wihealth"]),
         ("F7", vec!["db", "witrend", "wi"]),
         ("F8", vec!["adapter", "humanize", "agent", "x"]),

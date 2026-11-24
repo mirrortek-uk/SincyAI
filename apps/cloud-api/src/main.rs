@@ -53,24 +53,18 @@ async fn main() {
         .with_state(state.clone())
         .fallback(cloud_api::api::not_found);
 
-    // World Intelligence collector (WI §9): background loop over registered
-    // read-only public sources. Disable with SINCY_INTEL_COLLECT_ENABLED=false.
+    // World Intelligence 采集 (WI §9): 唯一抓取方是 manifest 驱动的 Connector
+    // 调度器; Sincy Pulse 的 aggregator provider 走自己的 manifest 调度。
+    // Disable with SINCY_INTEL_COLLECT_ENABLED=false.
     if let Some(pool) = pool.clone()
         && std::env::var("SINCY_INTEL_COLLECT_ENABLED")
             .map(|v| v != "false")
             .unwrap_or(true)
     {
-        let cfg = cloud_api::intel_collector::CollectorConfig::from_env();
-        tracing::info!(
-            interval_secs = cfg.interval_secs,
-            feeds = cfg.feeds.len(),
-            "intel collector starting"
-        );
-        tokio::spawn(cloud_api::intel_collector::run_loop(pool.clone(), cfg));
         // Sincy Pulse: 种子内置 provider + manifest 驱动调度
         cloud_api::pulse::seed_providers(&pool).await;
         tokio::spawn(cloud_api::pulse::run_scheduler(pool.clone()));
-        // Connector 调度器 (Sincy-05): manifest 驱动的可抓取连接器, 与 collector 双写
+        // Connector 调度器 (Sincy-05): manifest 驱动抓取, 唯一采集入口, 产出 RawRecord 并镜像 intel_items
         tokio::spawn(cloud_api::pipeline::connectors::run_scheduler(pool.clone()));
         // 内容工厂后台 runner: 消费 draft Brief (断点①自动行真正被消费)
         tokio::spawn(cloud_api::factory::draft_runner_loop(pool.clone()));

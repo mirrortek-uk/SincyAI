@@ -2,8 +2,8 @@
 //! 供架构图点击 Connector 节点展开查看: 每个 Connector 的名称 / 功能(capabilities) /
 //! 覆盖的内容源(sources, 含 url 与识别出的 record_type) / 现役采集实现。
 //!
-//! 注意: 清单是"声明"(descriptor), 现役抓取仍由 intel_collector / pulse 双写产出 RawRecord;
-//! 迁移到独立 `impl Connector` 时按此清单逐个替换 fetch_impl。
+//! 现役抓取由 cloud-api 的 HttpConnector 按本清单逐 manifest 实现 (唯一抓取方);
+//! Sincy Pulse 的 aggregator provider 走自己的 manifest 调度, 不在本清单重复抓。
 
 use serde::{Deserialize, Serialize};
 
@@ -105,7 +105,7 @@ fn manifest(
     }
 }
 
-/// 全部内置 Connector 清单 (与 intel_collector 默认 feed + pulse provider 对齐)
+/// 全部内置 Connector 清单 (与默认情报源 + pulse provider 对齐)
 pub fn default_connector_manifests() -> Vec<ConnectorManifest> {
     vec![
         manifest(

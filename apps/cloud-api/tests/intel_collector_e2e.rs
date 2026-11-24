@@ -1,11 +1,15 @@
-//! Intel collector e2e (WI §9): a local HTTP server plays the role of a
-//! registered public RSS source; collect_once must normalize + dedup into
-//! intel_items and mark the collection job. Skips without
-//! SINCY_TEST_DATABASE_URL.
+//! Connector 采集 e2e (WI §9 / Sincy-05): 老 intel_collector 定时循环已退役,
+//! 现役唯一抓取方是 manifest 驱动的 HttpConnector。本测试用本地 HTTP 服务
+//! 扮演一个已注册的公开 RSS 信源, 验证 run_connector_instance 能把记录
+//! 归一化为 RawRecord 入管线、镜像 legacy intel_items、登记 collection job,
+//! 且重复轮询幂等 (dedup_key)。无 SINCY_TEST_DATABASE_URL 时跳过。
 
 use axum::{Router, routing::get};
-use cloud_api::intel_collector::{CollectorConfig, FeedConfig, Parser, collect_once};
 use serde_json::json;
+use sincy_intel::pipeline::connector::AuthDecl;
+use sincy_intel::pipeline::{
+    ConnectorDescriptor, ConnectorManifest, DatasetDecl, RecordType, SourceRef,
+};
 use sqlx::Row;
 use sqlx::postgres::PgPoolOptions;
 use std::net::SocketAddr;
@@ -30,16 +34,44 @@ async fn setup() -> Option<sqlx::PgPool> {
         .run(&pool)
         .await
         .expect("migrate");
-    sqlx::query("TRUNCATE intel_opportunities, intel_items, intel_collection_jobs, intel_providers, intelligence_sources RESTART IDENTITY CASCADE")
+    sqlx::query("TRUNCATE intel_opportunities, intel_items, intel_collection_jobs, intel_providers, intelligence_sources, intelligence_raw_records, connector_cursors, trend_series, ranking_snapshots RESTART IDENTITY CASCADE")
         .execute(&pool).await.expect("clean");
-    // register the source the collector will use
+    // register the source the connector will use
     sqlx::query("INSERT INTO intelligence_sources (id, name, category, access_method, capabilities) VALUES ('rsshub','RSSHub','rss','ExternalService','[\"rss_research\"]') ON CONFLICT (id) DO NOTHING")
         .execute(&pool).await.unwrap();
     Some(pool)
 }
 
+fn fixture_manifest(url: String) -> ConnectorManifest {
+    ConnectorManifest {
+        descriptor: ConnectorDescriptor {
+            id: "fixture-rss".into(),
+            name: "Fixture RSS".into(),
+            connector_type: "rss".into(),
+            capabilities: vec!["article_discovery".into()],
+            datasets: vec![DatasetDecl {
+                id: "fixture-rss".into(),
+                record_type: RecordType::Article,
+                url: Some(url.clone()),
+            }],
+            default_interval_secs: 60,
+            rate_limit_per_min: 30,
+            auth: AuthDecl::default(),
+        },
+        sources: vec![SourceRef {
+            source_id: "rsshub".into(),
+            label: "fixture".into(),
+            url,
+            kind: "news".into(),
+            record_type: RecordType::Article,
+            enabled: true,
+        }],
+        fetch_impl: "http:rss".into(),
+    }
+}
+
 #[tokio::test]
-async fn collector_fetches_normalizes_dedups_and_marks_jobs() {
+async fn connector_fetches_ingests_mirrors_and_marks_jobs() {
     let Some(pool) = setup().await else {
         eprintln!("skip: {TEST_URL_ENV} not set");
         return;
@@ -52,49 +84,41 @@ async fn collector_fetches_normalizes_dedups_and_marks_jobs() {
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-    let cfg = CollectorConfig {
-        interval_secs: 60,
-        feeds: vec![
-            FeedConfig {
-                source_id: "rsshub".into(),
-                label: "fixture".into(),
-                url: format!("http://127.0.0.1:{port}/feed"),
-                kind: "news".into(),
-                parser: Parser::Rss,
-                max_items: 20,
-            },
-            // unregistered source must fail gracefully, not crash the run
-            FeedConfig {
-                source_id: "nope".into(),
-                label: "ghost".into(),
-                url: format!("http://127.0.0.1:{port}/feed"),
-                kind: "news".into(),
-                parser: Parser::Rss,
-                max_items: 5,
-            },
-        ],
-    };
+    let manifest = fixture_manifest(format!("http://127.0.0.1:{port}/feed"));
+    let conn = cloud_api::pipeline::connectors::HttpConnector::new(manifest);
 
-    // first run: 3 inserted, 1 failure (unregistered source)
-    let (ins, dup, fails) = collect_once(&pool, &cfg).await;
-    assert_eq!(ins, 3);
-    assert_eq!(dup, 0);
-    assert_eq!(fails.len(), 1);
-    assert!(fails[0].contains("not registered"));
-
-    let rows =
-        sqlx::query("SELECT kind, dedup_key, payload FROM intel_items ORDER BY collected_at")
-            .fetch_all(&pool)
+    // first run: 3 fetched, 3 processed into the pipeline
+    let (fetched, processed) =
+        cloud_api::pipeline::connectors::run_connector_instance(&pool, &conn)
             .await
-            .unwrap();
-    assert_eq!(rows.len(), 3);
-    for r in &rows {
-        assert_eq!(r.get::<String, _>("kind"), "news");
+            .expect("connector run");
+    assert_eq!(fetched, 3);
+    assert_eq!(processed, 3);
+
+    // RawRecord 入管线 (统一信封 + record_type)
+    let raw = sqlx::query(
+        "SELECT record_type, source_id, dedup_key, payload FROM intelligence_raw_records ORDER BY fetched_at",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(raw.len(), 3);
+    for r in &raw {
+        assert_eq!(r.get::<String, _>("record_type"), "article");
+        assert_eq!(r.get::<String, _>("source_id"), "rsshub");
         let p: serde_json::Value = r.get("payload");
         assert!(p["title"].is_string() && p["url"].is_string() && p["summary"].is_string());
         assert!(r.get::<String, _>("dedup_key").starts_with("rsshub:news:"));
     }
-    let titles: Vec<String> = rows
+
+    // legacy 镜像: intel_items 仍有数据 (机会引擎 / 趋势接口 / 健康审计不受影响)
+    let items =
+        sqlx::query("SELECT kind, dedup_key, payload FROM intel_items ORDER BY collected_at")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(items.len(), 3);
+    let titles: Vec<String> = items
         .iter()
         .map(|r| {
             r.get::<serde_json::Value, _>("payload")["title"]
@@ -105,29 +129,37 @@ async fn collector_fetches_normalizes_dedups_and_marks_jobs() {
         .collect();
     assert!(titles.contains(&"AI agents hit production".to_string()));
 
-    // second run: everything dedups
-    let (ins2, dup2, _) = collect_once(&pool, &cfg).await;
-    assert_eq!(ins2, 0);
-    assert_eq!(dup2, 3);
+    // second run: dedup_key 幂等, 不产生新记录
+    let (fetched2, processed2) =
+        cloud_api::pipeline::connectors::run_connector_instance(&pool, &conn)
+            .await
+            .expect("connector rerun");
+    assert_eq!(fetched2, 3);
+    assert_eq!(processed2, 0);
+    let raw_count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM intelligence_raw_records")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(raw_count, 3);
+    let item_count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM intel_items")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(item_count, 3);
 
-    // job rows marked (fixture idle, ghost failed)
-    let job = sqlx::query("SELECT status, last_run_at, last_error FROM intel_collection_jobs WHERE source_id = 'rsshub' AND schedule = 'feed:fixture'")
-        .fetch_one(&pool).await.unwrap();
+    // 健康审计: job 以 schedule='connector' 登记 (老 feed:* 调度已退役)
+    let job = sqlx::query(
+        "SELECT status, last_run_at, last_fetched, last_new FROM intel_collection_jobs WHERE source_id = 'rsshub' AND schedule = 'connector'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(job.get::<String, _>("status"), "idle");
     assert!(
         job.get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_run_at")
             .is_some()
     );
-    // unregistered source is refused by the registry check AND by the FK on
-    // intel_collection_jobs, so no job row exists for it (failure is still
-    // reported in the return value above)
-    let ghost_count = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM intel_collection_jobs WHERE source_id = 'nope'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(ghost_count, 0);
+    assert_eq!(job.get::<Option<i32>, _>("last_fetched"), Some(3));
 
     // a trend item flows into the opportunity engine
     sqlx::query("INSERT INTO intel_items (source_id, kind, dedup_key, payload) VALUES ('rsshub','trend','t:x', $1)")

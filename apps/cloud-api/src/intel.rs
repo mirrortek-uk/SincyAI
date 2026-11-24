@@ -355,11 +355,12 @@ async fn collect_now(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, axum::response::Response> {
     let pool = state.pool().map_err(app_error_response)?;
-    let cfg = crate::intel_collector::CollectorConfig::from_env();
-    let (inserted, dups, failures) = crate::intel_collector::collect_once(pool, &cfg).await;
+    // 老 intel_collector 定时循环已退役: 手动触发走连接器框架 (唯一抓取方)
+    let (fetched, inserted, failures) = crate::pipeline::connectors::run_all_connectors(pool).await;
     let (opps, upserted) = refresh_opportunities_db(pool).await?;
     Ok(Json(json!({
-        "inserted": inserted, "duplicates": dups, "failures": failures,
+        "fetched": fetched, "inserted": inserted,
+        "duplicates": fetched.saturating_sub(inserted), "failures": failures,
         "opportunities": opps, "opportunities_upserted": upserted,
     })))
 }
