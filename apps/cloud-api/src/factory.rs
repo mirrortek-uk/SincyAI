@@ -17,8 +17,8 @@ use serde_json::{Value, json};
 use sqlx::Row;
 
 use sincy_content::{
-    Brief, MasterAsset, MetricEvent, StrategyPlan, TextGenerator, TriggerSource, adapt_master,
-    create_master, default_adapters, learn, plan_strategy,
+    Brief, MetricEvent, TextGenerator, TriggerSource, adapt_master, create_master,
+    default_adapters, learn, plan_strategy,
 };
 
 use crate::api::app_error_response;
@@ -202,92 +202,15 @@ async fn run_brief(
     axum::extract::Extension(auth): axum::extract::Extension<AuthCtx>,
 ) -> Result<Json<Value>, Response> {
     let pool = state.pool().map_err(app_error_response)?;
-    let row = sqlx::query(
-        "SELECT brief_id, brand_id, trigger, seed_opportunity_id, seed_signal_id, goal, platforms, angle, audience, cta, constraints
-         FROM factory_briefs WHERE brief_id = $1 AND agency_id = $2",
-    )
-    .bind(&id)
-    .bind(auth.agency_id.as_uuid())
-    .fetch_optional(pool)
-    .await
-    .map_err(dberr)?
-    .ok_or_else(|| app_error_response(sincy_common::AppError::non_retryable("not_found", "brief not found")))?;
-    let brief = Brief {
-        brief_id: row.get("brief_id"),
-        trigger: match row.get::<String, _>("trigger").as_str() {
-            "opportunity_driven" => TriggerSource::OpportunityDriven,
-            "calendar_driven" => TriggerSource::CalendarDriven,
-            _ => TriggerSource::Manual,
-        },
-        seed_opportunity_id: row.get("seed_opportunity_id"),
-        seed_signal_id: row.get("seed_signal_id"),
-        brand_id: row.get("brand_id"),
-        goal: row.get("goal"),
-        platforms: serde_json::from_value(row.get("platforms")).unwrap_or_default(),
-        angle: row.get("angle"),
-        audience: row.get("audience"),
-        cta: row.get("cta"),
-        constraints: row.get("constraints"),
-        created_at: chrono::Utc::now(),
-    };
-    // 从信号库取证据 (三入口的起点信号优先, 否则取最近高重要度信号)
-    let signals: Vec<Value> = if let Some(sid) = &brief.seed_signal_id {
-        sqlx::query("SELECT to_jsonb(s.*) FROM intelligence_signals s WHERE signal_id = $1")
-            .bind(sid)
-            .fetch_all(pool)
-            .await
-            .map_err(dberr)?
-            .iter()
-            .map(|r| r.get::<Value, _>(0))
-            .collect()
-    } else {
-        sqlx::query("SELECT to_jsonb(s.*) FROM intelligence_signals s ORDER BY importance DESC, observed_at DESC LIMIT 8")
-            .fetch_all(pool)
-            .await
-            .map_err(dberr)?
-            .iter()
-            .map(|r| r.get::<Value, _>(0))
-            .collect()
-    };
-    let llm = llm_gen();
-    sqlx::query("UPDATE factory_briefs SET status='running', updated_at=now() WHERE brief_id=$1")
-        .bind(&id)
-        .execute(pool)
-        .await
-        .map_err(dberr)?;
-    let result = async {
-        let plan: StrategyPlan = plan_strategy(&brief, &signals, &llm).await?;
-        let master: MasterAsset = create_master(&brief, &plan, &signals, &llm).await?;
-        let mut variants = Vec::new();
-        for a in default_adapters() {
-            if brief.platforms.is_empty() || brief.platforms.contains(&a.spec().platform) {
-                variants.push(json!({
-                    "platform": a.spec().platform,
-                    "text": adapt_master(&master, a.as_ref(), &brief),
-                }));
-            }
-        }
-        Ok::<Value, String>(json!({
-            "plan": plan, "master": master, "variants": variants, "signal_count": signals.len(),
-        }))
-    }
-    .await;
-    match result {
-        Ok(v) => {
-            sqlx::query("UPDATE factory_briefs SET status='done', result=$2, updated_at=now() WHERE brief_id=$1")
-                .bind(&id).bind(&v).execute(pool).await.map_err(dberr)?;
-            Ok(Json(
-                json!({ "brief_id": id, "status": "done", "result": v }),
-            ))
-        }
+    // 执行委托给共享执行体 (with_tenant 租户上下文内跑工序1→2→3)
+    let agency = *auth.agency_id.as_uuid();
+    match run_brief_by_id(pool, agency, &id).await {
+        Ok(v) => Ok(Json(
+            json!({ "brief_id": id, "status": "done", "result": v }),
+        )),
         Err(e) => {
-            sqlx::query(
-                "UPDATE factory_briefs SET status='failed', updated_at=now() WHERE brief_id=$1",
-            )
-            .bind(&id)
-            .execute(pool)
-            .await
-            .map_err(dberr)?;
+            let _ = sqlx::query("UPDATE factory_briefs SET status='failed', updated_at=now() WHERE brief_id=$1 AND agency_id=$2")
+                .bind(&id).bind(agency).execute(pool).await;
             Err(app_error_response(sincy_common::AppError::retryable(
                 "factory", e,
             )))
@@ -301,12 +224,26 @@ pub async fn auto_briefs_from_opportunities(
     agency_id: uuid::Uuid,
     threshold: f64,
 ) -> usize {
-    // 自动 Brief 绑定该 agency 的首个品牌, 避免孤儿行
+    // 整段在租户事务内: SET LOCAL 后 RLS WITH CHECK 放行 (FORCE RLS 下必须带上下文)
+    let mut tx = match pool.begin().await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(error = %e, "auto_briefs begin tx failed");
+            return 0;
+        }
+    };
+    if let Err(e) = sqlx::query(&format!("SET LOCAL app.current_agency_id = '{agency_id}'"))
+        .execute(&mut *tx)
+        .await
+    {
+        tracing::warn!(error = %e, "auto_briefs set tenant ctx failed");
+        return 0;
+    }
     let brand_id: Option<String> = sqlx::query_scalar(
         "SELECT id::text FROM brands WHERE agency_id = $1 ORDER BY created_at LIMIT 1",
     )
     .bind(agency_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await
     .unwrap_or(None);
     let rows = sqlx::query(
@@ -319,7 +256,7 @@ pub async fn auto_briefs_from_opportunities(
          ORDER BY o.score DESC LIMIT 10",
     )
     .bind(threshold)
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await
     .unwrap_or_default();
     let mut n = 0;
@@ -345,11 +282,15 @@ pub async fn auto_briefs_from_opportunities(
         .bind(&brief.goal)
         .bind(serde_json::to_value(&brief.platforms).unwrap_or(json!([])))
         .bind(&brief.angle)
-        .execute(pool)
+        .execute(&mut *tx)
         .await;
         if matches!(res, Ok(q) if q.rows_affected() > 0) {
             n += 1;
         }
+    }
+    if let Err(e) = tx.commit().await {
+        tracing::warn!(error = %e, "auto_briefs commit failed");
+        return 0;
     }
     n
 }
@@ -435,34 +376,63 @@ async fn run_learn(
 
 /// 后台 runner: 消费 draft 状态的 Brief (断点①自动产出的行真正被消费)
 pub async fn run_draft_briefs(pool: &sqlx::PgPool, limit: i64) -> usize {
-    let rows = sqlx::query(
-        "SELECT brief_id FROM factory_briefs WHERE status='draft' ORDER BY created_at LIMIT $1",
+    // 先列出有 draft 的 agency, 再逐租户在租户事务里消费 (FORCE RLS 下必须带上下文)
+    let agencies: Vec<uuid::Uuid> = sqlx::query_scalar(
+        "SELECT DISTINCT agency_id FROM factory_briefs WHERE status='draft' LIMIT 20",
     )
-    .bind(limit)
     .fetch_all(pool)
     .await
     .unwrap_or_default();
     let mut n = 0;
-    for r in rows {
-        let id: String = r.get("brief_id");
-        if run_brief_by_id(pool, &id).await.is_ok() {
-            n += 1;
+    for agency in agencies {
+        let ids: Vec<String> = match pool.begin().await {
+            Ok(mut tx) => {
+                let _ = sqlx::query(&format!("SET LOCAL app.current_agency_id = '{agency}'"))
+                    .execute(&mut *tx)
+                    .await;
+                let r = sqlx::query_scalar(
+                    "SELECT brief_id FROM factory_briefs WHERE status='draft' ORDER BY created_at LIMIT $1",
+                )
+                .bind(limit)
+                .fetch_all(&mut *tx)
+                .await;
+                let _ = tx.commit().await;
+                r.unwrap_or_default()
+            }
+            Err(_) => continue,
+        };
+        for id in ids {
+            if run_brief_by_id(pool, agency, &id).await.is_ok() {
+                n += 1;
+            }
         }
     }
     n
 }
 
-/// 共享执行体: HTTP 端点与后台 runner 都走它
-pub async fn run_brief_by_id(pool: &sqlx::PgPool, id: &str) -> Result<Value, String> {
+/// 共享执行体: HTTP 端点与后台 runner 都走它; 必须带 agency, 读写都在租户事务内
+pub async fn run_brief_by_id(
+    pool: &sqlx::PgPool,
+    agency_id: uuid::Uuid,
+    id: &str,
+) -> Result<Value, String> {
+    // 读 brief: 租户事务内 + agency 过滤
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    sqlx::query(&format!("SET LOCAL app.current_agency_id = '{agency_id}'"))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
     let row = sqlx::query(
         "SELECT brief_id, brand_id, trigger, seed_opportunity_id, seed_signal_id, goal, platforms, angle, audience, cta, constraints
-         FROM factory_briefs WHERE brief_id = $1",
+         FROM factory_briefs WHERE brief_id = $1 AND agency_id = $2",
     )
     .bind(id)
-    .fetch_optional(pool)
+    .bind(agency_id)
+    .fetch_optional(&mut *tx)
     .await
-    .map_err(|e| e.to_string())?
-    .ok_or_else(|| "brief not found".to_string())?;
+    .map_err(|e| e.to_string())?;
+    tx.commit().await.map_err(|e| e.to_string())?;
+    let row = row.ok_or_else(|| "brief not found".to_string())?;
     let brief = Brief {
         brief_id: row.get("brief_id"),
         trigger: match row.get::<String, _>("trigger").as_str() {
@@ -481,6 +451,7 @@ pub async fn run_brief_by_id(pool: &sqlx::PgPool, id: &str) -> Result<Value, Str
         constraints: row.get("constraints"),
         created_at: chrono::Utc::now(),
     };
+    // 信号库是平台级表 (无 RLS), 直接读
     let signals: Vec<Value> = if let Some(sid) = &brief.seed_signal_id {
         sqlx::query("SELECT to_jsonb(s.*) FROM intelligence_signals s WHERE signal_id = $1")
             .bind(sid)
@@ -496,11 +467,16 @@ pub async fn run_brief_by_id(pool: &sqlx::PgPool, id: &str) -> Result<Value, Str
             .iter().map(|r| r.get::<Value, _>(0)).collect()
     };
     let llm = llm_gen();
-    sqlx::query("UPDATE factory_briefs SET status='running', updated_at=now() WHERE brief_id=$1")
-        .bind(id)
-        .execute(pool)
+    // 标记 running (租户事务)
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    sqlx::query(&format!("SET LOCAL app.current_agency_id = '{agency_id}'"))
+        .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
+    sqlx::query("UPDATE factory_briefs SET status='running', updated_at=now() WHERE brief_id=$1 AND agency_id=$2")
+        .bind(id).bind(agency_id).execute(&mut *tx).await.map_err(|e| e.to_string())?;
+    tx.commit().await.map_err(|e| e.to_string())?;
+    // 工序1/2/3
     let plan = plan_strategy(&brief, &signals, &llm).await?;
     let master = create_master(&brief, &plan, &signals, &llm).await?;
     let mut variants = Vec::new();
@@ -510,14 +486,15 @@ pub async fn run_brief_by_id(pool: &sqlx::PgPool, id: &str) -> Result<Value, Str
         }
     }
     let result = json!({ "plan": plan, "master": master, "variants": variants, "signal_count": signals.len() });
-    sqlx::query(
-        "UPDATE factory_briefs SET status='done', result=$2, updated_at=now() WHERE brief_id=$1",
-    )
-    .bind(id)
-    .bind(&result)
-    .execute(pool)
-    .await
-    .map_err(|e| e.to_string())?;
+    // 写回 done (租户事务)
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    sqlx::query(&format!("SET LOCAL app.current_agency_id = '{agency_id}'"))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+    sqlx::query("UPDATE factory_briefs SET status='done', result=$2, updated_at=now() WHERE brief_id=$1 AND agency_id=$3")
+        .bind(id).bind(&result).bind(agency_id).execute(&mut *tx).await.map_err(|e| e.to_string())?;
+    tx.commit().await.map_err(|e| e.to_string())?;
     Ok(result)
 }
 
