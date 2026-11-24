@@ -42,6 +42,11 @@ export default function EmployeesPage() {
   const [fVerticals, setFVerticals] = useState("");
   const [fTopics, setFTopics] = useState("");
   const [fExcluded, setFExcluded] = useState("");
+  const [editId, setEditId] = useState("");
+  const [eName, setEName] = useState("");
+  const [eRole, setERole] = useState("");
+  const [eChannel, setEChannel] = useState("");
+  const [eFocus, setEFocus] = useState("");
   const [busy, setBusy] = useState(false);
 
   const loadEmployees = useCallback(async () => {
@@ -211,6 +216,8 @@ export default function EmployeesPage() {
             {e.status === "RUNNING" && <button disabled={busy} onClick={() => act(() => api.employeeAction(e.id, "pause"))}>暂停</button>}
             {e.status === "PAUSED" && <button disabled={busy} onClick={() => act(() => api.employeeAction(e.id, "resume"))}>恢复</button>}
             {(e.status === "RUNNING" || e.status === "PAUSED") && <button disabled={busy} onClick={() => act(() => api.employeeAction(e.id, "stop"))}>停止</button>}
+            <button disabled={busy} onClick={() => { setEditId(e.id === editId ? "" : e.id); setEName(e.name); setERole(e.role); setEChannel(e.channel); setEFocus(JSON.stringify(e.focus ?? { scope: "general" }, null, 2)); }}>✏️ 编辑</button>
+            <button disabled={busy} style={{ color: "var(--danger)" }} onClick={() => act(async () => { if (window.confirm("确认删除该员工? (软归档 ARCHIVED, 可恢复)")) await api.deleteEmployee(e.id); })}>🗑 删除</button>
             <button
               disabled={busy}
               onClick={() => act(async () => api.patchEmployee(e.id, { auto_publish: !e.auto_publish }))}
@@ -239,7 +246,21 @@ export default function EmployeesPage() {
             任务 {lastCycle.task_id ? `${lastCycle.task_id.slice(0, 8)}(${lastCycle.task_state})` : "待审批"}
           </p>
         )}
-      </section>
+      
+      {editId && (
+        <section className="panel">
+          <h2>✏️ 编辑员工</h2>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+            <input placeholder="姓名" value={eName} onChange={(e) => setEName(e.target.value)} />
+            <input placeholder="角色" value={eRole} onChange={(e) => setERole(e.target.value)} />
+            <input placeholder="渠道" value={eChannel} onChange={(e) => setEChannel(e.target.value)} style={{ width: 70 }} />
+            <button disabled={busy || !eName} onClick={() => act(async () => { let focus; try { focus = eFocus.trim() ? JSON.parse(eFocus) : undefined; } catch { setError("focus 不是合法 JSON"); return; } await api.patchEmployee(editId, { name: eName, role: eRole, channel: eChannel, focus }); setEditId(""); })}>保存修改</button>
+            <button disabled={busy} onClick={() => setEditId("")}>取消</button>
+          </div>
+          <p className="muted" style={{ marginTop: 6 }}>领域画像 focus (JSON):</p>
+          <textarea rows={6} value={eFocus} onChange={(e) => setEFocus(e.target.value)} style={{ width: "100%" }} />
+        </section>
+      )}</section>
 
       {selected && (
         <>

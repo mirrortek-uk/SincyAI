@@ -6,6 +6,8 @@ import { useEffect, useState } from "react";
 
 import {
   api,
+  type BrandItem,
+  type IndustryDef,
   type AccountMetricAccount,
   type CycleDetail,
   type CycleItem,
@@ -46,6 +48,18 @@ export function EmployeesView() {
   const [eVoice, setEVoice] = useState("");
   const [eFocus, setEFocus] = useState("");
   const [eMission, setEMission] = useState("");
+  // 新建员工表单
+  const [creating, setCreating] = useState(false);
+  const [brands, setBrands] = useState<BrandItem[]>([]);
+  const [industries, setIndustries] = useState<IndustryDef[]>([]);
+  const [cName, setCName] = useState("");
+  const [cBrand, setCBrand] = useState("");
+  const [cChannel, setCChannel] = useState("x");
+  const [cScope, setCScope] = useState("niche");
+  const [cIndustry, setCIndustry] = useState("");
+  const [cVerticals, setCVerticals] = useState("");
+  const [cTopics, setCTopics] = useState("");
+  const [cExcluded, setCExcluded] = useState("");
 
   useEffect(() => {
     api.listEmployees().then((d) => {
@@ -53,6 +67,8 @@ export function EmployeesView() {
       if (d.items.length > 0) setSel((s) => s ?? d.items[0].id);
     }).catch((e) => setErr(String(e)));
     api.listAccountMetricsRecent().then((d) => setMetrics(d.accounts)).catch(() => {});
+    api.listBrands().then((d) => { setBrands(d.items); if (d.items[0]) setCBrand((b) => b || d.items[0].id); }).catch(() => {});
+    api.listIndustries().then((d) => setIndustries(d.items)).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -103,6 +119,30 @@ export function EmployeesView() {
     } catch (e) { setSaved(`保存失败: ${e}`); }
   };
 
+  const createEmp = async () => {
+    setSaved(null);
+    try {
+      const r = await api.createEmployee({
+        name: cName, role: "content_operator", brand_id: cBrand || undefined, channel: cChannel,
+        auto_publish: false,
+        identity: { name: cName, role: "content_operator", voice: "neutral", language: "zh-CN", audience: [], expertise: [], values: [], boundaries: [] },
+        mission: { statement: "运营账号建立领域权威", domain: "content", audience: [], value_proposition: "", constraints: [], success_definition: "互动与粉丝增长" },
+        strategy: { pillars: [], cadence_per_week: 7, formats: ["text"], risk_tolerance: 0.3, exploration_budget: 0.2 },
+        focus: {
+          scope: cScope,
+          industry: cScope === "niche" ? cIndustry : undefined,
+          sub_verticals: cVerticals.split(",").map((x) => x.trim()).filter(Boolean),
+          topics: cTopics.split(",").map((x) => x.trim()).filter(Boolean),
+          audience: [],
+          excluded_topics: cExcluded.split(",").map((x) => x.trim()).filter(Boolean),
+        },
+      });
+      setSaved("员工已创建 ✅");
+      setCreating(false); setCName("");
+      const d = await api.listEmployees(); setEmps(d.items); setSel(r.id);
+    } catch (e) { setSaved(`创建失败: ${e}`); }
+  };
+
   const saveEdit = async () => {
     if (!sel) return;
     setSaved(null);
@@ -136,7 +176,42 @@ export function EmployeesView() {
 
       <div className="grid g3">
         <div className="card">
-          <h3>员工列表 <span className="sp" /></h3>
+          <h3>员工列表 <span className="sp" />
+            <button className="btn emp sm" onClick={() => setCreating((v) => !v)}>➕ 新建员工</button>
+          </h3>
+          {creating && (
+            <div style={{ border: "1px solid var(--line2)", borderRadius: 10, padding: 10, marginBottom: 8 }}>
+              <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+                <input placeholder="姓名" value={cName} onChange={(e) => setCName(e.target.value)} style={{ width: 110 }} />
+                <select value={cBrand} onChange={(e) => setCBrand(e.target.value)}>
+                  {brands.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+                </select>
+                <input placeholder="渠道" value={cChannel} onChange={(e) => setCChannel(e.target.value)} style={{ width: 60 }} />
+                <select value={cScope} onChange={(e) => setCScope(e.target.value)}>
+                  <option value="niche">细分领域</option>
+                  <option value="general">不分领域</option>
+                </select>
+                {cScope === "niche" && (
+                  <select value={cIndustry} onChange={(e) => setCIndustry(e.target.value)}>
+                    <option value="">选行业 *</option>
+                    {industries.map((x) => <option key={x.id} value={x.id}>{x.name} ({x.id})</option>)}
+                  </select>
+                )}
+              </div>
+              {cScope === "niche" && (
+                <div className="row" style={{ gap: 6, flexWrap: "wrap", marginTop: 6 }}>
+                  <input placeholder="赛道 (逗号分隔)" value={cVerticals} onChange={(e) => setCVerticals(e.target.value)} style={{ width: 170 }} />
+                  <input placeholder="话题 (逗号分隔)" value={cTopics} onChange={(e) => setCTopics(e.target.value)} style={{ width: 150 }} />
+                  <input placeholder="排除话题" value={cExcluded} onChange={(e) => setCExcluded(e.target.value)} style={{ width: 120 }} />
+                </div>
+              )}
+              <div style={{ marginTop: 8 }}>
+                <button className="btn emp sm" disabled={!cName || (cScope === "niche" && !cIndustry)} onClick={createEmp}>创建</button>
+                <button className="btn sm" style={{ marginLeft: 6 }} onClick={() => setCreating(false)}>取消</button>
+                {saved && <span className="sub" style={{ marginLeft: 8 }}>{saved}</span>}
+              </div>
+            </div>
+          )}
           {emps.map((e) => (
             <div
               key={e.id}
