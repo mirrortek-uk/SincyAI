@@ -23,6 +23,15 @@ use crate::state::AppState;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/intel/sources", get(list_sources))
+        .route(
+            "/intel/sources/status",
+            get(crate::source_status::source_status),
+        )
+        .route("/intel/feeds", get(crate::feed_import::list_feeds))
+        .route(
+            "/intel/feeds/import",
+            post(crate::feed_import::import_feed_list),
+        )
         .route("/intel/providers", get(list_providers))
         .route("/intel/providers/{id}/health", post(provider_health))
         .route("/intel/route", post(route_query))
@@ -105,6 +114,49 @@ async fn resume_all_jobs(
     Ok(Json(json!({"resumed": n})))
 }
 
+/// 由启用标志 + 该源的 job 行算健康标签 (health_audit 与 source_status 共用)
+pub fn health_label(enabled: bool, sjobs: &[&sqlx::postgres::PgRow]) -> &'static str {
+    if !enabled {
+        "disabled"
+    } else if sjobs.is_empty() {
+        "not_configured"
+    } else if sjobs
+        .iter()
+        .all(|j| j.get::<String, _>("status") == "paused")
+    {
+        // 已注册 + 有 job 但全部暂停 = 等待配置 (自托管实例/密钥/出口 IP)
+        "not_configured"
+    } else {
+        let ran: Vec<&&sqlx::postgres::PgRow> = sjobs
+            .iter()
+            .filter(|j| {
+                j.get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_run_at")
+                    .is_some()
+            })
+            .collect();
+        if ran.is_empty() {
+            "not_configured"
+        } else {
+            let any_new: bool = ran
+                .iter()
+                .any(|j| j.get::<Option<i32>, _>("last_new").unwrap_or(0) > 0);
+            let any_failed = ran.iter().any(|j| {
+                j.get::<String, _>("status") == "failed"
+                    || j.get::<Option<String>, _>("last_error").is_some()
+            });
+            let all_failed = ran.iter().all(|j| j.get::<String, _>("status") == "failed");
+            if all_failed {
+                "failed"
+            } else if any_new {
+                if any_failed { "degraded" } else { "healthy" }
+            } else {
+                // 跑了但 0 新入库 (全去重) — 数据在流但近期无新内容
+                "degraded"
+            }
+        }
+    }
+}
+
 /// GET /intel/health — Source Health Audit (WI §28): 每个注册信源的健康状态
 /// healthy / degraded / failed / not_configured / disabled,
 /// 由 job 运行记录 + 入库量计算, 不只看"是否注册"。
@@ -151,45 +203,7 @@ async fn health_audit(
             .map(|r| r.get::<i64, _>("n"))
             .unwrap_or(0);
 
-        let status = if !enabled {
-            "disabled"
-        } else if sjobs.is_empty() {
-            "not_configured"
-        } else if sjobs
-            .iter()
-            .all(|j| j.get::<String, _>("status") == "paused")
-        {
-            // 已注册 + 有 job 但全部暂停 = 等待配置 (自托管实例/密钥/出口 IP)
-            "not_configured"
-        } else {
-            let ran: Vec<&&sqlx::postgres::PgRow> = sjobs
-                .iter()
-                .filter(|j| {
-                    j.get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_run_at")
-                        .is_some()
-                })
-                .collect();
-            if ran.is_empty() {
-                "not_configured"
-            } else {
-                let any_new: bool = ran
-                    .iter()
-                    .any(|j| j.get::<Option<i32>, _>("last_new").unwrap_or(0) > 0);
-                let any_failed = ran.iter().any(|j| {
-                    j.get::<String, _>("status") == "failed"
-                        || j.get::<Option<String>, _>("last_error").is_some()
-                });
-                let all_failed = ran.iter().all(|j| j.get::<String, _>("status") == "failed");
-                if all_failed {
-                    "failed"
-                } else if any_new {
-                    if any_failed { "degraded" } else { "healthy" }
-                } else {
-                    // 跑了但 0 新入库 (全去重) — 数据在流但近期无新内容
-                    "degraded"
-                }
-            }
-        };
+        let status = health_label(enabled, &sjobs);
         *summary.entry(status).or_insert(0) += 1;
         out.push(json!({
             "source_id": sid,

@@ -367,6 +367,43 @@ export interface IntelHealth {
   sources: IntelSourceHealth[];
 }
 
+export interface IntelSourceStatus {
+  source_id: string;
+  name: string;
+  category: string;
+  class: "A" | "B" | "C";
+  health: string;
+  items_total: number;
+  connector: string | null;
+  connector_type: string | null;
+  parse_path: string | null;
+  missing: string | null;
+}
+
+export interface IntelSourceStatusResp {
+  summary: { A: number; B: number; C: number };
+  sources: IntelSourceStatus[];
+}
+
+export interface CustomFeed {
+  id: string;
+  label: string;
+  url: string;
+  origin: string | null;
+  enabled: boolean;
+  created_at: string;
+  items_total: number;
+}
+
+export interface FeedImportResult {
+  list_url: string;
+  apply: boolean;
+  found: number;
+  added: number;
+  skipped_existing: number;
+  feeds: string[];
+}
+
 export interface IntelTrend {
   topic: string;
   total_24h: number;
@@ -770,6 +807,10 @@ export const api = {
   listIntelJobs: () => req<{ items: IntelJob[] }>("/intel/jobs"),
   intelStats: () => req<IntelStats>("/intel/stats"),
   intelHealth: () => req<IntelHealth>("/intel/health"),
+  intelSourceStatus: () => req<IntelSourceStatusResp>("/intel/sources/status"),
+  listCustomFeeds: () => req<{ feeds: CustomFeed[] }>("/intel/feeds"),
+  importFeedList: (url: string, apply: boolean) =>
+    req<FeedImportResult>("/intel/feeds/import", { method: "POST", body: JSON.stringify({ url, apply }) }),
   toggleIntelSource: (id: string, enabled: boolean) =>
     req<{ id: string; enabled: boolean }>(`/intel/sources/${id}/toggle`, { method: "POST", body: JSON.stringify({ enabled }) }),
   enableAllIntelSources: () => req<{ enabled: number }>("/intel/sources/enable-all", { method: "POST" }),

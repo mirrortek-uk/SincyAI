@@ -6,6 +6,7 @@ pub mod auth;
 pub mod bootstrap;
 pub mod employees;
 pub mod factory;
+pub mod feed_import;
 pub mod gateway;
 pub mod industry;
 pub mod intel;
@@ -14,6 +15,7 @@ pub mod metrics;
 pub mod pipeline;
 pub mod pulse;
 pub mod skills;
+pub mod source_status;
 pub mod state;
 
 pub use api::routes;

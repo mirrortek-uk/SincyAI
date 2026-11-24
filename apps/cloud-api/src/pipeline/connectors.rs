@@ -12,6 +12,7 @@ use sincy_intel::pipeline::{
     Batch, Connector, ConnectorDescriptor, ConnectorError, ConnectorManifest, Cursor, FetchParams,
     RawRecord, RecordMetadata, default_connector_manifests,
 };
+use sqlx::Row;
 
 /// 基于 HTTP 的通用连接器: 按 manifest 里的 source 逐个抓取并归一化成 RawRecord
 pub struct HttpConnector {
@@ -333,6 +334,65 @@ pub async fn run_connector_instance(
     Ok((fetched, processed))
 }
 
+/// DB 驱动的自定义 RSS 连接器: intel_custom_feeds 表里启用的每一行就是一个源,
+/// 零代码接入 (新增源 = 加一行配置, 或 POST /intel/feeds/import 批量导入)。
+pub async fn custom_rss_manifest(pool: &sqlx::PgPool) -> Option<ConnectorManifest> {
+    let rows = sqlx::query(
+        "SELECT f.id, f.label, f.url FROM intel_custom_feeds f
+         JOIN intelligence_sources s ON s.id = f.id AND s.enabled
+         WHERE f.enabled ORDER BY f.id",
+    )
+    .fetch_all(pool)
+    .await
+    .ok()?;
+    if rows.is_empty() {
+        return None;
+    }
+    let sources = rows
+        .iter()
+        .map(|r| sincy_intel::pipeline::SourceRef {
+            source_id: r.get::<String, _>("id"),
+            label: r.get::<String, _>("label"),
+            url: r.get::<String, _>("url"),
+            kind: "news".into(),
+            record_type: sincy_intel::pipeline::RecordType::Article,
+            enabled: true,
+        })
+        .collect::<Vec<_>>();
+    Some(ConnectorManifest {
+        descriptor: ConnectorDescriptor {
+            id: "rss-custom".into(),
+            name: "自定义 RSS 源 (intel_custom_feeds)".into(),
+            connector_type: "rss".into(),
+            capabilities: vec!["article_discovery".into()],
+            datasets: vec![sincy_intel::pipeline::DatasetDecl {
+                id: "rss-custom".into(),
+                record_type: sincy_intel::pipeline::RecordType::Article,
+                url: None,
+            }],
+            default_interval_secs: 1800,
+            rate_limit_per_min: 30,
+            auth: Default::default(),
+        },
+        sources,
+        fetch_impl: "http:rss".into(),
+    })
+}
+
+/// 跑一轮 DB 自定义 RSS 源。返回 (抓取数, 新处理数, 错误)
+pub async fn run_custom_feeds(pool: &sqlx::PgPool) -> (usize, usize, Option<String>) {
+    match custom_rss_manifest(pool).await {
+        Some(m) => {
+            let conn = HttpConnector::new(m);
+            match run_connector_instance(pool, &conn).await {
+                Ok((f, p)) => (f, p, None),
+                Err(e) => (0, 0, Some(e)),
+            }
+        }
+        None => (0, 0, None),
+    }
+}
+
 /// 调度器: 周期跑所有连接器 — 现役唯一抓取方 (老 intel_collector 定时循环已退役, dedup_key 保证幂等)
 pub async fn run_scheduler(pool: sqlx::PgPool) {
     let mut tick = tokio::time::interval(Duration::from_secs(1800));
@@ -349,6 +409,19 @@ pub async fn run_scheduler(pool: sqlx::PgPool) {
                 Err(e) => tracing::warn!(connector = %id, error = %e, "connector run failed"),
             }
         }
+        let (cf, cp, cerr) = run_custom_feeds(&pool).await;
+        if cf > 0 || cp > 0 {
+            total_new += cp;
+            tracing::info!(
+                connector = "rss-custom",
+                fetched = cf,
+                processed = cp,
+                "connector run done"
+            );
+        }
+        if let Some(e) = cerr {
+            tracing::warn!(connector = "rss-custom", error = %e, "connector run failed");
+        }
         if total_new > 0
             && let Ok((n, up)) = crate::intel::refresh_opportunities_db(&pool).await
         {
@@ -359,6 +432,25 @@ pub async fn run_scheduler(pool: sqlx::PgPool) {
                 "opportunity engine refreshed"
             );
         }
+    }
+}
+
+/// 状态页展示用: 连接器的解析路径 (对应 parse_* / 抓取实现)
+pub fn parse_path_for(connector_id: &str, connector_type: &str) -> &'static str {
+    match connector_id {
+        "hn-algolia" => "parse_hn",
+        "devto-api" => "parse_devto",
+        "github-trending" | "hotrank-hub" => "parse_github_trending",
+        "bilibili-rank" => "parse_bili_rank",
+        "wikipedia-rc" => "parse_wiki_rc",
+        "gdelt-api" => "parse_gdelt",
+        "searxng-ext" => "parse_searxng",
+        "website" => "website_extract (Firecrawl/本地剥标签)",
+        _ => match connector_type {
+            "rss" => "parse_rss",
+            "aggregator" => "pulse WebScrapeProvider",
+            _ => "parse_json_items (JSON 启发式)",
+        },
     }
 }
 
@@ -457,6 +549,12 @@ pub async fn run_all_connectors(pool: &sqlx::PgPool) -> (usize, usize, Vec<Strin
             }
             Err(e) => failures.push(format!("{id}: {e}")),
         }
+    }
+    let (cf, cp, cerr) = run_custom_feeds(pool).await;
+    fetched += cf;
+    processed += cp;
+    if let Some(e) = cerr {
+        failures.push(format!("rss-custom: {e}"));
     }
     if processed > 0
         && let Ok((n, up)) = crate::intel::refresh_opportunities_db(pool).await

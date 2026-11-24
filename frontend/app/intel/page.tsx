@@ -11,6 +11,9 @@ import {
   type IntelPipeline,
   type BrandItem,
   type IntelHealth,
+  type IntelSourceStatusResp,
+  type CustomFeed,
+  type FeedImportResult,
   type IntelItem,
   type IntelJob,
   type IntelProvider,
@@ -30,6 +33,11 @@ export default function IntelPage() {
   const [jobs, setJobs] = useState<IntelJob[]>([]);
   const [stats, setStats] = useState<IntelStats | null>(null);
   const [health, setHealth] = useState<IntelHealth | null>(null);
+  const [srcStatus, setSrcStatus] = useState<IntelSourceStatusResp | null>(null);
+  const [customFeeds, setCustomFeeds] = useState<CustomFeed[]>([]);
+  const [importUrl, setImportUrl] = useState("");
+  const [importResult, setImportResult] = useState<FeedImportResult | null>(null);
+  const [importing, setImporting] = useState(false);
   const [trends, setTrends] = useState<IntelTrend[]>([]);
   const [collectResult, setCollectResult] = useState<CollectResult | null>(null);
   const [collecting, setCollecting] = useState(false);
@@ -51,7 +59,7 @@ export default function IntelPage() {
   const load = useCallback(async () => {
     if (!getToken()) return;
     try {
-      const [s, p, i, o, j, st, h, tr, ind, br, sig, pipe] = await Promise.all([
+      const [s, p, i, o, j, st, h, tr, ind, br, sig, pipe, ss, cf] = await Promise.all([
         api.listIntelSources(),
         api.listIntelProviders(),
         relevanceMode && brandId
@@ -66,6 +74,8 @@ export default function IntelPage() {
         api.listBrands(),
         api.listIntelSignals(undefined, 30),
         api.listIntelPipelines(),
+        api.intelSourceStatus(),
+        api.listCustomFeeds(),
       ]);
       setSources(s.items);
       setProviders(p.items);
@@ -79,6 +89,8 @@ export default function IntelPage() {
       setBrands(br.items);
       setSignals(sig.items);
       setPipelines(pipe.pipelines);
+      setSrcStatus(ss);
+      setCustomFeeds(cf.feeds);
     } catch (e) {
       setError(String(e));
     }
@@ -174,6 +186,102 @@ export default function IntelPage() {
             {collectResult.failures.length > 0 && <span style={{ color: "#ef4444" }}>({collectResult.failures[0].slice(0, 60)})</span>}
             {" "}· 机会引擎 {collectResult.opportunities} 个候选, 写入 {collectResult.opportunities_upserted} 条
           </p>
+        )}
+      </section>
+
+      <section className="panel">
+        <h2>信源接入全景 (A/B/C 分类)</h2>
+        <p className="muted" style={{ marginTop: 0 }}>
+          A 类 = 绑在真跑着的 HttpConnector 上 · B 类 = aggregator 走 Sincy Pulse · C 类 = 已注册但未接通抓取路径 (not_configured)。
+          {srcStatus && <> 当前 <b>A:{srcStatus.summary.A}</b> · <b>B:{srcStatus.summary.B}</b> · <b>C:{srcStatus.summary.C}</b></>}
+        </p>
+        {srcStatus && (["A", "B", "C"] as const).map((cls) => {
+          const rows = srcStatus.sources.filter((x) => x.class === cls);
+          if (rows.length === 0) return null;
+          const titles: Record<string, string> = {
+            A: "A 类 · 绑在真跑着的 HttpConnector 上",
+            B: "B 类 · aggregator, 走 pulse (不走 HttpConnector)",
+            C: "C 类 · 声明了但没接通抓取路径 → not_configured",
+          };
+          return (
+            <div key={cls} style={{ marginBottom: 12 }}>
+              <h3 style={{ marginBottom: 4 }}>{titles[cls]} ({rows.length})</h3>
+              <table>
+                <thead><tr><th>源</th><th>健康</th><th>累计入库</th><th>挂在哪个 connector</th><th>类型</th><th>解析路径</th><th>缺什么</th></tr></thead>
+                <tbody>
+                  {rows.map((r) => (
+                    <tr key={r.source_id}>
+                      <td>{r.source_id}<span className="muted"> · {r.name}</span></td>
+                      <td style={{ color: r.health === "healthy" ? "#22c55e" : r.health === "failed" ? "#ef4444" : r.health === "degraded" ? "#f59e0b" : "var(--muted)" }}>{r.health}</td>
+                      <td>{r.items_total}</td>
+                      <td className="muted">{r.connector ?? "-"}</td>
+                      <td className="muted">{r.connector_type ?? r.category}</td>
+                      <td className="muted">{r.parse_path ?? "-"}</td>
+                      <td className="muted" style={{ color: "#f59e0b" }}>{r.missing ?? "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          );
+        })}
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginTop: 8 }}>
+          <input
+            placeholder="导入清单页 URL (如 awesome-rss-feeds 的 LIST.md / checkrss / rss-guru)"
+            style={{ minWidth: 420 }}
+            value={importUrl}
+            onChange={(e) => setImportUrl(e.target.value)}
+          />
+          <button
+            disabled={importing || !importUrl}
+            onClick={async () => {
+              setImporting(true);
+              try {
+                const r = await api.importFeedList(importUrl, false);
+                setImportResult(r);
+                setMsg(`预览: 从清单页抽取到 ${r.found} 个 feed URL (未写入, 点"确认导入"生效)`);
+              } catch (e) { setError(String(e)); } finally { setImporting(false); }
+            }}
+          >
+            预览清单
+          </button>
+          <button
+            disabled={importing || !importUrl}
+            onClick={async () => {
+              setImporting(true);
+              try {
+                const r = await api.importFeedList(importUrl, true);
+                setImportResult(r);
+                setMsg(`已导入: 新增 ${r.added} 个自定义源, 跳过已存在 ${r.skipped_existing} 个 (rss-custom 连接器下一轮自动抓取)`);
+                await load();
+              } catch (e) { setError(String(e)); } finally { setImporting(false); }
+            }}
+          >
+            确认导入
+          </button>
+        </div>
+        {importResult && (
+          <p className="muted">清单 {importResult.list_url}: 抽取 {importResult.found} 个 feed{importResult.apply ? `, 新增 ${importResult.added}, 已存在 ${importResult.skipped_existing}` : ""}。</p>
+        )}
+        {customFeeds.length > 0 && (
+          <details style={{ marginTop: 8 }}>
+            <summary className="muted">自定义 RSS 源 ({customFeeds.length} 个, intel_custom_feeds 表, rss-custom 连接器抓取)</summary>
+            <table>
+              <thead><tr><th>id</th><th>label</th><th>url</th><th>来源</th><th>启用</th><th>累计入库</th></tr></thead>
+              <tbody>
+                {customFeeds.map((f) => (
+                  <tr key={f.id}>
+                    <td>{f.id}</td>
+                    <td>{f.label}</td>
+                    <td className="muted"><a href={f.url} target="_blank" rel="noreferrer" style={{ color: "var(--accent)" }}>{f.url.slice(0, 70)}</a></td>
+                    <td className="muted">{f.origin ?? "手工"}</td>
+                    <td>{f.enabled ? "是" : "否"}</td>
+                    <td>{f.items_total}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </details>
         )}
       </section>
 

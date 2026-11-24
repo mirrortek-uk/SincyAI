@@ -22,7 +22,10 @@ Content Factory 生产多模态内容，经质量与合规门禁后封装为不�
   Connector（44 个内容源，含 GDELT/RSSHub/SearXNG 可选扩展），`apps/cloud-api/src/pipeline/connectors.rs`
   的 `HttpConnector` 实现真正抓取（RSS/JSON/HTML/Firecrawl，cursor 幂等；老 intel_collector
   定时循环已退役，连接器调度器是唯一抓取方），`GET /intel/connectors` 查询、
-  `POST /intel/connectors/{id}/run` 手动触发，另有 30min 调度器。开源工具按架构落位为端口:
+  `POST /intel/connectors/{id}/run` 手动触发，另有 30min 调度器。纯 RSS 新源零代码接入:
+  加一行 `intel_custom_feeds` (migration 0040) 或 `POST /intel/feeds/import` 从 awesome-rss
+  清单页批量导入, 由 `rss-custom` 连接器统一抓取; `GET /intel/sources/status` 按 A/B/C
+  分类展示每个源的健康/累计入库/connector/解析路径/缺什么配置。开源工具按架构落位为端口:
   MediaCrawler→SocialProvider、TrendRadar→热榜、RSSAggregatorforWeb3→RSS 清单（均为适配层，红线内只走公开只读）
 - **摄取 Ingestion**: 统一 `RawRecord` 信封 + `RecordType`，归一化/跨源去重/dedup_key 幂等后按类型路由
   （bus 主题 `intel.raw.{record_type}`，现进程内、可换 NATS）

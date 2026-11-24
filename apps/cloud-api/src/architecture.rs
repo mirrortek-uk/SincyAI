@@ -65,7 +65,7 @@ async fn architecture(
     axum::extract::Extension(auth): axum::extract::Extension<crate::auth::AuthCtx>,
 ) -> Json<Value> {
     // as-built 动态计数 (避免文档漂移): 迁移数 / 注册源数 / 默认 feed 数
-    let (mig_count, src_count): (i64, i64) = match state.pool() {
+    let (mig_count, src_count, custom_feeds): (i64, i64, i64) = match state.pool() {
         Ok(pool) => {
             let m = sqlx::query_scalar::<_, i64>("SELECT count(*)::int8 FROM _sqlx_migrations")
                 .fetch_one(pool)
@@ -75,14 +75,21 @@ async fn architecture(
                 .fetch_one(pool)
                 .await
                 .unwrap_or(0);
-            (m, c)
+            let cf = sqlx::query_scalar::<_, i64>(
+                "SELECT count(*)::int8 FROM intel_custom_feeds WHERE enabled",
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0);
+            (m, c, cf)
         }
-        Err(_) => (0, 0),
+        Err(_) => (0, 0, 0),
     };
     let feed_count = sincy_intel::pipeline::default_connector_manifests()
         .iter()
         .map(|m| m.sources.iter().filter(|x| x.enabled).count())
-        .sum::<usize>() as i64;
+        .sum::<usize>() as i64
+        + custom_feeds;
 
     let layers = json!([
         {
@@ -153,8 +160,8 @@ async fn architecture(
             "id": "pipeflow",
             "title": "采集层 Connectors + 摄取 Ingestion (sincy-intel::pipeline)",
             "nodes": [
-                node("pipe_conn", "① Connector 只负责采集 (点击展开清单)", "Connector SPI · RSS / HTTP JSON / HTML / 无头浏览器 · cursor 幂等 · GET /intel/connectors",
-                     "每个源一个 Connector: 认证/翻页/限流/重试/解析, 只产出统一信封不做判断; 新增数据源 = 只写一个新连接器, 零管道改动; 前端点击本节点可展开查看全部已注册 Connector (名称/功能/内容源/record_type, 见 GET /intel/connectors)"),
+                node("pipe_conn", "① Connector 只负责采集 (点击展开清单)", "Connector SPI · RSS / HTTP JSON / HTML / Firecrawl · cursor 幂等 · GET /intel/connectors · 自定义 RSS 走 intel_custom_feeds 表 (rss-custom)",
+                     "每个源一个 Connector: 认证/翻页/限流/重试/解析, 只产出统一信封不做判断; 新增数据源 = 只写一个新连接器, 零管道改动; 纯 RSS 新源甚至不用写代码 — 加一行 intel_custom_feeds 或 POST /intel/feeds/import 从 awesome-rss 清单页批量导入; 前端点击本节点可展开查看全部已注册 Connector (名称/功能/内容源/record_type, 见 GET /intel/connectors)"),
                 node("pipe_raw", "② RawRecord 统一信封", "record_type + dedup_key + provenance + fetched_at/observed_at",
                      "article / trend / ranking / social_post / event / metric …; 入口强类型校验后落 intelligence_raw_records (migration 0035), 原始永久保留支持历史重放"),
                 node("pipe_router", "③ Type Router 类型路由", "bus 主题 intel.raw.{record_type} (现进程内, 后续换 NATS)",
