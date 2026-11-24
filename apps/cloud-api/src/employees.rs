@@ -1995,7 +1995,7 @@ async fn employee_feed(
         }
         opps.push(json!({
             "topic": topic,
-            "score": r.get::<Value, _>("score"),
+            "score": r.get::<rust_decimal::Decimal, _>("score").to_string(),
             "rationale": rationale,
         }));
         if opps.len() >= 30 {
