@@ -71,6 +71,48 @@ fn fixture_manifest(url: String) -> ConnectorManifest {
 }
 
 #[tokio::test]
+async fn aggregator_connector_never_fetches_over_http() {
+    // 回归: 聚合站由 pulse 独占, HttpConnector 对 aggregator 类型连 GET 都不发
+    // (曾误按 connector id 匹配 "aggregator", 实际 id 是 pulse-x-ecology, 导致重复抓取)
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let hits = std::sync::Arc::new(AtomicUsize::new(0));
+    let hits2 = hits.clone();
+    let app = Router::new().route(
+        "/feed",
+        get(move || {
+            let hits = hits2.clone();
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                RSS
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let mut m = fixture_manifest(format!("http://127.0.0.1:{port}/feed"));
+    m.descriptor.id = "pulse-x-ecology".into();
+    m.descriptor.connector_type = "aggregator".into();
+    let conn = cloud_api::pipeline::connectors::HttpConnector::new(m);
+    let batch = sincy_intel::pipeline::Connector::fetch(
+        &conn,
+        &sincy_intel::pipeline::FetchParams::default(),
+        None,
+    )
+    .await
+    .expect("aggregator fetch must succeed");
+    assert!(batch.records.is_empty());
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        0,
+        "aggregator source must not be fetched over HTTP"
+    );
+}
+
+#[tokio::test]
 async fn connector_fetches_ingests_mirrors_and_marks_jobs() {
     let Some(pool) = setup().await else {
         eprintln!("skip: {TEST_URL_ENV} not set");

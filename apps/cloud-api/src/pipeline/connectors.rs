@@ -36,6 +36,11 @@ impl HttpConnector {
         if !src.enabled {
             return Ok(vec![]);
         }
+        // 聚合站由 Sincy Pulse provider 独占采集: 按 connector_type 在发 GET 之前
+        // 直接跳过, 避免和 pulse 抓同一批站点 (礼貌/限流红线)
+        if self.manifest.descriptor.connector_type == "aggregator" {
+            return Ok(vec![]);
+        }
         let resp = self
             .client
             .get(&src.url)
@@ -55,7 +60,6 @@ impl HttpConnector {
         }
         let cid = self.manifest.descriptor.id.as_str();
         let items = match (cid, self.manifest.descriptor.connector_type.as_str()) {
-            ("aggregator", _) => vec![], // pulse provider 现役采集, 这里不重复抓
             (_, "rss") => crate::intel_collector::parse_rss(&body)
                 .into_iter()
                 .map(|(title, url, summary, published)| {
