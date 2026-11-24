@@ -1,25 +1,22 @@
-# X (Twitter) 设备自动化 App Adapter (TDD 9.3 结构)。
-# 路线: 不走付费 X API v2，走设备自动化 (PRD 5.3 "按成本评估是否走设备";
-# HID 设计书: 平台 API 付费/不可用时以设备层执行替代, 不绕过平台安全机制)。
-# 锚点为占位, 真机核验后替换 (与 xiaohongshu adapter 相同策略)。
-# 由 Sincy 签名发布; 设备只执行签名有效且 App 版本在范围内的版本。
+# X (Twitter) 设备自动化 App Adapter (v2, 真机核验版)。
+# 不走付费 X API v2，走设备自动化 (PRD 5.3); Sincy 签名发布, 设备只执行签名有效
+# 且 App 版本在范围内的版本。锚点已按真机核验 (X 12.45.1-prod.01, zh locale, 1080x2184)。
 adapter: x.publish_post
-version: 1
+version: 6
 app:
   package: com.twitter.android
   version_range: ">=10.0"
 screens:
   home:
     anchors:
-      - { id: "com.twitter.android:id/bottom_bar" }
-      - { text: "Home" }
+      - { id: "home_navigation_bar_title" }
+      - { text_any: ["显示导航栏", "Home", "主页"] }
   composer:
     anchors:
-      - { id: "com.twitter.android:id/tweet_text" }
-      - { text: "What's happening?" }
+      - { id: "ComposerRoot" }
   posted_confirm:
     anchors:
-      - { text_any: ["Your post was sent", "Post sent", "已发布"] }
+      - { text_any: ["你的帖子已发布", "帖子已发布", "已发布", "Your post was sent", "Post sent"] }
   challenge:
     anchors:
       - { text_any: ["Verify you are human", "unusual activity", "安全验证", "人机验证"] }   # always -> WAITING_USER
@@ -27,9 +24,13 @@ screens:
     anchors:
       - { text_any: ["Update now", "立即更新"] }
 flow:
-  - { expect: home, action: tap, target: { id: "com.twitter.android:id/composer_fab" } }
-  - { expect: composer, action: set_text, target: { id: "com.twitter.android:id/tweet_text" }, value: "package.text" }
-  - { expect: composer, action: tap, target: { text: "Post" }, side_effect: true }
-  - { expect: posted_confirm, action: back, verify: true }
+  # 首页右下角发帖 FAB (真机坐标 1080x2184; 其他分辨率需重新核验)
+  - { expect: home, action: tap_at, target: { text_any: ["发帖选项", "Compose"] }, value: "{\"x\":964,\"y\":2012}" }
+  - { expect: composer, action: wait, value: "2000" }
+  - { expect: composer, action: set_text, target: { text_any: ["有什么新鲜事？", "What's happening?"] }, value: "package.text" }
+  - { expect: composer, action: wait, value: "800" }
+  # 顶栏右上角"发帖"按钮 (真机 1080x2184 坐标; 文本有重名, 必须用坐标点)
+  - { expect: composer, action: tap_at, target: { text_any: ["发帖", "Post"] }, value: "{\"x\":964,\"y\":176}", side_effect: true }
+  - { expect: home, action: wait, value: "3000", verify: true }
 known_interrupts:
-  - { screen: update_dialog, action: tap, target: { text_any: ["Not now", "以后再说"] } }
+  - { screen: update_dialog, action: tap, target: { text_any: ["Not now", "以后再说", "暂不", "取消"] } }

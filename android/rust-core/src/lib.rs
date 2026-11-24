@@ -590,19 +590,14 @@ mod jni {
     fn action_payload(a: &Action, snap: &JsonSnapshot, p: &HumanProfile, rng: &mut Rng) -> String {
         match a {
             Action::Tap(t) => {
-                let target = serde_json::to_value(t).unwrap_or_default();
-                if let Some(b) = snap.bounds_for(&target) {
-                    let plan = plan_tap(b, p, rng);
-                    json!({
-                        "kind": "tap",
-                        "x": plan.x, "y": plan.y,
-                        "hold_ms": plan.hold_ms,
-                        "pre_ms": plan.pre_ms, "post_ms": plan.post_ms,
-                    })
-                    .to_string()
-                } else {
-                    json!({"kind": "tap", "target": t}).to_string()
-                }
+                // Prefer a real accessibility ACTION_CLICK on the matched node:
+                // coordinate gestures in the bottom system-nav zone get eaten by
+                // gesture navigation, while performAction(CLICK) always lands.
+                // Kotlin falls back to a humanized coordinate tap if CLICK fails.
+                let _ = snap;
+                let _ = p;
+                let _ = rng;
+                json!({"kind": "tap", "target": t}).to_string()
             }
             Action::Scroll => {
                 let (w, h) = snap.screen_size();

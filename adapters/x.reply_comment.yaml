@@ -1,16 +1,13 @@
-# X (Twitter) 回帖设备自动化 App Adapter (v5)。
+# X (Twitter) 回帖设备自动化 App Adapter (v19)。
 # 与 x.publish_post 同一策略: 不走付费 API, 走设备自动化; Sincy 签名发布,
 # 设备只执行签名有效且 App 版本在范围内的版本。
 # 回复内容来自内容包 (value: "package.text" —— 设备端验签后由
 # task_context.package_text 替换, 不参与签名)。
-# v5 真机核验 (X 12.44.0-prod.01, 中文 locale, 1080x2400):
-#   底部导航: 主页/探索/Grok/通知标签/私信 (content-desc, 每页都有 -> 只能作 main_nav)
-#   首页顶部 tab: 为你推荐/正在关注 (home 页独有)
-#   帖子列表项 id: com.twitter.android:id/timeline_post
-#   详情页操作栏: 回复/转帖/喜欢/展示量/书签/分享
-#   回复输入框: 点"回复"后自动聚焦, 顶部有"发布"按钮
+# v19 真机核验 (X 12.45.1-prod.01, 中文 locale, 1080x2184):
+#   home 顶栏 id: home_navigation_bar_title; 首帖操作栏"回复"按钮坐标 ~(223,640)
+#   全屏编辑页 id: ComposerRoot; 输入框占位 "有什么新鲜事？"; 右上发布按钮坐标 ~(964,176)
 adapter: x.reply_comment
-version: 18
+version: 40
 app:
   package: com.twitter.android
   version_range: ">=10.0"
@@ -22,17 +19,16 @@ screens:
       - { text_any: ["通知标签", "Notifications", "私信", "Messages"] }
   home:
     anchors:
-      # 顶部 tab 是 home 独有 (底部导航每页都有, 不能用来区分)
-      - { text_any: ["为你推荐", "For you", "正在关注", "Following"] }
+      # home 顶栏标题 (真机: id home_navigation_bar_title)
+      - { id: "home_navigation_bar_title" }
   tweet_detail:
     anchors:
-      - { text_any: ["回复", "Reply"] }
-      - { text_any: ["转帖", "Repost", "喜欢", "Like", "书签", "Bookmark"] }
+      # 详情页根节点 id (真机: PostDetail); 单锚点, 滚动后仍可识别
+      - { id: "PostDetail" }
   composer:
-    # X 12.x 全屏回复编辑页 (从信息流点"回复"直接打开): 左上"关闭", 右上"回复"按钮
+    # X 12.45 全屏编辑页 (真机: id ComposerRoot)
     anchors:
-      - { text_any: ["关闭", "Close"] }
-      - { text_any: ["回复", "Reply", "发布", "Post"] }
+      - { id: "ComposerRoot" }
   reply_sent:
     anchors:
       - { text_any: ["Your reply was sent", "Reply sent", "回复已发送", "已发送", "你的回复已发布", "已发布"] }
@@ -44,14 +40,16 @@ screens:
       - { text_any: ["Update now", "立即更新"] }
 flow:
   - { expect: main_nav, action: tap, target: { text_any: ["主页", "Home"] } }
-  - { expect: home, action: wait, value: "2500" }
-  - { expect: home, action: tap, target: { text_any: ["回复", "Reply"] } }
+  - { expect: home, action: wait, value: "4000" }
+  # 点首帖时间戳区进入详情页 (真机: 首帖头部 y≈440)
+  - { expect: home, action: tap_at, target: { id: "timeline_post" }, value: "{\"x\":820,\"y\":440}" }
+  - { expect: tweet_detail, action: wait, value: "3000" }
+  # 详情页底部内联回复框 (节点语义 click, 不受系统导航手势区影响)
+  - { expect: tweet_detail, action: tap, target: { text: "打开完整编辑器" } }
   - { expect: composer, action: wait, value: "2500" }
-  - { expect: composer, action: tap, target: { text_any: ["发布你的回复", "Post your reply"] } }
-  - { expect: composer, action: set_text, target: { id: "composer_text_field" }, value: "package.text" }
+  - { expect: composer, action: set_text, target: { text_any: ["有什么新鲜事？", "What's happening?", "Post your reply", "发帖回复"] }, value: "package.text" }
   - { expect: composer, action: wait, value: "800" }
-  - { expect: composer, action: tap_at, target: { text_any: ["回复", "Reply", "发布", "Post"] }, value: "{\"x\":964,\"y\":175}", side_effect: true }
-  - { expect: home, action: wait, value: "3000", verify: true }
+  - { expect: composer, action: tap_at, target: { text_any: ["回复", "Reply", "发布", "Post"] }, value: "{\"x\":964,\"y\":176}", side_effect: true }
+  - { expect: reply_sent, action: wait, value: "3000", verify: true }
 known_interrupts:
   - { screen: update_dialog, action: tap, target: { text_any: ["Not now", "以后再说", "暂不", "取消"] } }
-  # 任务开始时 X 可能停在详情/回复页 — 期望 main_nav 时自动返回

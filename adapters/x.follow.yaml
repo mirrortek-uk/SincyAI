@@ -1,30 +1,32 @@
-# X (Twitter) 关注设备自动化 App Adapter (v1)。
+# X (Twitter) 关注设备自动化 App Adapter (v6)。
 # 与 x.publish_post 同一策略: 不走付费 API, 走设备自动化; Sincy 签名发布,
-# 设备只执行签名有效且 App 版本在范围内的版本。锚点为占位, 真机核验后替换。
+# 设备只执行签名有效且 App 版本在范围内的版本。
 # 关注目标账号来自 task_context.target_handle (数据, 不参与签名)。
+# v6 真机核验 (X 12.45.1-prod.01, 中文 locale, 1080x2184):
+#   home 顶栏 id: home_navigation_bar_title; 底部导航 "探索" tab
+#   探索页: 顶部搜索框占位 "搜索"; 搜索建议首行在搜索框正下方
+#   资料页 id: UserProfileScreen, 右上 "关注" 按钮
 adapter: x.follow
-version: 1
+version: 13
 app:
   package: com.twitter.android
   version_range: ">=10.0"
 screens:
-  main_nav:
+  home:
     anchors:
-      - { text_any: ["主页", "Home"] }
-      - { text_any: ["探索", "Explore", "搜索", "Search"] }
+      - { id: "home_navigation_bar_title" }
   search:
     anchors:
-      - { text_any: ["搜索", "Search", "Search on X"] }
+      - { text_any: ["当前趋势", "Trending"] }
+  search_query:
+    anchors:
+      - { id: "SearchQuery" }
   search_results:
     anchors:
-      - { text_any: ["用户", "People", "账号", "Accounts"] }
+      - { id: "Search" }
   profile:
     anchors:
-      - { text_any: ["关注", "Follow"] }
-      - { text_any: ["粉丝", "followers", "正在关注", "Following"] }
-  following_confirm:
-    anchors:
-      - { text_any: ["正在关注", "Following"] }
+      - { id: "UserProfileScreen" }
   challenge:
     anchors:
       - { text_any: ["Verify you are human", "unusual activity", "安全验证", "人机验证"] }   # always -> WAITING_USER
@@ -32,11 +34,25 @@ screens:
     anchors:
       - { text_any: ["Update now", "立即更新"] }
 flow:
-  - { expect: main_nav, action: tap, target: { text_any: ["搜索", "Search", "探索", "Explore"] } }
-  - { expect: search, action: set_text, target: { id: "search_input" }, value: "ctx.target_handle" }
-  - { expect: search, action: tap, target: { text_any: ["搜索", "Search"] } }
-  - { expect: search_results, action: tap, target: { text_any: ["用户", "People"] } }
-  - { expect: profile, action: tap, target: { text_any: ["关注", "Follow"] }, side_effect: true }
-  - { expect: following_confirm, action: back, verify: true }
+  - { expect: home, action: wait, value: "4000" }
+  - { expect: home, action: tap, target: { text_any: ["探索", "Explore"] } }
+  - { expect: search, action: wait, value: "3000" }
+  # 探索页顶部搜索框 (占位 "搜索"), 点开后输入框聚焦
+  - { expect: search, action: tap_at, target: { text_any: ["当前趋势", "Trending"] }, value: "{\"x\":550,\"y\":176}" }
+  - { expect: search_query, action: wait, value: "1500" }
+  - { expect: search_query, action: set_text, target: { text_any: ["尝试搜索用户、话题或关键词", "搜索", "Search"] }, value: "ctx.target_handle" }
+  - { expect: search_query, action: wait, value: "2500" }
+  # 点首行建议 (即查询本身) -> 搜索结果页
+  - { expect: search_query, action: tap_at, target: { id: "SearchQuery" }, value: "{\"x\":540,\"y\":334}" }
+  - { expect: search_results, action: wait, value: "2500" }
+  # "用户" tab
+  - { expect: search_results, action: tap, target: { text: "用户" } }
+  - { expect: search_results, action: wait, value: "2500" }
+  # 首个用户结果行 (tabs 正下方, 真机 1080x2184)
+  - { expect: search_results, action: tap_at, target: { id: "Search" }, value: "{\"x\":540,\"y\":520}" }
+  - { expect: profile, action: wait, value: "3000" }
+  - { expect: profile, action: tap, target: { text: "关注" }, side_effect: true }
+  - { expect: profile, action: wait, value: "3500" }
+  - { expect: profile, action: wait, value: "2000", verify: true }
 known_interrupts:
   - { screen: update_dialog, action: tap, target: { text_any: ["Not now", "以后再说", "暂不", "取消"] } }

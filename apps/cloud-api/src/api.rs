@@ -1200,8 +1200,36 @@ async fn get_agent_task(
         ))
     })?;
 
-    let platform: String = task.get("platform");
-    let action: String = task.get("action");
+    // platform/action 优先取路由表; 直插任务没有 route 行时回退到 context, 且绝不 unwrap (NULL 会 panic 断开设备连接)
+    let ctx0 = task
+        .try_get::<serde_json::Value, _>("context")
+        .unwrap_or(serde_json::Value::Null);
+    let platform: String = task
+        .try_get::<Option<String>, _>("platform")
+        .ok()
+        .flatten()
+        .or_else(|| {
+            ctx0.get("platform")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        })
+        .unwrap_or_default();
+    let action: String = task
+        .try_get::<Option<String>, _>("action")
+        .ok()
+        .flatten()
+        .or_else(|| {
+            ctx0.get("action")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        })
+        .unwrap_or_default();
+    if platform.is_empty() || action.is_empty() {
+        return Err(app_error_response(AppError::non_retryable(
+            "task_no_action",
+            "task has no platform/action (route row and context both missing)",
+        )));
+    }
 
     // adapter 选择: system 平台按 action 推导 (setup_install[:app] -> system.setup_install[.app]);
     // 其他平台仍由 device 路由 capability 的 constraints 指定
@@ -1319,6 +1347,10 @@ async fn get_agent_task(
     let mut task_context = task
         .try_get::<serde_json::Value, _>("context")
         .unwrap_or(serde_json::Value::Null);
+    // context 为 NULL 时也要建对象, 否则 package_text 注入不进去 (publish 任务常见)
+    if !task_context.is_object() {
+        task_context = serde_json::json!({});
+    }
     if let Some(obj) = task_context.as_object_mut() {
         obj.insert(
             "package_text".into(),

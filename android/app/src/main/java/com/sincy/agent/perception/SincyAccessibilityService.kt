@@ -173,24 +173,24 @@ class SincyAccessibilityService : AccessibilityService() {
             val cx = r.centerX()
             val cy = r.centerY()
             android.util.Log.e("SincyAgent", "tap: target=$target at ($cx,$cy) bounds=$r")
-            node.recycle()
-            root.recycle()
-            if (tapAt(svc, cx, cy, 80)) return true
-            android.util.Log.e("SincyAgent", "tap: gesture failed at ($cx,$cy), fallback click")
-            // 手势失败: 退回语义 click
-            val root2 = svc.rootInActiveWindow ?: return false
-            val node2 = findNode(root2, target) ?: run { root2.recycle(); return false }
-            var n: AccessibilityNodeInfo? = node2
+            // 优先语义 click: 坐标手势在系统导航栏区域会被手势导航吞掉, ACTION_CLICK 不会
+            var n: AccessibilityNodeInfo? = node
             var clickable: AccessibilityNodeInfo? = null
             while (n != null) {
                 if (n.isClickable) { clickable = n; break }
                 n = n.parent
             }
-            val ok = clickable != null && clickable.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-            android.util.Log.e("SincyAgent", "tap: fallback click ok=$ok clickable=${clickable != null}")
-            node2.recycle()
-            root2.recycle()
-            return ok
+            if (clickable != null && clickable.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                android.util.Log.e("SincyAgent", "tap: semantic click ok at ($cx,$cy)")
+                node.recycle()
+                root.recycle()
+                return true
+            }
+            node.recycle()
+            root.recycle()
+            if (tapAt(svc, cx, cy, 80)) return true
+            android.util.Log.e("SincyAgent", "tap: gesture failed at ($cx,$cy)")
+            return false
         }
 
         /** dispatchGesture click at an exact (already humanized) point, with a hold. */

@@ -215,21 +215,27 @@ async fn x_post_flows_through_device_agent_to_completed() {
         agency_id: agency.to_string(),
         signing_key: DEV_SIGNING_KEY.to_vec(),
     };
-    let screens = vec![
+    // v6 真机核验 flow: home(tap_at FAB) -> composer x3 -> tap_at post(side_effect) -> home(verify)
+    let home = || {
         MockSnapshot::new(
-            vec!["com.twitter.android:id/bottom_bar".into()],
+            vec!["home_navigation_bar_title".into()],
             vec!["Home".into()],
-        ),
+        )
+    };
+    let composer = || {
         MockSnapshot::new(
-            vec!["com.twitter.android:id/tweet_text".into()],
+            vec!["ComposerRoot".into()],
             vec!["What's happening?".into()],
-        ),
-        MockSnapshot::new(
-            vec!["com.twitter.android:id/tweet_text".into()],
-            vec!["What's happening?".into()],
-        ),
-        MockSnapshot::new(vec![], vec!["Your post was sent".into()]),
-        MockSnapshot::new(vec![], vec!["Your post was sent".into()]),
+        )
+    };
+    let screens = vec![
+        home(),
+        composer(),
+        composer(),
+        composer(),
+        composer(),
+        home(),
+        home(),
     ];
     let agent_handle = tokio::spawn(async move {
         agent

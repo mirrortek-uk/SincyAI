@@ -34,6 +34,10 @@ import java.security.MessageDigest
  *     service starts and holds the WSS control channel.
  */
 class MainActivity : AppCompatActivity() {
+    private lateinit var server: EditText
+    private lateinit var code: EditText
+    private lateinit var pair: Button
+    private lateinit var start: Button
 
     companion object {
         @Volatile
@@ -100,17 +104,17 @@ class MainActivity : AppCompatActivity() {
             text = "Sincy Agent v${BuildConfig.VERSION_NAME}"
             textSize = 12f
         }
-        val server = EditText(this).apply {
+        server = EditText(this).apply {
             hint = "Cloud URL"
             setText(BuildConfig.DEFAULT_SERVER)
         }
-        val code = EditText(this).apply {
+        code = EditText(this).apply {
             hint = "配对码 (控制台生成的 4 位数字)"
             inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
         }
-        val pair = Button(this).apply { text = "Pair this device" }
+        pair = Button(this).apply { text = "Pair this device" }
         val openA11y = Button(this).apply { text = "Enable accessibility service" }
-        val start = Button(this).apply { text = "Start agent" }
+        start = Button(this).apply { text = "Start agent" }
         val antilock = android.widget.CheckBox(this).apply {
             text = "防锁屏 (agent 运行时屏幕常亮, 需要系统设置授权)"
             isChecked = prefs().getBoolean("antilock", true)
@@ -223,6 +227,60 @@ class MainActivity : AppCompatActivity() {
         if (!a11yEnabled()) {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
             Toast.makeText(this, "请打开 Sincy Agent 的无障碍服务 (重装后系统会断开)", Toast.LENGTH_LONG).show()
+        }
+        // 调试钩子 (仅 debug 构建): 支持 adb headless 配对/启动
+        //   adb shell am start -n com.sincy.agent/.MainActivity --es pair_code 1234 [--es server http://...]
+        if (BuildConfig.DEBUG) {
+            applyDebugIntent(intent, server, code, pair, start)
+            applyDebugFile(server, code, pair, start)
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        // 冷启动后 onCreate 已处理; 热实例由 force-stop 后的冷启动覆盖
+        android.util.Log.i("SincyAgent", "onNewIntent extras: ${intent.extras}")
+    }
+
+    /// 调试钩子: adb push 一个 JSON 到 /sdcard/Android/data/com.sincy.agent/files/sincy_agent_debug.json 即可 headless 配对/启动
+    ///   {"server":"http://127.0.0.1:18081","pair_code":"1234","start":true}
+    private fun applyDebugFile(
+        server: android.widget.EditText,
+        code: android.widget.EditText,
+        pair: android.widget.Button,
+        start: android.widget.Button,
+    ) {
+        try {
+            val f = java.io.File(getExternalFilesDir(null), "sincy_agent_debug.json")
+            if (!f.exists()) return
+            val j = org.json.JSONObject(f.readText())
+            android.util.Log.i("SincyAgent", "debug file: $j")
+            j.optString("server").takeIf { it.isNotBlank() }?.let { server.setText(it) }
+            j.optString("pair_code").takeIf { it.isNotBlank() }?.let { code.setText(it) }
+            if (j.has("pair_code")) pair.performClick()
+            if (j.optBoolean("start", false)) start.performClick()
+        } catch (e: Exception) {
+            android.util.Log.w("SincyAgent", "debug file parse failed: ${e.message}")
+        }
+    }
+
+    private fun applyDebugIntent(
+        intent: Intent?,
+        server: android.widget.EditText,
+        code: android.widget.EditText,
+        pair: android.widget.Button,
+        start: android.widget.Button,
+    ) {
+        android.util.Log.i("SincyAgent", "debug intent extras: ${intent?.extras}")
+        intent?.getStringExtra("server")?.let { if (it.isNotBlank()) server.setText(it) }
+        intent?.getStringExtra("pair_code")?.let { code.setText(it) }
+        if (!intent?.getStringExtra("pair_code").isNullOrEmpty()) {
+            android.util.Log.i("SincyAgent", "debug auto-pair with code")
+            pair.performClick()
+        }
+        if (intent?.getBooleanExtra("start", false) == true) {
+            start.performClick()
         }
     }
 
