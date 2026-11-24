@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
-import Link from "next/link";
+
 import "./globals.css";
-import { Nav } from "@/components/Nav";
+import { Shell } from "@/components/Shell";
 
 export const metadata: Metadata = {
   title: "Sincy Console",
@@ -15,9 +15,16 @@ export default function RootLayout({
 }) {
   return (
     <html lang="zh-CN">
+      <head>
+        <script
+          dangerouslySetInnerHTML={{
+            __html:
+              "try{var t=localStorage.getItem('sincy-theme');if(t==='dark')document.documentElement.setAttribute('data-theme','dark');}catch(e){}",
+          }}
+        />
+      </head>
       <body>
-        <Nav />
-        <main className="content">{children}</main>
+        <Shell>{children}</Shell>
       </body>
     </html>
   );

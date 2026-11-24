@@ -1,0 +1,199 @@
+"use client";
+
+// 🧑‍🚀 数字员工: 员工列表 + 本周期 10 步 + 策略配置(可改,落库新版本) + 粉丝轨迹 + 学习实验 + 技能
+
+import { useEffect, useState } from "react";
+
+import {
+  api,
+  type AccountMetricAccount,
+  type CycleDetail,
+  type CycleItem,
+  type EmployeeItem,
+  type InsightItem,
+  type StrategyVersion,
+} from "@/lib/api";
+import { Badge, Err, Loading, Spark, fmtDelta } from "@/components/ui";
+
+const STEPS = ["observe", "understand", "decide", "plan", "create", "review", "execute", "measure", "learn", "adapt"];
+const STEP_ZH: Record<string, string> = {
+  observe: "观察", understand: "理解", decide: "决策", plan: "计划", create: "创作",
+  review: "审核", execute: "执行", measure: "衡量", learn: "学习", adapt: "适应",
+};
+
+export function EmployeesView() {
+  const [emps, setEmps] = useState<EmployeeItem[] | null>(null);
+  const [sel, setSel] = useState<string | null>(null);
+  const [cycles, setCycles] = useState<CycleItem[] | null>(null);
+  const [detail, setDetail] = useState<CycleDetail | null>(null);
+  const [strat, setStrat] = useState<StrategyVersion | null>(null);
+  const [insights, setInsights] = useState<InsightItem[] | null>(null);
+  const [metrics, setMetrics] = useState<AccountMetricAccount[]>([]);
+  const [err, setErr] = useState<string | null>(null);
+  const [saved, setSaved] = useState<string | null>(null);
+  // 策略编辑表单
+  const [fTarget, setFTarget] = useState<string>("");
+  const [fCadence, setFCadence] = useState<string>("7");
+  const [fExplore, setFExplore] = useState<string>("0.2");
+  const [fAuto, setFAuto] = useState(false);
+  const [fPillars, setFPillars] = useState<string>("");
+
+  useEffect(() => {
+    api.listEmployees().then((d) => {
+      setEmps(d.items);
+      if (d.items.length > 0) setSel((s) => s ?? d.items[0].id);
+    }).catch((e) => setErr(String(e)));
+    api.listAccountMetricsRecent().then((d) => setMetrics(d.accounts)).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!sel) return;
+    setCycles(null); setDetail(null); setStrat(null); setInsights(null); setSaved(null);
+    api.listCycles(sel, 10).then((d) => {
+      setCycles(d.items);
+      if (d.items[0]) api.getCycle(d.items[0].id).then(setDetail).catch(() => {});
+    }).catch((e) => setErr(String(e)));
+    api.listStrategyVersions(sel).then((d) => {
+      const act = d.items.find((x) => x.status === "ACTIVE") ?? d.items[0] ?? null;
+      setStrat(act);
+      if (act) {
+        setFTarget(act.strategy.target_followers != null ? String(act.strategy.target_followers) : "");
+        setFCadence(String(act.strategy.cadence_per_week ?? 7));
+        setFExplore(String(act.strategy.exploration_budget ?? 0.2));
+        setFPillars((act.strategy.pillars ?? []).join(", "));
+      }
+    }).catch(() => {});
+    api.listInsights(sel).then((d) => setInsights(d.items.slice(0, 5))).catch(() => {});
+    const emp = emps?.find((e) => e.id === sel);
+    if (emp) setFAuto(emp.auto_publish);
+  }, [sel]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (err) return <Err e={err} />;
+  if (!emps) return <Loading />;
+  const emp = emps.find((e) => e.id === sel) ?? null;
+  const myMetric = metrics.find((m) => m.employee_id === sel);
+  const target = strat?.strategy.target_followers ?? null;
+  const now = myMetric?.followers ?? null;
+  const progress = target && now ? Math.min(100, Math.round((now / target) * 100)) : null;
+
+  const saveStrategy = async () => {
+    if (!sel || !strat) return;
+    setSaved(null);
+    try {
+      const next = {
+        ...strat.strategy,
+        cadence_per_week: Number(fCadence) || 7,
+        exploration_budget: Number(fExplore) || 0.2,
+        target_followers: fTarget.trim() === "" ? null : Number(fTarget),
+        pillars: fPillars.split(",").map((s) => s.trim()).filter(Boolean),
+      };
+      await api.createStrategyVersion(sel, next);
+      if (emp) await api.patchEmployee(sel, { auto_publish: fAuto });
+      setSaved("已保存为新策略版本 ✅");
+    } catch (e) { setSaved(`保存失败: ${e}`); }
+  };
+
+  return (
+    <section className="view active">
+      <h1>🧑‍🚀 数字员工</h1>
+      <p className="lede">业务中心之一。每个员工按「观察→理解→决策→计划→创作→审核→执行→衡量→学习→适应」10 步自主运营一个账号，目标是涨粉。</p>
+
+      <div className="grid g3">
+        <div className="card">
+          <h3>员工列表 <span className="sp" /></h3>
+          {emps.map((e) => (
+            <div
+              key={e.id}
+              onClick={() => setSel(e.id)}
+              style={{
+                border: `1px solid ${e.id === sel ? "var(--emp)" : "var(--line2)"}`,
+                background: e.id === sel ? "var(--emp-bg)" : "transparent",
+                borderRadius: 10, padding: 10, marginBottom: 8, cursor: "pointer",
+              }}
+            >
+              <div className="row">
+                <b>{e.name}</b>
+                <Badge kind={e.status === "RUNNING" ? "run" : "pend"}>{e.status}</Badge>
+                <span className="sp" /><span className="sub">{e.channel}</span>
+              </div>
+              <div className="sub" style={{ marginTop: 4 }}>{e.role} · {e.auto_publish ? "自动发布" : "进待审队列"}</div>
+            </div>
+          ))}
+          {emps.length === 0 && <p className="sub">还没有员工，先在设置里创建品牌与员工。</p>}
+        </div>
+
+        <div className="card" style={{ gridColumn: "span 2" }}>
+          <h3>{emp?.name ?? "—"} · 本周期
+            <span className="sp" />
+            <span className="sub">{cycles?.[0] ? `cycle ${cycles[0].id.slice(0, 8)} · ${cycles[0].trigger} · ${cycles[0].created_at.slice(0, 16).replace("T", " ")}` : ""}</span>
+          </h3>
+          <div className="cycle mt14">
+            {STEPS.map((s, i) => {
+              const t = detail?.tasks.find((x) => x.step === s);
+              const cls = t ? (t.state === "SUCCEEDED" || t.state === "DONE" ? "done" : "now") : "";
+              return <div key={s} className={`cstep ${cls}`}>{i + 1} {STEP_ZH[s]}</div>;
+            })}
+          </div>
+          <div className="sub mt14">
+            {detail?.summary ? <>决策: {String((detail.summary as Record<string, unknown>).selected_opportunity ?? "—")}</> : "暂无周期数据"}
+          </div>
+        </div>
+      </div>
+
+      <div className="grid g3 mt14">
+        <div className="card">
+          <h3>⚙️ 策略配置 <span className="sub">(改完保存, 落库为新版本)</span></h3>
+          <div className="field"><div><label>目标 KPI · 粉丝</label><div className="hint">涨粉是运营目标</div></div>
+            <input type="number" value={fTarget} onChange={(e) => setFTarget(e.target.value)} style={{ width: 90 }} placeholder="如 10000" /></div>
+          <div className="field"><div><label>发布节奏 / 周</label></div>
+            <input type="number" value={fCadence} onChange={(e) => setFCadence(e.target.value)} style={{ width: 60 }} /></div>
+          <div className="field"><div><label>自动发布</label><div className="hint">关 = 进待审队列</div></div>
+            <div className={`toggle${fAuto ? " on" : ""}`} onClick={() => setFAuto(!fAuto)} /></div>
+          <div className="field"><div><label>探索预算</label><div className="hint">试新角度的比例</div></div>
+            <input type="number" step="0.1" value={fExplore} onChange={(e) => setFExplore(e.target.value)} style={{ width: 60 }} /></div>
+          <div className="field mb0"><div><label>内容支柱 pillars</label><div className="hint">逗号分隔; 空 = 不做相关性过滤</div></div>
+            <input type="text" value={fPillars} onChange={(e) => setFPillars(e.target.value)} style={{ width: 140 }} placeholder="ai agents, llm ops" /></div>
+          <div style={{ marginTop: 10 }}>
+            <button className="btn emp sm" onClick={saveStrategy}>保存策略</button>
+            {saved && <span className="sub" style={{ marginLeft: 8 }}>{saved}</span>}
+          </div>
+        </div>
+
+        <div className="card">
+          <h3>📈 粉丝轨迹 <span className="sub">{myMetric ? `${myMetric.platform} · @${myMetric.account_id}` : "未绑定账号"}</span></h3>
+          {myMetric ? (
+            <>
+              <div className="kpi">{myMetric.followers ?? "—"} <span className="sub" style={{ fontSize: 13 }}>粉丝数</span> {fmtDelta(myMetric.delta_7d)}</div>
+              <Spark points={myMetric.series.map((s) => s.followers)} />
+              <div className="sub">
+                {target ? `目标 ${target.toLocaleString()} · 进度 ${progress ?? "—"}% · 7 日 Δ ${myMetric.delta_7d ?? "—"}` : "未设目标 KPI — 在左侧策略里配置 target_followers"}
+              </div>
+              {progress !== null && (
+                <div style={{ marginTop: 6, height: 8, borderRadius: 4, background: "var(--panel2)" }}>
+                  <div style={{ width: `${progress}%`, height: "100%", borderRadius: 4, background: "var(--emp)" }} />
+                </div>
+              )}
+            </>
+          ) : (
+            <>
+              <div className="kpi">—</div>
+              <Spark points={[]} dashed />
+              <div className="sub">read_followers 设备任务已启用 (adapter active), 设备接入后自动点亮; 也可 POST /intel/account-metrics 灌入 API 样本</div>
+            </>
+          )}
+        </div>
+
+        <div className="card">
+          <h3>🧠 学习 & 实验 <span className="sub">(断点②已闭合)</span></h3>
+          {!insights && <Loading />}
+          {insights?.map((i) => (
+            <div key={i.id} style={{ fontSize: 12, borderLeft: "2px solid var(--emp)", paddingLeft: 10, marginBottom: 8 }}>
+              <b>insight</b>: {i.content.slice(0, 80)}<br /><span className="sub">conf {i.confidence} · {i.created_at.slice(0, 16).replace("T", " ")}</span>
+            </div>
+          ))}
+          {insights?.length === 0 && <p className="sub">还没有学习结论 — 周期跑起来后由 Learn/Adapt 写入。</p>}
+        </div>
+      </div>
+    </section>
+  );
+}

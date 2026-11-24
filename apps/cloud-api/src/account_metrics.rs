@@ -23,10 +23,75 @@ fn err(e: impl ToString) -> axum::response::Response {
 }
 
 pub fn routes() -> axum::Router<AppState> {
-    axum::Router::new().route(
-        "/intel/account-metrics",
-        axum::routing::post(ingest_sample).get(list_samples),
+    axum::Router::new()
+        .route(
+            "/intel/account-metrics",
+            axum::routing::post(ingest_sample).get(list_samples),
+        )
+        .route(
+            "/intel/account-metrics/recent",
+            axum::routing::get(list_recent),
+        )
+}
+
+/// GET /intel/account-metrics/recent — 每账号最新样本 + 窗口增量 + 近 30 条序列 (console 涨粉曲线用)
+pub async fn list_recent(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthCtx>,
+) -> Result<Json<Value>, axum::response::Response> {
+    let pool = state.pool().map_err(err)?;
+    let rows = sqlx::query(
+        "SELECT DISTINCT ON (platform, account_id) platform, account_id, employee_id, brand_id,
+                followers, following, posts_count, extras, source, observed_at
+         FROM account_metric_samples
+         WHERE agency_id = $1
+         ORDER BY platform, account_id, observed_at DESC",
     )
+    .bind(auth.agency_id.as_uuid())
+    .fetch_all(pool)
+    .await
+    .map_err(err)?;
+    let mut accounts: Vec<Value> = Vec::new();
+    for r in &rows {
+        let platform: String = r.get("platform");
+        let account_id: String = r.get("account_id");
+        let series = sqlx::query(
+            "SELECT followers, observed_at FROM account_metric_samples
+             WHERE agency_id = $1 AND platform = $2 AND account_id = $3 AND followers IS NOT NULL
+             ORDER BY observed_at DESC LIMIT 30",
+        )
+        .bind(auth.agency_id.as_uuid())
+        .bind(&platform)
+        .bind(&account_id)
+        .fetch_all(pool)
+        .await
+        .map_err(err)?;
+        let latest = series.first();
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(7);
+        let baseline = series
+            .iter()
+            .filter(|r| r.get::<chrono::DateTime<chrono::Utc>, _>("observed_at") <= cutoff)
+            .last();
+        let now = latest.and_then(|r| r.get::<Option<i64>, _>("followers"));
+        let base = baseline.and_then(|r| r.get::<Option<i64>, _>("followers"));
+        accounts.push(json!({
+            "platform": platform,
+            "account_id": account_id,
+            "employee_id": r.get::<Option<uuid::Uuid>, _>("employee_id"),
+            "brand_id": r.get::<Option<uuid::Uuid>, _>("brand_id"),
+            "followers": r.get::<Option<i64>, _>("followers"),
+            "following": r.get::<Option<i64>, _>("following"),
+            "posts_count": r.get::<Option<i64>, _>("posts_count"),
+            "source": r.get::<String, _>("source"),
+            "observed_at": r.get::<chrono::DateTime<chrono::Utc>, _>("observed_at"),
+            "delta_7d": match (now, base) { (Some(n), Some(b)) => json!(n - b), _ => Value::Null },
+            "series": series.iter().rev().map(|r| json!({
+                "followers": r.get::<Option<i64>, _>("followers"),
+                "observed_at": r.get::<chrono::DateTime<chrono::Utc>, _>("observed_at"),
+            })).collect::<Vec<_>>(),
+        }));
+    }
+    Ok(Json(json!({ "accounts": accounts })))
 }
 
 /// POST /intel/account-metrics — 样本灌入 (API route / 测试 / 设备回流补录), 租户隔离

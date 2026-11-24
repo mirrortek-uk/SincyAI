@@ -842,4 +842,88 @@ export const api = {
     req<{ opportunities: number; upserted: number }>("/intel/opportunities", { method: "POST" }),
   approvePackage: (id: string) =>
     req<{ id: string; approval_status: string }>(`/packages/${id}/approve`, { method: "POST" }),
+  // --- console redesign ---
+  listFactoryBriefs: () => req<{ briefs: FactoryBrief[]; total: number }>("/factory/briefs"),
+  createFactoryBrief: (body: {
+    trigger: "opportunity_driven" | "calendar_driven" | "manual";
+    brand_id: string;
+    opportunity_id?: string;
+    signal_id?: string;
+    topic?: string;
+    goal?: string;
+    platforms: string[];
+    angle?: string;
+    audience?: string;
+    cta?: string;
+  }) => req<{ brief_id: string; status: string }>("/factory/briefs", { method: "POST", body: JSON.stringify(body) }),
+  runFactoryBrief: (id: string) =>
+    req<{ brief_id: string; status: string }>(`/factory/briefs/${encodeURIComponent(id)}/run`, { method: "POST" }),
+  runFactoryLearn: (brandId?: string, events: unknown[] = []) =>
+    req<{ learnings: number }>("/factory/learn", {
+      method: "POST",
+      body: JSON.stringify({ ...(brandId ? { brand_id: brandId } : {}), events }),
+    }),
+  listAccountMetricsRecent: () => req<{ accounts: AccountMetricAccount[] }>("/intel/account-metrics/recent"),
+  listCapabilities: (platform: string) =>
+    req<{ items: CapabilityItem[] }>(`/capabilities?platform=${encodeURIComponent(platform)}`),
+  listStrategyVersions: (id: string) => req<{ items: StrategyVersion[] }>(`/employees/${id}/strategy`),
+  createStrategyVersion: (id: string, strategy: Record<string, unknown>) =>
+    req<{ version: number; status: string }>(`/employees/${id}/strategy/versions`, {
+      method: "POST",
+      body: JSON.stringify({ strategy }),
+    }),
 };
+
+
+// ===== Console Redesign 新增 =====
+
+export interface FactoryBrief {
+  brief_id: string;
+  brand_id: string;
+  trigger: string;
+  seed_opportunity_id: string | null;
+  seed_signal_id: string | null;
+  goal: string;
+  platforms: string[];
+  angle: string;
+  status: string;
+  created_at: string;
+}
+
+export interface AccountMetricAccount {
+  platform: string;
+  account_id: string;
+  employee_id: string | null;
+  brand_id: string | null;
+  followers: number | null;
+  following: number | null;
+  posts_count: number | null;
+  source: string;
+  observed_at: string;
+  delta_7d: number | null;
+  series: { followers: number | null; observed_at: string }[];
+}
+
+export interface CapabilityItem {
+  platform: string;
+  action: string;
+  route: string;
+  status: string;
+  constraints: Record<string, unknown>;
+  priority: number;
+  verified_at: string | null;
+  evidence_ref: string | null;
+}
+
+export interface StrategyVersion {
+  version: number;
+  status: string;
+  strategy: Record<string, unknown> & {
+    pillars?: string[];
+    cadence_per_week?: number;
+    formats?: string[];
+    risk_tolerance?: number;
+    exploration_budget?: number;
+    target_followers?: number | null;
+  };
+}

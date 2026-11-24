@@ -1,47 +1,54 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { api, getToken, type Health, type Me, type VersionInfo } from "@/lib/api";
+// Sincy Console Redesign 首页: 单页视图切换 (侧栏/rail 通过 sincy:go 事件驱动)
 
-export default function OverviewPage() {
-  const [health, setHealth] = useState<Health | null>(null);
-  const [version, setVersion] = useState<VersionInfo | null>(null);
-  const [me, setMe] = useState<Me | null>(null);
-  const [error, setError] = useState<string | null>(null);
+import { useSearchParams } from "next/navigation";
+import { Suspense, useEffect, useState } from "react";
+
+import type { ViewId } from "@/components/Shell";
+import { ApprovalsView, IntelView, SignalsView, SourcesView } from "@/components/views/Data";
+import { CommandView } from "@/components/views/Command";
+import { EmployeesView } from "@/components/views/Employees";
+import { FactoryView } from "@/components/views/Factory";
+import { AnalyticsView, DevicesView, LineageView } from "@/components/views/Runtime";
+import { ArchView, KillView, SettingsView } from "@/components/views/Config";
+
+function ConsoleInner() {
+  const search = useSearchParams();
+  const [view, setView] = useState<ViewId>((search.get("v") as ViewId) || "command");
+  const [openNew, setOpenNew] = useState(search.get("new") === "1");
 
   useEffect(() => {
-    if (!getToken()) return; // 未登录: Nav 负责跳 /login, 这里不发请求避免 401 噪音
-    Promise.all([api.health(), api.version(), api.me()])
-      .then(([h, v, m]) => {
-        setHealth(h);
-        setVersion(v);
-        setMe(m);
-      })
-      .catch((e) => setError(String(e)));
+    const h = (e: Event) => setView((e as CustomEvent<ViewId>).detail);
+    window.addEventListener("sincy:go", h);
+    return () => window.removeEventListener("sincy:go", h);
   }, []);
 
   return (
-    <div>
-      <h1>总览</h1>
-      {me && (
-        <div className="panel">
-          <h3>{me.name}</h3>
-          <p className="muted">
-            机构 ID: {me.id} · 套餐: {me.plan} · 你的角色: {me.role}
-          </p>
-        </div>
-      )}
-      {error && <p className="muted">API 不可达: {error}</p>}
-      <div className="row">
-        <div className="panel">
-          <h3>健康检查</h3>
-          <pre>{health ? JSON.stringify(health, null, 2) : "loading..."}</pre>
-        </div>
-        <div className="panel">
-          <h3>版本</h3>
-          <pre>{version ? JSON.stringify(version, null, 2) : "loading..."}</pre>
-        </div>
+    <>
+      <div className={view === "command" ? "view active" : "view"}><CommandView /></div>
+      <div className={view === "employees" ? "view active" : "view"}><EmployeesView /></div>
+      <div className={view === "factory" ? "view active" : "view"}>
+        <FactoryView openNew={openNew && view === "factory"} />
       </div>
-    </div>
+      <div className={view === "approvals" ? "view active" : "view"}><ApprovalsView /></div>
+      <div className={view === "intel" ? "view active" : "view"}><IntelView /></div>
+      <div className={view === "signals" ? "view active" : "view"}><SignalsView /></div>
+      <div className={view === "sources" ? "view active" : "view"}><SourcesView /></div>
+      <div className={view === "devices" ? "view active" : "view"}><DevicesView /></div>
+      <div className={view === "analytics" ? "view active" : "view"}><AnalyticsView /></div>
+      <div className={view === "lineage" ? "view active" : "view"}><LineageView /></div>
+      <div className={view === "settings" ? "view active" : "view"}><SettingsView /></div>
+      <div className={view === "arch" ? "view active" : "view"}><ArchView /></div>
+      <div className={view === "kill" ? "view active" : "view"}><KillView /></div>
+    </>
+  );
+}
+
+export default function ConsolePage() {
+  return (
+    <Suspense fallback={<p className="sub">加载中…</p>}>
+      <ConsoleInner />
+    </Suspense>
   );
 }
