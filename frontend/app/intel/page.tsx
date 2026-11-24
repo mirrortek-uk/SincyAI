@@ -584,7 +584,7 @@ export default function IntelPage() {
                       return d ? d.name : ind;
                     }).join(", ") || "-"}
                   </td>
-                  <td className="muted">{i.relevance_score !== undefined ? i.relevance_score.toFixed(1) : "-"}</td>
+                  <td className="muted">{i.relevance_score != null ? i.relevance_score.toFixed(1) : "-"}</td>
                   <td className="muted">{i.collected_at.slice(0, 19).replace("T", " ")}</td>
                 </tr>
               );

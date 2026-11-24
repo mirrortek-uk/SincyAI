@@ -91,7 +91,8 @@ fn apply_enrich(entities: &mut [IntelEntity], en: &Value) {
     let topics: Vec<String> = serde_json::from_value(en["topic_tags"].clone()).unwrap_or_default();
     let lang = en["language"].as_str().unwrap_or("").to_string();
     let q = en["quality_score"].as_f64().unwrap_or(0.5);
-    let rel = en["relevance_score"].as_f64().unwrap_or(0.0);
+    // relevance_score 不再由入库层提供 (per-brand 相关性在下游回填表), 这里不再覆盖
+    let rel = en["relevance_score"].as_f64();
     for e in entities.iter_mut() {
         e.industry_tags = inds.clone();
         if e.topic_tags.is_empty() {
@@ -99,7 +100,9 @@ fn apply_enrich(entities: &mut [IntelEntity], en: &Value) {
         }
         e.language = lang.clone();
         e.quality_score = q;
-        e.relevance_score = rel;
+        if let Some(rel) = rel {
+            e.relevance_score = rel;
+        }
         e.confidence = (q * 0.6 + 0.4).min(1.0);
     }
 }

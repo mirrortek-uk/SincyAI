@@ -17,6 +17,7 @@ pub mod pipeline;
 pub mod pulse;
 pub mod registry;
 pub mod router;
+pub mod topic;
 
 pub use adapter::{EmployeeBrief, adapt_for_employee};
 pub use model::{AccessMethod, IntelItem, IntelKind, Opportunity, SocialContent, Source, Trend};

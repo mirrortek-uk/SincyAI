@@ -138,13 +138,13 @@ pub async fn ingest_record(pool: &sqlx::PgPool, record: &RawRecord) -> Result<bo
             "INSERT INTO intelligence_entities
                (entity_id, entity_type, source_id, dataset_id, external_id, url, title, payload,
                 industry_tags, topic_tags, entities, geography, language, provenance,
-                confidence, quality_score, relevance_score, observed_at, updated_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18, now())
+                confidence, quality_score, observed_at, updated_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, now())
              ON CONFLICT (entity_id) DO UPDATE SET
                title = EXCLUDED.title, payload = EXCLUDED.payload,
                industry_tags = EXCLUDED.industry_tags, topic_tags = EXCLUDED.topic_tags,
                language = EXCLUDED.language, quality_score = EXCLUDED.quality_score,
-               relevance_score = EXCLUDED.relevance_score, confidence = EXCLUDED.confidence,
+               confidence = EXCLUDED.confidence,
                updated_at = now()",
         )
         .bind(&e.entity_id)
@@ -163,7 +163,7 @@ pub async fn ingest_record(pool: &sqlx::PgPool, record: &RawRecord) -> Result<bo
         .bind(&e.provenance)
         .bind(e.confidence)
         .bind(e.quality_score)
-        .bind(e.relevance_score)
+        // relevance_score 不入 entity 层 (恒 0 无意义), per-brand 相关性见 intel_entity_brand_relevance
         .bind(e.observed_at)
         .execute(pool)
         .await
@@ -455,7 +455,7 @@ async fn list_entities(
                 "topic_tags": r.get::<Value, _>("topic_tags"),
                 "language": r.get::<String, _>("language"),
                 "quality_score": r.get::<f64, _>("quality_score"),
-                "relevance_score": r.get::<f64, _>("relevance_score"),
+                "relevance_score": r.get::<Option<f64>, _>("relevance_score"),
                 "confidence": r.get::<f64, _>("confidence"),
                 "updated_at": r.get::<chrono::DateTime<chrono::Utc>, _>("updated_at"),
             })

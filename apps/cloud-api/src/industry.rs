@@ -251,10 +251,40 @@ async fn intel_feed(
     }
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     let items: Vec<Value> = scored
-        .into_iter()
+        .iter()
         .take(limit as usize)
-        .map(|(_, v)| v)
+        .map(|(_, v)| v.clone())
         .collect();
+    // per-brand 相关性回填: 实体层不再存恒 0 的 relevance_score, 按品牌落关联表 (migration 0041)
+    {
+        let mut tx = pool.begin().await.map_err(dberr)?;
+        sqlx::query(&format!(
+            "SET LOCAL app.current_agency_id = '{}'",
+            auth.agency_id.as_uuid()
+        ))
+        .execute(&mut *tx)
+        .await
+        .map_err(dberr)?;
+        for (score, v) in scored.iter().take(limit as usize) {
+            let dk = v.get("dedup_key").and_then(|x| x.as_str()).unwrap_or("");
+            if dk.is_empty() {
+                continue;
+            }
+            sqlx::query(
+                "INSERT INTO intel_entity_brand_relevance (dedup_key, brand_id, agency_id, score, updated_at)
+                 VALUES ($1, $2, $3, $4, now())
+                 ON CONFLICT (dedup_key, brand_id) DO UPDATE SET score = EXCLUDED.score, updated_at = now()",
+            )
+            .bind(dk)
+            .bind(bid)
+            .bind(auth.agency_id.as_uuid())
+            .bind(*score)
+            .execute(&mut *tx)
+            .await
+            .map_err(dberr)?;
+        }
+        tx.commit().await.map_err(dberr)?;
+    }
     Ok(Json(json!({
         "brand_id": bid,
         "profile_industries": cp.industries(),

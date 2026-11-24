@@ -262,7 +262,7 @@ export interface IntelItem {
   collected_at: string;
   industries?: string[];
   tags?: Record<string, unknown>;
-  relevance_score?: number;
+  relevance_score?: number | null;  // entity 层不再写恒 0, per-brand 相关性在 intel_entity_brand_relevance
 }
 
 export interface IndustryDef {

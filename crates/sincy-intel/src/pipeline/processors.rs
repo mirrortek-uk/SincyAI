@@ -421,7 +421,7 @@ impl Processor for UniversalClassifyProcessor {
     async fn process(
         &self,
         record: &RawRecord,
-        ctx: &ProcessingContext,
+        _ctx: &ProcessingContext, // brand_profile 不再于入库层使用 (per-brand 相关性下游回填)
     ) -> Result<ProcessingResult, String> {
         // 对已有实体做富化: 由 engine 在 pipeline 末尾对累积 entities 调用本 processor 的 enrich
         let text = text_of(record);
@@ -429,16 +429,13 @@ impl Processor for UniversalClassifyProcessor {
         let mut r = ProcessingResult::default();
         let mut e = base_entity(record, "classified", &text);
         e.industry_tags = inds.iter().map(|(i, _)| i.clone()).collect();
-        e.topic_tags = vec![text.chars().take(60).collect::<String>()];
+        e.topic_tags = crate::topic::extract_topics(&text, 5);
         e.language = lang_of(&text);
         e.quality_score = ((text.len() as f64 / 200.0).min(1.0) * 0.6 + 0.4).min(1.0);
-        if let Some(p) = &ctx.brand_profile {
-            let cp = industry::CustomerProfile::from_json(p);
-            let inds_v: Vec<String> = e.industry_tags.clone();
-            e.relevance_score = industry::relevance_score(&inds_v, &text, &cp) / 100.0;
-        }
+        // relevance 不在入库层算: 情报全局共享, per-brand 相关性由下游
+        // /brands/{id}/intel-feed 回填 intel_entity_brand_relevance (见 migration 0041)
         // 不产出新实体, 只产出富化结果供 engine 合并
-        r.side_effects.push(json!({"kind": "enrich", "record_id": record.id, "industry_tags": e.industry_tags, "topic_tags": e.topic_tags, "language": e.language, "quality_score": e.quality_score, "relevance_score": e.relevance_score}));
+        r.side_effects.push(json!({"kind": "enrich", "record_id": record.id, "industry_tags": e.industry_tags, "topic_tags": e.topic_tags, "language": e.language, "quality_score": e.quality_score}));
         Ok(r)
     }
 }
