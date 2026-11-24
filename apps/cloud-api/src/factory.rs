@@ -17,8 +17,9 @@ use serde_json::{Value, json};
 use sqlx::Row;
 
 use sincy_content::{
-    Brief, MetricEvent, TextGenerator, TriggerSource, adapt_master, create_master,
-    default_adapters, learn, plan_strategy,
+    AiLabel, Brief, LocalStubProvider, MediaJob, MediaProvider, MetricEvent, PublishingPackage,
+    QualityGate, TextGenerator, TriggerSource, adapt_master, create_master, default_adapters,
+    learn, plan_strategy_with_learnings,
 };
 
 use crate::api::app_error_response;
@@ -356,13 +357,19 @@ async fn run_learn(
         .await
         .map_err(dberr)?;
         if let Some(eid) = employee_id {
+            // (2) 给 factory-learn 镜像补 adjustment, 使其能被员工回路 take_pending_adjustment 消费
+            let adj = json!({
+                "pillar_boost": l.hypothesis.split_whitespace().next().unwrap_or(""),
+                "source": "factory_learn"
+            });
             let _ = sqlx::query(
-                "INSERT INTO employee_experiments (employee_id, hypothesis, variable, status, result)
-                 VALUES ($1,$2,'factory_learn','ANALYZING', $3)",
+                "INSERT INTO employee_experiments (employee_id, hypothesis, variable, status, result, adjustment)
+                 VALUES ($1,$2,'factory_learn','ANALYZING', $3, $4)",
             )
             .bind(eid)
             .bind(&l.hypothesis)
             .bind(json!({"evidence": l.evidence, "confidence": l.confidence, "source": "factory_learn"}))
+            .bind(adj)
             .execute(pool)
             .await;
         }
@@ -411,6 +418,12 @@ pub async fn run_draft_briefs(pool: &sqlx::PgPool, limit: i64) -> usize {
 }
 
 /// 共享执行体: HTTP 端点与后台 runner 都走它; 必须带 agency, 读写都在租户事务内
+/// 工序4 媒体 provider: 配 SINCY_MEDIA_PROVIDERS 即接真实生成工具 (Faster-Whisper/
+/// MoneyPrinterTurbo/Pixelle-Video 等), 否则本地占位 (红线: 不调下载站)。
+fn default_media_provider() -> Box<dyn MediaProvider> {
+    Box::new(LocalStubProvider)
+}
+
 pub async fn run_brief_by_id(
     pool: &sqlx::PgPool,
     agency_id: uuid::Uuid,
@@ -476,16 +489,116 @@ pub async fn run_brief_by_id(
     sqlx::query("UPDATE factory_briefs SET status='running', updated_at=now() WHERE brief_id=$1 AND agency_id=$2")
         .bind(id).bind(agency_id).execute(&mut *tx).await.map_err(|e| e.to_string())?;
     tx.commit().await.map_err(|e| e.to_string())?;
-    // 工序1/2/3
-    let plan = plan_strategy(&brief, &signals, &llm).await?;
+    // (2) 工序9→策略 回灌: 读该品牌近期学习结论注入工序1 (断点② 闭合)
+    let learnings: Vec<String> = sqlx::query_scalar(
+        "SELECT hypothesis FROM factory_learnings WHERE brand_id = $1 ORDER BY created_at DESC LIMIT 5",
+    )
+    .bind(brief.brand_id.as_str())
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    // 工序1 策略 (带回灌) + 工序2 母稿
+    let plan = plan_strategy_with_learnings(&brief, &signals, &learnings, &llm).await?;
     let master = create_master(&brief, &plan, &signals, &llm).await?;
+
+    // 工序3→7: 每平台 适配 →(4)媒体 →(5)质量门 →(6)审批 →(7)打包落库
+    let agency = sincy_common::AgencyId::from_uuid(agency_id);
+    let brand_uuid = uuid::Uuid::parse_str(&brief.brand_id).ok();
+    let media_provider = default_media_provider();
     let mut variants = Vec::new();
     for a in default_adapters() {
-        if brief.platforms.is_empty() || brief.platforms.contains(&a.spec().platform) {
-            variants.push(json!({ "platform": a.spec().platform, "text": adapt_master(&master, a.as_ref(), &brief) }));
+        let platform = a.spec().platform.clone();
+        if !(brief.platforms.is_empty() || brief.platforms.contains(&platform)) {
+            continue;
         }
+        let text = adapt_master(&master, a.as_ref(), &brief);
+
+        // 工序4 媒体: 视频类平台产媒体任务 (stub 返回 PENDING, provider 可换真实生成)
+        let media_output = if matches!(platform.as_str(), "youtube" | "tiktok" | "抖音" | "视频号")
+        {
+            let job = MediaJob {
+                job_id: format!("{}-{}", brief.brief_id, platform),
+                kind: "video".into(),
+                source_url: None,
+                prompt: master.text.chars().take(400).collect(),
+                spec: json!({ "platform": platform }),
+            };
+            media_provider.generate(&job).await.ok()
+        } else {
+            None
+        };
+
+        // 工序5 质量门: 构造不可变 PublishingPackage 过 gate.rs
+        let label = AiLabel::ai_generated(vec![json!({"model": "factory", "kind": "llm"})]);
+        let rules = sincy_content::gate::BrandRules {
+            forbidden_topics: Vec::new(),
+            required_cta: (!brief.cta.trim().is_empty()).then(|| brief.cta.clone()),
+            max_text_len: Some(if platform == "x" { 280 } else { 40_000 }),
+            media_specs: std::collections::HashMap::new(),
+        };
+        let gate_verdict = match PublishingPackage::create(
+            uuid::Uuid::new_v4(),
+            agency_id.to_string(),
+            brief.brand_id.clone(),
+            platform.clone(),
+            "",
+            "publish_post",
+            text.clone(),
+            Vec::new(),
+            label,
+            json!({}),
+        ) {
+            Ok(pkg) => {
+                let v = QualityGate::new(rules).check(&pkg, pkg.ai_label());
+                json!({ "passed": v.passed(), "issues": v.issues })
+            }
+            Err(e) => json!({
+                "passed": false,
+                "issues": [{"code": "package_build_failed", "message": e.to_string()}]
+            }),
+        };
+        let passed = gate_verdict["passed"].as_bool().unwrap_or(false);
+
+        // 工序6 审批 + 工序7 打包落库: 过门的入待审队列 (FR-024: AI 内容人工审核)
+        let package_id = if passed
+            && let Some(bid) = brand_uuid
+            && let Ok(pid) = crate::api::insert_package(
+                pool,
+                agency,
+                crate::api::NewPackage {
+                    brand_id: bid,
+                    platform: &platform,
+                    action: "publish_post",
+                    text: &text,
+                    source: "ai",
+                    provenance: json!({"factory_brief": brief.brief_id, "plan_angle": plan.angle}),
+                    approval_status: "pending",
+                },
+            )
+            .await
+        {
+            Some(pid.to_string())
+        } else {
+            None
+        };
+
+        variants.push(json!({
+            "platform": platform,
+            "text": text,
+            "media": media_output,
+            "gate": gate_verdict,
+            "approval_status": if passed { "pending" } else { "rejected" },
+            "package_id": package_id,
+        }));
     }
-    let result = json!({ "plan": plan, "master": master, "variants": variants, "signal_count": signals.len() });
+    let result = json!({
+        "plan": plan,
+        "master": master,
+        "variants": variants,
+        "signal_count": signals.len(),
+        "learnings_used": learnings.len(),
+    });
     // 写回 done (租户事务)
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
     sqlx::query(&format!("SET LOCAL app.current_agency_id = '{agency_id}'"))

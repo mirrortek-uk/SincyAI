@@ -200,10 +200,20 @@ pub struct StrategyPlan {
     pub outline: Vec<String>,
 }
 
-/// 工序1 策略/选题: 基于 Brief + 信号库证据生成要点与大纲 (平台无关)
+/// 工序1 策略/选题 (薄包装): 无学习回灌时的默认入口, 保持既有调用点不变。
 pub async fn plan_strategy(
     brief: &Brief,
     signals: &[Value],
+    llm: &dyn TextGenerator,
+) -> Result<StrategyPlan, String> {
+    plan_strategy_with_learnings(brief, signals, &[], llm).await
+}
+
+/// 工序1 策略/选题 (带学习回灌): 把该品牌近期学习结论注入 prompt (断点② 闭合)。
+pub async fn plan_strategy_with_learnings(
+    brief: &Brief,
+    signals: &[Value],
+    learnings: &[String],
     llm: &dyn TextGenerator,
 ) -> Result<StrategyPlan, String> {
     let evidence: Vec<String> = signals
@@ -232,6 +242,14 @@ Signals:
         brief.goal, brief.angle, brief.platforms, brief.audience, evidence.join("
 ")
     );
+    let prompt = if learnings.is_empty() {
+        prompt
+    } else {
+        format!(
+            "{prompt}\n\nPrior learnings for this brand (bias the angle & key_points toward what has worked):\n{}",
+            learnings.join("\n")
+        )
+    };
     let raw = llm.generate(&prompt, 512).await?;
     parse_plan(&raw, &brief.angle)
 }
