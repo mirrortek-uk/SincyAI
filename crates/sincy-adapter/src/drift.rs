@@ -109,16 +109,19 @@ mod tests {
                 id: Some("a".into()),
                 text: None,
                 text_any: None,
+                near_text_any: None,
             },
             Anchor {
                 id: None,
                 text: Some("首页".into()),
                 text_any: None,
+                near_text_any: None,
             },
             Anchor {
                 id: None,
                 text: None,
                 text_any: Some(vec!["发布".into()]),
+                near_text_any: None,
             },
         ];
         let snap = MockSnapshot::new(vec!["a".into()], vec!["首页".into(), "发布".into()]);

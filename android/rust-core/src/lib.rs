@@ -37,6 +37,8 @@ pub struct RunResult {
     pub events: Vec<String>,
     /// 失败/漂移原因 (诊断用), 成功时为空
     pub reason: String,
+    /// read 动作 capture 到的值 (如 followers), 纯文本, 云端 harvest 入库
+    pub captured: std::collections::BTreeMap<String, String>,
 }
 
 impl From<AdapterExecution> for RunResult {
@@ -56,6 +58,7 @@ impl From<AdapterExecution> for RunResult {
             adapter_version: ex.adapter_version,
             events: ex.events.iter().map(|e| format!("{e:?}")).collect(),
             reason,
+            captured: ex.captured,
         }
     }
 }
@@ -203,7 +206,7 @@ mod jni {
     use serde_json::json;
     use sincy_adapter::humanize::{plan_swipe, plan_tap, HumanProfile, Rng};
     use sincy_adapter::interpreter::{Action, PlatformIo, ScreenSnapshot, SystemOp};
-    use sincy_adapter::schema::FlowStep;
+    use sincy_adapter::schema::{Anchor, FlowStep};
 
     /// Snapshot JSON handed over from Kotlin: ids/texts for anchor match plus a
     /// nodes array with bounds (used to plan humanized gestures) and screen size.
@@ -513,6 +516,51 @@ mod jni {
                 .map_err(|e| format!("bad llm json: {e}: {}", &raw[..raw.len().min(300)]))
         }
 
+        /// read 原语: 直接从最近一次 snapshot JSON 里取值 (纯感知, 不点击)。
+        /// near_text_any 命中标签节点后, 取其后若干节点中第一个带数字的文本。
+        fn read(&mut self, target: &Anchor) -> Result<Option<String>, String> {
+            let v = serde_json::from_str::<serde_json::Value>(&self.last_snapshot)
+                .unwrap_or_else(|_| json!({"nodes": []}));
+            let nodes = v["nodes"].as_array().cloned().unwrap_or_default();
+            let is_count = |t: &str| t.chars().any(|c| c.is_ascii_digit());
+            let hay = |n: &serde_json::Value| {
+                format!(
+                    "{} {} {}",
+                    n["id"].as_str().unwrap_or(""),
+                    n["text"].as_str().unwrap_or(""),
+                    n["desc"].as_str().unwrap_or("")
+                )
+            };
+            if let Some(near) = &target.near_text_any {
+                if let Some(pos) = nodes
+                    .iter()
+                    .position(|n| near.iter().any(|t| hay(n).contains(t.as_str())))
+                {
+                    if let Some(t) = nodes[pos]["text"].as_str().filter(|t| is_count(t)) {
+                        return Ok(Some(t.to_string()));
+                    }
+                    for n in nodes.iter().skip(pos + 1).take(6) {
+                        if let Some(t) = n["text"].as_str().filter(|t| is_count(t)) {
+                            return Ok(Some(t.to_string()));
+                        }
+                    }
+                }
+                return Ok(None);
+            }
+            if let Some(t) = target.text.as_deref().or(target
+                .text_any
+                .as_ref()
+                .and_then(|x| x.first().map(|s| s.as_str())))
+            {
+                if let Some(n) = nodes.iter().find(|n| hay(n).contains(t)) {
+                    if let Some(x) = n["text"].as_str().filter(|t| is_count(t)) {
+                        return Ok(Some(x.to_string()));
+                    }
+                }
+            }
+            Ok(None)
+        }
+
         fn perform(&mut self, step: &FlowStep) -> Result<(), String> {
             let action = step.to_action(0).ok_or("step has no performable action")?;
             let snap = JsonSnapshot(self.last_snapshot.clone());
@@ -622,6 +670,14 @@ mod jni {
                 .to_string()
             }
             Action::Wait { ms } => json!({"kind": "wait", "ms": ms}).to_string(),
+            // 纯感知: 不点击, 值由 JniBridge::read 从 snapshot 读 (Kotlin 侧 read 为 no-op)
+            Action::Read { .. } => json!({"kind": "read"}).to_string(),
+            // 资料页入口: 按平台文案兜底匹配
+            Action::OpenSelfProfile => json!({
+                "kind": "tap",
+                "target": {"text_any": ["Profile", "个人主页", "我", "Me", "个人资料"]},
+            })
+            .to_string(),
         }
     }
 
@@ -698,6 +754,7 @@ mod jni {
             }
             Ok(Err(e)) => serde_json::to_string(&RunResult {
                 outcome: "refused".into(),
+                captured: Default::default(),
                 reason: e.clone(),
                 side_effect_done: false,
                 adapter_id: String::new(),
@@ -713,6 +770,7 @@ mod jni {
                     .unwrap_or_else(|| "unknown panic".into());
                 serde_json::to_string(&RunResult {
                     outcome: "no_side_effect_failure".into(),
+                    captured: Default::default(),
                     reason: format!("rust panic caught at JNI boundary: {msg}"),
                     side_effect_done: false,
                     adapter_id: String::new(),

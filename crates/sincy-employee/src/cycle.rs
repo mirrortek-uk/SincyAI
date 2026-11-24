@@ -633,10 +633,31 @@ pub async fn run_cycle(
         .filter(|s| s.domain == "strategy")
         .map(|s| s.name.as_str())
         .collect();
+    // patch-B: target_followers KPI — 读近 7 天 Δ粉丝, 落后目标则 plan 标记 behind,
+    // Create prompt 据此偏涨粉角度 (hot_take/listicle), drain 侧再用 Δ粉丝当 reward 闭环
+    let follower_kpi = match strategy.target_followers {
+        Some(target) => {
+            let g = deps
+                .stats
+                .account_growth(employee.id, 7)
+                .await
+                .unwrap_or_else(|_| json!({}));
+            let now = g["followers_now"].as_i64();
+            let delta = g["delta"].as_i64();
+            json!({
+                "target_followers": target,
+                "followers_now": now,
+                "delta_7d": delta,
+                "behind": now.map(|n| n < target).unwrap_or(false),
+            })
+        }
+        None => Value::Null,
+    };
     let plan = json!({
         "topic": opp.topic,
         "angle": applied_angle.clone().unwrap_or_else(|| "explanation".into()),
         "applied_adjustment": pending_adjustment.clone(),
+        "follower_kpi": follower_kpi,
         "channel": employee.channel,
         "format": strategy.formats.first().cloned().unwrap_or_else(|| "text".into()),
         "evidence": opp.evidence,
@@ -665,7 +686,7 @@ pub async fn run_cycle(
     let prompt = format!(
         "You are {name} ({role}). Mission: {mission}. Audience: {audience:?}. Voice: {voice}. Pillars: {pillars:?}. Language: {language}.\n\
          Write ONE {channel} post (max {limit} weighted chars; CJK counts double) entirely in {language}, about: {topic}. Evidence: {evidence:?}.\n\
-         Do NOT repeat these recent topics: {recent:?}.",
+         Do NOT repeat these recent topics: {recent:?}.{kpi_line}",
         name = identity.name,
         role = identity.role,
         mission = mission.statement,
@@ -678,6 +699,11 @@ pub async fn run_cycle(
         topic = opp.topic,
         evidence = opp.evidence,
         recent = ctx.recent_topics,
+        kpi_line = match &plan["follower_kpi"] {
+            Value::Null => String::new(),
+            k => format!("
+Follower KPI: {k}. If behind target, bias toward growth-friendly angle (hot_take / listicle / strong hook)."),
+        },
     );
     // Content agent 按渠道挑选内容生产 skill, 把 skill 的契约写进 prompt
     let content_skill = pick_content_skill(skills, &employee.channel);

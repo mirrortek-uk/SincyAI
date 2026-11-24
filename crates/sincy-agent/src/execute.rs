@@ -63,6 +63,8 @@ pub struct AdapterExecution {
     pub events: Vec<ExecEvent>,
     pub adapter_id: String,
     pub adapter_version: i32,
+    /// read 动作 capture 到的值 (透传到云端 task_events.detail.captured, 供 harvest)
+    pub captured: std::collections::BTreeMap<String, String>,
 }
 
 /// Verify + execute a signed adapter definition (YAML) against the device IO.
@@ -192,6 +194,7 @@ fn execute_verified(
             )),
             side_effect_done: false,
             events: vec![],
+            captured: Default::default(),
             adapter_id,
             adapter_version,
         });
@@ -223,6 +226,7 @@ fn execute_verified(
         events: rt.events,
         adapter_id,
         adapter_version,
+        captured: rt.captured,
     })
 }
 
@@ -326,6 +330,7 @@ pub fn run_system_adapter(
                     outcome,
                     side_effect_done,
                     events,
+                    captured: Default::default(),
                     adapter_id: def.adapter.clone(),
                     adapter_version: def.version as i32,
                 });
@@ -336,6 +341,7 @@ pub fn run_system_adapter(
         outcome: TaskOutcome::Success,
         side_effect_done,
         events,
+        captured: Default::default(),
         adapter_id: def.adapter.clone(),
         adapter_version: def.version as i32,
     })
@@ -425,6 +431,7 @@ fn run_agentic_loop(
                     outcome: TaskOutcome::WaitingUser(format!("challenge screen detected: {ct}")),
                     side_effect_done: false,
                     events,
+                    captured: Default::default(),
                     adapter_id: def.adapter.clone(),
                     adapter_version: def.version as i32,
                 });
@@ -464,6 +471,7 @@ fn run_agentic_loop(
                     outcome: TaskOutcome::NoSideEffectFailure(format!("llm_decide failed: {e}")),
                     side_effect_done: false,
                     events,
+                    captured: Default::default(),
                     adapter_id: def.adapter.clone(),
                     adapter_version: def.version as i32,
                 });
@@ -490,6 +498,7 @@ fn run_agentic_loop(
                     )),
                     side_effect_done: false,
                     events,
+                    captured: Default::default(),
                     adapter_id: def.adapter.clone(),
                     adapter_version: def.version as i32,
                 });
@@ -517,6 +526,7 @@ fn run_agentic_loop(
                     outcome: TaskOutcome::Success,
                     side_effect_done: false,
                     events,
+                    captured: Default::default(),
                     adapter_id: def.adapter.clone(),
                     adapter_version: def.version as i32,
                 });
@@ -531,6 +541,7 @@ fn run_agentic_loop(
                     outcome: TaskOutcome::WaitingUser(reason),
                     side_effect_done: false,
                     events,
+                    captured: Default::default(),
                     adapter_id: def.adapter.clone(),
                     adapter_version: def.version as i32,
                 });
@@ -590,6 +601,7 @@ fn run_agentic_loop(
                                 ),
                                 side_effect: false,
                                 verify: false,
+                                capture: None,
                             };
                             match io.perform(&step_def) {
                                 Ok(()) => {
@@ -691,6 +703,7 @@ fn run_agentic_loop(
                     value,
                     side_effect: false,
                     verify: false,
+                    capture: None,
                 };
                 let vision = snap.image_base64().is_some();
                 match io.perform(&step_def) {
@@ -713,6 +726,7 @@ fn run_agentic_loop(
                             )),
                             side_effect_done: false,
                             events,
+                            captured: Default::default(),
                             adapter_id: def.adapter.clone(),
                             adapter_version: def.version as i32,
                         });
@@ -726,6 +740,7 @@ fn run_agentic_loop(
                     )),
                     side_effect_done: false,
                     events,
+                    captured: Default::default(),
                     adapter_id: def.adapter.clone(),
                     adapter_version: def.version as i32,
                 });
@@ -738,6 +753,7 @@ fn run_agentic_loop(
         )),
         side_effect_done: false,
         events,
+        captured: Default::default(),
         adapter_id: def.adapter.clone(),
         adapter_version: def.version as i32,
     })

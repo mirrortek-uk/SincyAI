@@ -1,0 +1,28 @@
+# X (Twitter) 提及只读抓取适配器 (互动子循环)。纯读、无 side_effect,
+# challenge 一律 -> WAITING_USER 绝不自动过 (守 ToS: 纯感知, 不是反检测)。
+#
+# 输出契约: read 动作 capture 的 "mentions" 为整块文本, 每行一条提及:
+#   handle|post_id|text
+# 云端 harvest (interaction.rs) 按行解析入 social_mentions, 再由 reply pass 派发 reply_comment。
+# 锚点需真机核验替换 (通知页文案随版本变化)。
+adapter: x.read_mentions
+version: 1
+app: { package: com.twitter.android, version_range: ">=10.0" }
+screens:
+  main_nav:
+    anchors:
+      - { text_any: ["主页", "Home"] }
+      - { text_any: ["通知标签", "Notifications", "私信", "Messages"] }
+  notifications:
+    anchors:
+      - { text_any: ["通知", "Notifications"] }
+      - { text_any: ["提及", "Mentions", "回复", "Replies"] }
+  challenge:
+    anchors:
+      - { text_any: ["人机验证", "Verify you are human", "unusual activity", "安全验证"] }
+flow:
+  - { expect: main_nav, action: tap, target: { text_any: ["通知标签", "Notifications"] } }
+  - { expect: notifications, action: wait, value: "2500" }
+  - { expect: notifications, action: tap, target: { text_any: ["提及", "Mentions"] } }
+  - { expect: notifications, action: wait, value: "2000" }
+  - { expect: notifications, action: read, target: { near_text_any: ["提及", "Mentions"] }, capture: "mentions" }

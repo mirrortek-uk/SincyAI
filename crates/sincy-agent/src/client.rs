@@ -218,6 +218,7 @@ impl AgentClient {
                 "adapter_id": result.adapter_id,
                 "adapter_version": result.adapter_version,
                 "side_effect_done": result.side_effect_done,
+                "captured": result.captured,
                 "detail": match &result.outcome {
                     TaskOutcome::Success => "completed".to_string(),
                     other => format!("{other:?}"),

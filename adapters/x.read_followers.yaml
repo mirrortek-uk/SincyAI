@@ -1,13 +1,10 @@
-# X (Twitter) 粉丝数只读测量适配器 (patch-A 契约草稿, patch-B/Kotlin 侧落地 read/capture 原语后生效)。
+# X (Twitter) 粉丝数只读测量适配器。纯读、无 side_effect: 只读自己账号(已登录会话),
+# challenge 一律 -> WAITING_USER 绝不自动过 (与 x.reply_comment.yaml 同一守 ToS 立场: 纯感知, 不是反检测)。
 #
-# 纯读、无 side_effect: 只读自己账号(已登录会话), challenge 一律 -> WAITING_USER 绝不自动过
-# (与 x.reply_comment.yaml 同一守 ToS 立场: 纯感知, 不是反检测)。
-#
-# 需要 AdapterRuntime 新增的原语 (非纯 YAML, Kotlin 侧实现):
-#   - action: read + capture 键: 把命中节点文本抓进 task 输出
-#   - target.near_text_any: 取某标签旁边的数字节点
-#   - action: open_self_profile: 导航到自己资料页
-#   - 数字归一化: 1.2万 / 12.3K / 1,234 -> 整数 (原始串留存 raw 审计)
+# 依赖的运行时原语 (已实现): action read + capture 键 / target.near_text_any /
+# action open_self_profile (Rust 解释器 + JNI bridge + adb 模拟均支持)。
+# 数字归一化 (1.2万 / 12.3K / 1,234 -> 整数) 在云端 harvest 侧做, 原始串留存 extras 审计。
+# 锚点需真机核验替换 (main_nav/profile 文案随版本变化)。
 adapter: x.read_followers
 version: 1
 app: { package: com.twitter.android, version_range: ">=10.0" }

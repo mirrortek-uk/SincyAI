@@ -298,11 +298,14 @@ class AgentForegroundService : Service() {
                 .put("action", brief.getString("action"))
                 .put("reason", "adapter/app version mismatch (appVersion=$appVersion)"))
         }
+        // read 动作 capture 到的值 (如 followers) 随结果回传, 云端 harvest 入 account_metric_samples
+        val captured = result.optJSONObject("captured")
         send(webSocket, "device.task.result", JSONObject()
             .put("task_id", taskId)
             .put("outcome", result.getString("outcome"))
             .put("reason", result.optString("reason"))
-            .put("side_effect_done", result.optBoolean("side_effect_done")))
+            .put("side_effect_done", result.optBoolean("side_effect_done"))
+            .put("captured", captured ?: JSONObject()))
     }
 
     private fun send(webSocket: WebSocket, type: String, payload: JSONObject) {

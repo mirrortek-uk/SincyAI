@@ -170,6 +170,7 @@ pub async fn account_metrics_loop(pool: sqlx::PgPool) {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(6 * 3600);
+    tracing::info!(interval_secs, "account_metrics_loop started");
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(interval_secs.max(60)));
     loop {
         tick.tick().await;
@@ -319,7 +320,7 @@ async fn dispatch_read_followers(pool: &sqlx::PgPool) {
         let r = sqlx::query(
             "INSERT INTO device_tasks (id, agency_id, idempotency_key, state, route_id, adapter_version, context)
              VALUES ($1, $2, $3, 'QUEUED', $4, $5, $6)
-             ON CONFLICT (idempotency_key) DO NOTHING",
+             ON CONFLICT (agency_id, idempotency_key) DO NOTHING",
         )
         .bind(task_id)
         .bind(agency_id)

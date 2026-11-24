@@ -299,3 +299,82 @@ fn x_publish_post_flow_executes_on_scripted_screens() {
     assert_eq!(rt.status, Some(ExecStatus::Completed));
     assert!(rt.side_effect_done, "Post tap is a side effect");
 }
+
+/// read/capture 原语: 只读步骤把 io.read 的值按 capture key 收进 rt.captured,
+/// 且不产生 side_effect; io 不支持 read 时 fail-closed。
+#[test]
+fn read_capture_collects_values() {
+    use sincy_adapter::schema::Anchor;
+    let yaml = r#"
+adapter: x.read_followers
+version: 1
+app: { package: com.twitter.android, version_range: ">=10.0" }
+screens:
+  profile:
+    anchors:
+      - { text_any: ["Followers"] }
+  challenge:
+    anchors:
+      - { text_any: ["人机验证", "Verify you are human"] }
+flow:
+  - { expect: profile, action: read, target: { near_text_any: ["Followers"] }, capture: "followers" }
+"#;
+    let def = AdapterDefinition::from_yaml(yaml).expect("read adapter must validate");
+
+    struct ReadIo {
+        screens: Vec<MockSnapshot>,
+    }
+    impl PlatformIo for ReadIo {
+        fn snapshot(&mut self) -> Box<dyn ScreenSnapshot> {
+            let s = if self.screens.is_empty() {
+                MockSnapshot::new(vec![], vec![])
+            } else {
+                self.screens.remove(0)
+            };
+            Box::new(s)
+        }
+        fn perform(&mut self, _step: &FlowStep) -> Result<(), String> {
+            Ok(())
+        }
+        fn read(&mut self, target: &Anchor) -> Result<Option<String>, String> {
+            assert!(target.near_text_any.is_some());
+            Ok(Some("1,234".into()))
+        }
+    }
+    let mut io = ReadIo {
+        screens: vec![MockSnapshot::new(vec![], vec!["Followers".into()])],
+    };
+    let mut interp = Interpreter::new(&def, "10.5.0");
+    let rt = interp.run(&mut io, 0);
+    assert_eq!(rt.status, Some(ExecStatus::Completed));
+    assert_eq!(
+        rt.captured.get("followers").map(|s| s.as_str()),
+        Some("1,234")
+    );
+    assert!(!rt.side_effect_done);
+
+    // 不支持 read 的 io → fail-closed
+    struct NoReadIo {
+        screens: Vec<MockSnapshot>,
+    }
+    impl PlatformIo for NoReadIo {
+        fn snapshot(&mut self) -> Box<dyn ScreenSnapshot> {
+            let s = if self.screens.is_empty() {
+                MockSnapshot::new(vec![], vec![])
+            } else {
+                self.screens.remove(0)
+            };
+            Box::new(s)
+        }
+        fn perform(&mut self, _step: &FlowStep) -> Result<(), String> {
+            Ok(())
+        }
+    }
+    let mut io2 = NoReadIo {
+        screens: vec![MockSnapshot::new(vec![], vec!["Followers".into()])],
+    };
+    let mut interp2 = Interpreter::new(&def, "10.5.0");
+    let rt2 = interp2.run(&mut io2, 0);
+    assert!(matches!(rt2.status, Some(ExecStatus::Failed(_))));
+    assert!(rt2.captured.is_empty());
+}

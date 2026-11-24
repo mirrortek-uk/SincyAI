@@ -72,6 +72,11 @@ async fn main() {
         tokio::spawn(cloud_api::account_metrics::account_metrics_loop(
             pool.clone(),
         ));
+        // 互动子循环: read_mentions 抓提及 → LLM 回复 → reply_comment 设备任务
+        tokio::spawn(cloud_api::interaction::interaction_loop(
+            pool.clone(),
+            state.allow_mock_adapters,
+        ));
     }
 
     // Digital Employee scheduler (DE §cadence): auto-runs operating cycles for

@@ -50,6 +50,9 @@ pub struct Anchor {
     pub text: Option<String>,
     #[serde(default)]
     pub text_any: Option<Vec<String>>,
+    /// read 动作专用: 取"某标签旁边的值节点" (如 关注者 旁的数字)
+    #[serde(default)]
+    pub near_text_any: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +66,9 @@ pub struct FlowStep {
     /// true for steps with external side effects (e.g. tapping 发布)
     #[serde(default)]
     pub side_effect: bool,
+    /// read 动作专用: 把读到的值以该 key 写入任务结果 captured (纯感知, 无副作用)
+    #[serde(default)]
+    pub capture: Option<String>,
     /// wait for a post-condition screen
     #[serde(default)]
     pub verify: bool,
@@ -83,6 +89,10 @@ pub enum ActionKind {
     SwipePath,
     /// 等待: value 携带毫秒数 (如 "1500")
     Wait,
+    /// 只读感知: 读取 target 锚点(或 near_text_any 标签)旁的文本值, 配合 step.capture 回传
+    Read,
+    /// 导航到"自己的资料页" (平台无关语义动作, 由运行时映射为对应点击)
+    OpenSelfProfile,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -153,6 +163,15 @@ impl AdapterDefinition {
                     }
                 }
                 ActionKind::Scroll | ActionKind::Back | ActionKind::CloseDialog => {}
+                // 只读动作: 必须有 target (read) ; open_self_profile 无 target
+                ActionKind::Read => {
+                    if step.target.is_none() {
+                        return Err(AdapterError::Invalid(
+                            "read action requires a target anchor".into(),
+                        ));
+                    }
+                }
+                ActionKind::OpenSelfProfile => {}
                 // coordinate/vision actions carry coords in value
                 ActionKind::TapAt | ActionKind::SwipePath | ActionKind::Wait => {
                     if step.value.is_none() {

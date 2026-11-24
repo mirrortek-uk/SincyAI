@@ -64,6 +64,12 @@ pub trait PlatformIo {
     fn snapshot(&mut self) -> Box<dyn ScreenSnapshot>;
     /// Perform a step action (tap / set text / pick media / back ...).
     fn perform(&mut self, step: &FlowStep) -> Result<(), String>;
+    /// 只读感知 (read 动作): 读取 target 锚点 (或 near_text_any 标签) 旁的文本值。
+    /// 默认拒绝 — 运行时不支持 read 时 fail-closed, 绝不猜值。
+    fn read(&mut self, target: &Anchor) -> Result<Option<String>, String> {
+        let _ = target;
+        Err("read unsupported on this io".into())
+    }
     /// Execute one native system op (system.* adapters only: download+verify,
     /// fire install intent, poll installed, verify signer, launch app).
     /// Default refuses so a runtime that cannot do system ops fails closed.
@@ -142,6 +148,12 @@ pub enum Action {
     Wait {
         ms: u64,
     },
+    /// 只读: 读取锚点(或 near_text_any 标签)旁的文本 — 纯感知, 无副作用
+    Read {
+        target: Anchor,
+    },
+    /// 导航到自己的资料页
+    OpenSelfProfile,
 }
 
 impl FlowStep {
@@ -183,6 +195,8 @@ impl FlowStep {
                 let ms = v.parse::<u64>().ok()?;
                 Some(Action::Wait { ms })
             }
+            ActionKind::Read => self.target.clone().map(|t| Action::Read { target: t }),
+            ActionKind::OpenSelfProfile => Some(Action::OpenSelfProfile),
         }
     }
 }
@@ -287,6 +301,8 @@ pub struct AdapterRuntime {
     pub side_effect_done: bool,
     pub events: Vec<ExecEvent>,
     pub status: Option<ExecStatus>,
+    /// read 动作 capture 到的值 (key 来自 FlowStep.capture), 纯文本, 供云端 harvest
+    pub captured: Map<String, String>,
 }
 
 impl<'a> Interpreter<'a> {
@@ -309,6 +325,7 @@ impl<'a> Interpreter<'a> {
             side_effect_done: false,
             events: Vec::new(),
             status: None,
+            captured: Map::new(),
         };
         // version guard first: out of range => block, no blind taps
         match self.version_ok() {
@@ -384,6 +401,7 @@ impl<'a> Interpreter<'a> {
                             value: None,
                             side_effect: false,
                             verify: false,
+                            capture: None,
                         };
                         if io.perform(&back).is_err() {
                             consecutive_timeouts += 1;
@@ -422,6 +440,7 @@ impl<'a> Interpreter<'a> {
                         value: None,
                         side_effect: false,
                         verify: false,
+                        capture: None,
                     };
                     let _ = io.perform(&fake);
                     continue; // re-observe within the SAME step
@@ -450,6 +469,7 @@ impl<'a> Interpreter<'a> {
                         value: Some("800".into()),
                         side_effect: false,
                         verify: false,
+                        capture: None,
                     };
                     let _ = io.perform(&wait);
                     continue; // re-observe within the SAME step
@@ -477,12 +497,36 @@ impl<'a> Interpreter<'a> {
                     rt.status = Some(ExecStatus::Failed(format!("step {i} failed: {e}")));
                     return rt;
                 }
+                // read 动作: 纯感知, 把读到的值按 capture key 收进 rt.captured
+                if let (Action::Read { target }, Some(key)) = (&action, &step.capture) {
+                    match io.read(target) {
+                        Ok(Some(v)) => {
+                            rt.captured.insert(key.clone(), v);
+                        }
+                        Ok(None) => {
+                            rt.status = Some(ExecStatus::Failed(format!(
+                                "read step {i}: no value near target {:?}",
+                                target
+                            )));
+                            return rt;
+                        }
+                        Err(e) => {
+                            rt.status =
+                                Some(ExecStatus::Failed(format!("read step {i} failed: {e}")));
+                            return rt;
+                        }
+                    }
+                }
                 // set_text 的证据带上替换后的文本 (审计: 设备到底输入了什么);
-                // tap 只带锚点摘要, 不带原始坐标
+                // tap 只带锚点摘要, 不带原始坐标; read 带 capture key (不带读到的原始值入证据流)
                 let evidence = match &action {
                     Action::SetText { target, value } => format!(
                         "step={i} screen={} se={} set_text target={:?} value={:?}",
                         m.screen_id, step.side_effect, target, value
+                    ),
+                    Action::Read { .. } => format!(
+                        "step={i} screen={} se={} read capture={:?}",
+                        m.screen_id, step.side_effect, step.capture
                     ),
                     _ => format!("step={i} screen={} se={}", m.screen_id, step.side_effect),
                 };

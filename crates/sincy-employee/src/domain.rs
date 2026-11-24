@@ -164,6 +164,10 @@ pub struct Strategy {
     pub risk_tolerance: f64,
     #[serde(default = "default_risk")]
     pub exploration_budget: f64,
+    /// patch-B KPI: 目标粉丝数 (可选)。设置后 cycle 读 account_growth 对照,
+    /// 落后目标时 plan 注入增长导向 (涨粉角度), drain 用 Δ粉丝当 reward。
+    #[serde(default)]
+    pub target_followers: Option<i64>,
 }
 
 fn default_cadence() -> u32 {
@@ -192,6 +196,7 @@ impl Default for Strategy {
             formats: vec!["text".into()],
             risk_tolerance: 0.3,
             exploration_budget: 0.2,
+            target_followers: None,
         }
     }
 }

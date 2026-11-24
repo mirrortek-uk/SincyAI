@@ -895,12 +895,23 @@ pub async fn measurement_drain_loop(pool: sqlx::PgPool) {
                 .flatten(),
                 None => None,
             };
+            // patch-B: Δ粉丝作为 reward 并入 metrics (account_growth 读 account_metric_samples 窗口增量)
+            let growth = sincy_employee::StatsPort::account_growth(
+                &PgStatsPort { pool: pool.clone() },
+                employee_id,
+                7,
+            )
+            .await
+            .unwrap_or_else(|_| json!({}));
+            let followers_delta = growth["delta"].as_i64();
             let metrics = json!({
                 "task_id": task_id,
                 "task_state": task_state,
                 // engagement 指标接入点: device_tasks 回执/平台侧拉取 engagement
                 // (likes/comments/shares) 在此并入 metrics, 例如从 adapter evidence 或平台 API 回采
                 "engagement": null,
+                "followers_now": growth["followers_now"],
+                "followers_delta_7d": followers_delta,
             });
             let insight =
                 format!("delayed measurement of cycle {cycle_id}: task state = {task_state:?}");
@@ -909,14 +920,17 @@ pub async fn measurement_drain_loop(pool: sqlx::PgPool) {
                 .await
                 .ok();
             // 数据驱动 adjustment: 真实结果驱动下一轮 (覆盖 in-cycle 临时值)
+            // patch-B: 真·涨粉信号驱动角度 — Δ>0 强化 hot_take, Δ<=0 换 how_to (数据驱动, 非"发出去没")
             let adjustment = json!({
-                "angle": match task_state.as_deref() {
-                    Some("FAILED") | Some("FAILED_FINAL") => "how_to",
-                    Some("COMPLETED") => "hot_take",
+                "angle": match (task_state.as_deref(), followers_delta) {
+                    (Some("FAILED") | Some("FAILED_FINAL"), _) => "how_to",
+                    (_, Some(d)) if d > 0 => "hot_take",
+                    (_, Some(_)) => "how_to",
+                    (Some("COMPLETED"), None) => "hot_take",
                     _ => "explanation",
                 },
                 "pillar_boost": {},
-                "source": "delayed measurement",
+                "source": "delayed measurement + follower delta",
                 "metrics": metrics,
             });
             store

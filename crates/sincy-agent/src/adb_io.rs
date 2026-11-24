@@ -62,8 +62,14 @@ fn anchor_matches(n: &UiNode, a: &Anchor) -> bool {
             return true;
         }
     }
+    if let Some(near) = &a.near_text_any {
+        let hay = n.haystack();
+        if near.iter().any(|t| hay.contains(t.as_str())) {
+            return true;
+        }
+    }
     // no constraints at all -> match any clickable node
-    if a.id.is_none() && a.text.is_none() && a.text_any.is_none() {
+    if a.id.is_none() && a.text.is_none() && a.text_any.is_none() && a.near_text_any.is_none() {
         return n.clickable;
     }
     false
@@ -276,7 +282,50 @@ impl AdbIo {
     }
 }
 
+impl AdbIo {
+    /// read 原语: 找 near_text_any 标签节点, 在其后的兄弟节点里取第一个带数字的文本;
+    /// 若锚点自身文本带数字则直接返回。只读, 不点击。
+    fn read_near(&mut self, target: &Anchor) -> Result<Option<String>, String> {
+        self.fetch_snapshot();
+        let nodes = &self.last_snapshot;
+        let is_count = |t: &str| t.chars().any(|c| c.is_ascii_digit());
+        if let Some(near) = &target.near_text_any {
+            if let Some(pos) = nodes.iter().position(|n| {
+                let hay = n.haystack();
+                near.iter().any(|t| hay.contains(t.as_str()))
+            }) {
+                // 标签节点自身带数字 (如 "1,234 关注者") 也接受
+                if let Some(t) = nodes[pos].text.as_deref().filter(|t| is_count(t)) {
+                    return Ok(Some(t.to_string()));
+                }
+                // 否则扫描其后若干兄弟节点 (uiautomator 平铺文档序)
+                for n in nodes.iter().skip(pos + 1).take(6) {
+                    if let Some(t) = n.text.as_deref().filter(|t| is_count(t)) {
+                        return Ok(Some(t.to_string()));
+                    }
+                }
+                return Ok(None);
+            }
+            return Ok(None);
+        }
+        if let Some(t) = target.text.as_deref().or(target
+            .text_any
+            .as_ref()
+            .and_then(|v| v.first().map(|s| s.as_str())))
+            && let Some(n) = nodes.iter().find(|n| n.haystack().contains(t))
+            && let Some(v) = n.text.as_deref().filter(|t| is_count(t))
+        {
+            return Ok(Some(v.to_string()));
+        }
+        Ok(None)
+    }
+}
+
 impl PlatformIo for AdbIo {
+    fn read(&mut self, target: &Anchor) -> Result<Option<String>, String> {
+        self.read_near(target)
+    }
+
     fn perform_system_op(
         &mut self,
         op: &sincy_adapter::interpreter::SystemOp,
@@ -454,6 +503,32 @@ impl PlatformIo for AdbIo {
                 }
                 Self::sleep_ms(self.rng.range(250.0, 700.0) as u64);
             }
+            // 纯感知动作: read 不点击任何东西 (值由 PlatformIo::read 取), open_self_profile 走资料页入口
+            Action::Read { .. } => {}
+            Action::OpenSelfProfile => {
+                let node = self
+                    .last_snapshot
+                    .iter()
+                    .find(|n| {
+                        n.clickable
+                            && (n
+                                .id
+                                .as_deref()
+                                .map(|i| i.contains("profile"))
+                                .unwrap_or(false)
+                                || ["Profile", "个人主页", "我"]
+                                    .iter()
+                                    .any(|t| n.haystack().contains(t)))
+                    })
+                    .ok_or_else(|| "no profile entry found".to_string())?;
+                let bounds = node
+                    .bounds
+                    .ok_or_else(|| "profile node has no bounds".to_string())?;
+                let plan = plan_tap(bounds, &self.profile, &mut self.rng);
+                Self::sleep_ms(plan.pre_ms);
+                let _ = self.shell(&format!("input tap {} {}", plan.x, plan.y));
+                Self::sleep_ms(plan.post_ms);
+            }
             Action::PickMedia { .. } | Action::CloseDialog => {
                 Self::sleep_ms(self.rng.range(120.0, 450.0) as u64);
                 let _ = self.shell("input keyevent KEYCODE_BACK");
@@ -542,7 +617,8 @@ mod tests {
             &Anchor {
                 id: Some("post".into()),
                 text: None,
-                text_any: None
+                text_any: None,
+                near_text_any: None,
             }
         ));
         assert!(anchor_matches(
@@ -550,7 +626,8 @@ mod tests {
             &Anchor {
                 id: None,
                 text: Some("Post".into()),
-                text_any: None
+                text_any: None,
+                near_text_any: None,
             }
         ));
         assert!(anchor_matches(
@@ -558,7 +635,8 @@ mod tests {
             &Anchor {
                 id: None,
                 text: None,
-                text_any: Some(vec!["Po".into()])
+                text_any: Some(vec!["Po".into()]),
+                near_text_any: None,
             }
         ));
         assert!(!anchor_matches(
@@ -566,7 +644,8 @@ mod tests {
             &Anchor {
                 id: Some("other".into()),
                 text: None,
-                text_any: None
+                text_any: None,
+                near_text_any: None,
             }
         ));
     }
