@@ -742,7 +742,7 @@ export const api = {
     }),
   getEmployee: (id: string) => req<Record<string, unknown>>(`/employees/${id}`),
   deleteEmployee: (id: string) => req<{ id: string; status: string; deleted: boolean }>(`/employees/${id}`, { method: "DELETE" }),
-  employeeAction: (id: string, action: "start" | "pause" | "resume" | "stop") =>
+  employeeAction: (id: string, action: "start" | "pause" | "resume" | "stop" | "unarchive") =>
     req<{ id: string; status: string }>(`/employees/${id}/${action}`, { method: "POST" }),
   listCycles: (id: string, limit = 20) =>
     req<{ items: CycleItem[] }>(`/employees/${id}/cycles?limit=${limit}`),

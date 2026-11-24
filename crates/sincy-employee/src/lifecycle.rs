@@ -1,6 +1,8 @@
 //! Employee lifecycle state machine (DE §5.1):
 //! CREATED → CONFIGURING → READY → RUNNING → PAUSED → STOPPED, plus
 //! exceptional WAITING_APPROVAL / DEGRADED / ERROR / ARCHIVED.
+//! ARCHIVED is soft-delete: it can be unarchived back to READY (ARCHIVED → READY),
+//! after which the normal READY → RUNNING start applies.
 
 use crate::domain::EmployeeStatus;
 use thiserror::Error;
@@ -37,6 +39,7 @@ pub fn transition(
             | (WaitingApproval, Stopped)
             | (Stopped, Archived)
             | (Error, Archived)
+            | (Archived, Ready)
     );
     if ok {
         Ok(to)
@@ -60,5 +63,7 @@ mod tests {
         assert!(transition(Created, Running).is_err());
         assert!(transition(Stopped, Running).is_err());
         assert_eq!(transition(Stopped, Archived).unwrap(), Archived);
+        assert_eq!(transition(Archived, Ready).unwrap(), Ready);
+        assert!(transition(Archived, Running).is_err());
     }
 }

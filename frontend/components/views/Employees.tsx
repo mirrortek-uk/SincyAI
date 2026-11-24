@@ -162,11 +162,41 @@ export function EmployeesView() {
   };
   const removeEmp = async () => {
     if (!sel) return;
-    if (!window.confirm("确认删除该员工? (软归档为 ARCHIVED, 数据保留, 可手工恢复; RUNNING 状态需先停止)")) return;
+    if (!window.confirm("确认删除该员工? (软归档为 ARCHIVED, 数据保留, 之后可点「恢复」; RUNNING 状态需先停止)")) return;
     try {
       await api.deleteEmployee(sel);
       const d = await api.listEmployees(); setEmps(d.items); setSel(d.items[0]?.id ?? null);
     } catch (e) { setSaved(`删除失败: ${e}`); }
+  };
+  // 生命周期动作: start/pause/resume/stop/unarchive + 手动跑一轮 cycle
+  const doAction = async (action: "start" | "pause" | "resume" | "stop" | "unarchive") => {
+    if (!sel) return;
+    try {
+      const r = await api.employeeAction(sel, action);
+      setSaved(`已切换为 ${r.status} ✅`);
+      const d = await api.listEmployees(); setEmps(d.items);
+    } catch (e) { setSaved(`操作失败: ${e}`); }
+  };
+  const runOnce = async () => {
+    if (!sel) return;
+    setSaved("正在手动跑一轮 cycle…");
+    try {
+      await api.runCycle(sel, "manual");
+      setSaved("已触发一轮 cycle ✅");
+      const d = await api.listCycles(sel, 10); setCycles(d.items);
+      if (d.items[0]) api.getCycle(d.items[0].id).then(setDetail).catch(() => {});
+    } catch (e) { setSaved(`触发失败: ${e}`); }
+  };
+  const lifeButtons = () => {
+    const s = emp?.status;
+    const btns: { label: string; action: "start" | "pause" | "resume" | "stop" | "unarchive"; cls?: string }[] = [];
+    if (s === "ARCHIVED") btns.push({ label: "🔄 恢复", action: "unarchive" });
+    if (s === "READY") btns.push({ label: "▶️ 启动", action: "start" });
+    if (s === "RUNNING") { btns.push({ label: "⏸ 暂停", action: "pause" }); btns.push({ label: "⏹ 停止", action: "stop" }); }
+    if (s === "PAUSED" || s === "DEGRADED") { btns.push({ label: "▶️ 继续", action: "resume" }); btns.push({ label: "⏹ 停止", action: "stop" }); }
+    return btns.map((b) => (
+      <button key={b.action} className={`btn sm ${b.cls ?? ""}`} style={{ marginLeft: 6 }} onClick={() => doAction(b.action)}>{b.label}</button>
+    ));
   };
 
   return (
@@ -236,7 +266,11 @@ export function EmployeesView() {
         <div className="card" style={{ gridColumn: "span 2" }}>
           <h3>{emp?.name ?? "—"} · 本周期
             <span className="sp" />
-            <button className="btn sm" onClick={() => setEditing((v) => !v)}>✏️ 编辑</button>
+            {lifeButtons()}
+            {emp?.status === "RUNNING" && (
+              <button className="btn sm" style={{ marginLeft: 6 }} onClick={runOnce}>▶ 跑一轮</button>
+            )}
+            <button className="btn sm" style={{ marginLeft: 6 }} onClick={() => setEditing((v) => !v)}>✏️ 编辑</button>
             <button className="btn sm danger" style={{ marginLeft: 6 }} onClick={removeEmp}>🗑 删除</button>
             <span className="sub">{cycles?.[0] ? `cycle ${cycles[0].id.slice(0, 8)} · ${cycles[0].trigger} · ${cycles[0].created_at.slice(0, 16).replace("T", " ")}` : ""}</span>
           </h3>

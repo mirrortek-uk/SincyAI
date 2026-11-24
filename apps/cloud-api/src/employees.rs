@@ -42,6 +42,7 @@ pub fn routes() -> Router<AppState> {
         .route("/employees/{id}/pause", post(transition_employee))
         .route("/employees/{id}/resume", post(transition_employee))
         .route("/employees/{id}/stop", post(transition_employee))
+        .route("/employees/{id}/unarchive", post(transition_employee))
         .route("/employees/{id}/goals", get(list_goals).post(create_goal))
         .route("/employees/{id}/strategy", get(get_strategy))
         .route(
@@ -587,7 +588,7 @@ async fn patch_employee(
     Ok(Json(json!({ "id": id, "patched": true })))
 }
 
-/// DELETE /employees/{id} — 软删除 (归档为 ARCHIVED, 可手工改回; 数据全留)。RUNNING 的员工先 stop 再删。
+/// DELETE /employees/{id} — 软删除 (归档为 ARCHIVED, 可 POST /employees/{id}/unarchive 恢复为 READY; 数据全留)。RUNNING 的员工先 stop 再删。
 async fn delete_employee(
     State(state): State<AppState>,
     axum::extract::Extension(auth): axum::extract::Extension<crate::auth::AuthCtx>,
@@ -630,7 +631,8 @@ async fn delete_employee(
     ))
 }
 
-/// start/pause/resume/stop — lifecycle transitions (DE §5.1), illegal ones 409.
+/// start/pause/resume/stop/unarchive — lifecycle transitions (DE §5.1), illegal ones 409.
+/// unarchive: ARCHIVED → READY (soft-delete 恢复), 之后再 start 进入 RUNNING.
 async fn transition_employee(
     State(state): State<AppState>,
     axum::extract::Extension(auth): axum::extract::Extension<crate::auth::AuthCtx>,
@@ -643,6 +645,7 @@ async fn transition_employee(
         "pause" => EmployeeStatus::Paused,
         "resume" => EmployeeStatus::Running,
         "stop" => EmployeeStatus::Stopped,
+        "unarchive" => EmployeeStatus::Ready,
         other => {
             return Err(app_error_response(sincy_common::AppError::non_retryable(
                 "bad_action",

@@ -213,6 +213,7 @@ export default function EmployeesPage() {
               ))}
             </select>
             {e.status === "READY" && <button disabled={busy} onClick={() => act(() => api.employeeAction(e.id, "start"))}>启动</button>}
+            {e.status === "ARCHIVED" && <button disabled={busy} onClick={() => act(() => api.employeeAction(e.id, "unarchive"))}>🔄 恢复为 READY</button>}
             {e.status === "RUNNING" && <button disabled={busy} onClick={() => act(() => api.employeeAction(e.id, "pause"))}>暂停</button>}
             {e.status === "PAUSED" && <button disabled={busy} onClick={() => act(() => api.employeeAction(e.id, "resume"))}>恢复</button>}
             {(e.status === "RUNNING" || e.status === "PAUSED") && <button disabled={busy} onClick={() => act(() => api.employeeAction(e.id, "stop"))}>停止</button>}
