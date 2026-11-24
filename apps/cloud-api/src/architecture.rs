@@ -64,6 +64,25 @@ async fn architecture(
     State(state): State<AppState>,
     axum::extract::Extension(auth): axum::extract::Extension<crate::auth::AuthCtx>,
 ) -> Json<Value> {
+    // as-built 动态计数 (避免文档漂移): 迁移数 / 注册源数 / 默认 feed 数
+    let (mig_count, src_count): (i64, i64) = match state.pool() {
+        Ok(pool) => {
+            let m = sqlx::query_scalar::<_, i64>("SELECT count(*)::int8 FROM _sqlx_migrations")
+                .fetch_one(pool)
+                .await
+                .unwrap_or(0);
+            let c = sqlx::query_scalar::<_, i64>("SELECT count(*)::int8 FROM intelligence_sources")
+                .fetch_one(pool)
+                .await
+                .unwrap_or(0);
+            (m, c)
+        }
+        Err(_) => (0, 0),
+    };
+    let feed_count = crate::intel_collector::CollectorConfig::from_env()
+        .feeds
+        .len() as i64;
+
     let layers = json!([
         {
             "id": "client",
@@ -104,11 +123,11 @@ async fn architecture(
                 node("thread", "Thread 拆分", "split_thread (加权感知: 段落→句子→硬切)",
                      "超限且规则为 thread 时, 内容拆成多帖写入 publishing_packages.thread_chunks; publish_core 按 chunk 扇出多个 device_tasks(幂等键 :tN), agent brief 按 thread_index 取对应分块文本"),
                 node("wi", "世界情报 sincy-intel", "registry · router · opportunity · adapter",
-                     "信源/Provider 注册表(28 个注册源, 支持 enable-all/单源 toggle); 路由打分 健康.45+可靠.30+限流.15+成本.10 + 降级链; ingest 按 dedup_key 去重; 机会引擎 0.35 支柱匹配+0.25 动量+0.15 量+0.15 稀缺+0.10 新鲜度, 过滤阈值 0.45, 周期行动阈值 0.30; wikipedia-rc 独占话题 ×0.5 防噪; DE 适配器(只给建议不改策略)"),
+                     &format!("信源/Provider 注册表({src_count} 个注册源, 支持 enable-all/单源 toggle); 路由打分 健康.45+可靠.30+限流.15+成本.10 + 降级链; ingest 按 dedup_key 去重; 机会引擎 0.35 支柱匹配+0.25 动量+0.15 量+0.15 稀缺+0.10 新鲜度, 过滤阈值 0.45, 周期行动阈值 0.30; wikipedia-rc 独占话题 ×0.5 防噪; DE 适配器(只给建议不改策略)")),
                 node("triggers", "触发三入口 → 工序0", "①机会驱动(默认) ②计划驱动 ③人工驱动 · POST /factory/briefs",
                      "三种入口都从信号库取已筛好的信号/机会, 不全网扫描; 断点①已接通: Opportunity 命中阈值 → Brief(工序0)"),
                 node("factory", "内容工厂 Content Factory 工序0–7", "sincy-content::factory · Brief/Master Asset/平台适配器/媒体端口",
-                     "工序0 Brief(目标/平台/角度/受众/CTA) → 工序1 策略选题 → 工序2 核心创作(grounding+事实核查) → Master Content Asset → 工序3 平台适配(每平台一个 adapter, x/小红书/抖音/IG/TikTok/YouTube/LinkedIn/FB, GET /factory/adapters) → 工序4 媒体生产(统一 Generator 端口: Faster-Whisper转写/MoneyPrinterTurbo/Pixelle-Video/Kling/Runway/Veo 可互换) → 工序5 质量门(已有 gate) → 工序6 审批 → 工序7 打包不可变 PublishingPackage"),
+                     "工序0 Brief(目标/平台/角度/受众/CTA) → 工序1 策略选题 → 工序2 核心创作(grounding+事实核查) → Master Content Asset → 工序3 平台适配(每平台一个 adapter, x/小红书/抖音/IG/TikTok/YouTube/LinkedIn/FB, GET /factory/adapters) → 工序4 媒体生产(统一 MediaProvider 端口: 默认 local-stub, 可经 CommandProvider 接入 Faster-Whisper/MoneyPrinterTurbo/Pixelle-Video/Kling/Runway/Veo) → 工序5 质量门(已有 gate) → 工序6 审批 → 工序7 打包不可变 PublishingPackage"),
                 node("learn", "工序9 回流&学习 Learn", "POST /factory/learn · sincy-content::factory::learn",
                      "指标采集+归因到具体变体 → learn() 形成学习结论 → 回写策略/品牌记忆; 断点②已接通闭环 Learn → Content Strategy"),
                 node("pub", "发布管线 routing/execution/platform/content", "publish_core",
@@ -117,8 +136,8 @@ async fn architecture(
                      "x.publish_post v18: home→composer→set_text→Post(side effect)→posted_confirm 验证; 锚点匹配率判漂移 UiDrift; Ed25519 私钥只在云端签名, 设备端只嵌公钥验签 (migration 0027)"),
                 node("device", "设备管理 sincy-device", "配对码(4 位数字) · 会话 60 天有效期 · revoke/rotate",
                      "pairing code 配对换长期 device token, token 只存哈希; device_sessions.expires_at 60 天过期 (migration 0026), 支持吊销与轮换; 心跳保活, 超时判离线"),
-                node("collector", "情报采集器 intel_collector", "tokio 定时任务(默认 30min) · WI §9",
-                     "32 条默认 feed: arXiv×5 / HN Algolia×3 / dev.to×4 / Wikipedia RC / GitHub 趋势×3 / YouTube×3 / IT之家/少数派/掘金/V2EX RSS / Google News×5(en+zh) / Product Hunt×2 / B站排行榜×2; 可选: GDELT(SINCY_INTEL_GDELT=1)、自托管 RSSHub 扩展×8(Reddit/知乎/微博/抖音/百度热榜/36氪)、SearXNG 自托管×2; 归一化 WI §11 入 intel_items(dedup_key 去重), jobs 记 last_fetched/last_new; 失败记 jobs 不强攻; 红线: 只走公开只读 API, 礼貌间隔, 不绕认证/验证码/限流"),
+                node("collector", "情报采集器 intel_collector", &format!("tokio 定时任务(默认 30min) · {feed_count} 条默认 feed · WI §9"),
+                     &format!("{feed_count} 条默认 feed: arXiv×5 / HN Algolia×3 / dev.to×4 / Wikipedia RC / GitHub 趋势×3 / YouTube×3 / IT之家/少数派/掘金/V2EX RSS / Google News×5(en+zh) / Product Hunt×2 / B站排行榜×2; 可选: GDELT(SINCY_INTEL_GDELT=1)、自托管 RSSHub 扩展×8(Reddit/知乎/微博/抖音/百度热榜/36氪)、SearXNG 自托管×2; 归一化 WI §11 入 intel_items(dedup_key 去重), jobs 记 last_fetched/last_new; 失败记 jobs 不强攻; 红线: 只走公开只读 API, 礼貌间隔, 不绕认证/验证码/限流")),
                 node("wihealth", "Source Health Audit", "GET /intel/health",
                      "按 source 聚合 job 运行记录: healthy(有新入库)/ degraded(在跑但 0 新增或部分失败)/ failed(全部失败)/ not_configured(已注册但 job 暂停、待自托管实例/密钥/出口 IP)/ disabled; 注册 ≠ 可用, 审计才是真相"),
                 node("pulse", "Sincy Pulse (世界情报的聚合源)", "sincy-intel::pulse · manifest 驱动 · migration 0030/0031",
@@ -153,7 +172,7 @@ async fn architecture(
             "id": "data",
             "title": "数据层",
             "nodes": [
-                node("db", "PostgreSQL", "migrations 0001–0028 · sqlx",
+                node("db", "PostgreSQL", &format!("migrations 动态计数 {mig_count} 个 · sqlx"),
                      "agencies/members/clients/brands · publishing_packages(+thread_chunks) · device_tasks/task_events/execution_routes · devices/sessions(+expires_at/token revoke) · kill_switches · quota · channel_capabilities/app_adapter_versions(+signature_scheme) · digital_employees/cycles/tasks/memory/insights/experiments · skills/skill_versions/employee_skill_bindings · intelligence_sources/providers/items/jobs/opportunities · platform_review_rules; RLS 租户隔离"),
                 node("vault", "Vault (密钥)", "vault:// 引用",
                      "平台/情报源的 API key 只存引用, 不落库明文"),
@@ -167,7 +186,7 @@ async fn architecture(
                      "手机 APK (dispatchGesture 真实触摸) 或 PC adb input 驱动真实 app 完成发布; 付费 API 路由已保留默认不启用; 不绕认证/验证码/限流, 挑战屏停人工"),
                 node("llm", "LLM Provider", "OpenAI-compatible API (Mistral 等)",
                      "SINCY_LLM_PROVIDER=openai-compatible + SINCY_LLM_API_KEY 环境变量; key 不入库不进 git; 本地可 mock / manual-file"),
-                node("wisrc", "情报信源(只读公共, 26 个注册源)", "arXiv · HN · dev.to · Wikipedia · Google News · Product Hunt · B站 · GitHub · YouTube · V2EX · 掘金 · 少数派 · IT之家 · RSSHub(self-host) · SearXNG(self-host)",
+                node("wisrc", &format!("情报信源(只读公共, {src_count} 个注册源)"), "arXiv · HN · dev.to · Wikipedia · Google News · Product Hunt · B站 · GitHub · YouTube · V2EX · 掘金 · 少数派 · IT之家 · RSSHub(self-host) · SearXNG(self-host)",
                      "采集走各自公开只读接口; 中文热榜/Reddit 走自托管 RSSHub; GDELT/Google Trends 待专用出口; 付费 provider(TikHub/SocialDataX/Firecrawl/reach-mcp) key 只放 vault, 未配置即 not_configured"),
             ]
         },
@@ -313,11 +332,26 @@ async fn architecture(
             "data"
         ),
         edge("pipe_sig", "wi", "signals → 机会引擎", "signal"),
-        edge("wi", "triggers", "opportunity 命中阈值 → 三入口之一", "signal"),
-        edge("triggers", "factory", "三入口汇入 → 工序0 Brief", "internal"),
+        edge(
+            "wi",
+            "triggers",
+            "opportunity 命中阈值 → 三入口之一",
+            "signal"
+        ),
+        edge(
+            "triggers",
+            "factory",
+            "三入口汇入 → 工序0 Brief",
+            "internal"
+        ),
         edge("factory", "pub", "工序7 打包 → 工序8 发布执行", "internal"),
         edge("pub", "learn", "工序9 指标/归因回流", "data"),
-        edge("learn", "factory", "Learn → 策略 闭环 (断点②已接)", "internal"),
+        edge(
+            "learn",
+            "factory",
+            "Learn → 策略 闭环 (断点②已接)",
+            "internal"
+        ),
         edge("api", "db", "全部业务读写 (RLS 按 agency 隔离)", "data"),
         edge("wi", "wisrc", "只读采集/搜索/趋势", "external"),
         edge(
@@ -353,7 +387,12 @@ async fn architecture(
             "data"
         ),
         edge("collector", "wi", "新信号触发机会引擎重算", "internal"),
-        edge("collector", "pipe_conn", "feed 归一化为 RawRecord 进管线", "inproc"),
+        edge(
+            "collector",
+            "pipe_conn",
+            "feed 归一化为 RawRecord 进管线",
+            "inproc"
+        ),
         edge(
             "api",
             "collector",
@@ -710,10 +749,22 @@ async fn architecture(
         (
             "F13",
             vec![
-                "wisrc", "pipe_conn", "pipe_raw", "pipe_router", "pipe_pl", "pipe_ent", "pipe_sig", "wi",
+                "wisrc",
+                "pipe_conn",
+                "pipe_raw",
+                "pipe_router",
+                "pipe_pl",
+                "pipe_ent",
+                "pipe_sig",
+                "wi",
             ],
         ),
-        ("F14", vec!["pipe_sig", "wi", "triggers", "factory", "pub", "learn", "factory"]),
+        (
+            "F14",
+            vec![
+                "pipe_sig", "wi", "triggers", "factory", "pub", "learn", "factory",
+            ],
+        ),
     ];
     let flows = {
         let mut v = flows;
@@ -791,6 +842,9 @@ async fn architecture(
             "internal": "内部调用",
             "data": "数据读写",
             "external": "外部系统",
+            "inproc": "进程内管线 (bus)",
+            "signal": "情报信号",
+            "sql": "SQL 镜像/回写",
         }
     }))
 }

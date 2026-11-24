@@ -1429,6 +1429,12 @@ pub(crate) struct PgLlmPort {
     allow_mock: bool,
 }
 
+impl PgLlmPort {
+    pub(crate) fn new(allow_mock: bool) -> Self {
+        Self { allow_mock }
+    }
+}
+
 #[async_trait]
 impl LlmPort for PgLlmPort {
     async fn generate(&self, prompt: &str, max_tokens: u32) -> Result<String, String> {

@@ -8,6 +8,7 @@ description = "Digital Employee domain (SINCY-ARCH-DE-001): identity/mission/goa
 [dependencies]
 sincy-common = { path = "../sincy-common" }
 sincy-intel = { path = "../sincy-intel" }
+sincy-content = { path = "../sincy-content" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

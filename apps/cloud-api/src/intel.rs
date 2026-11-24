@@ -886,6 +886,9 @@ pub(crate) async fn refresh_opportunities_db(
             upserted += 1;
         }
     }
+    // 断点①: 机会命中阈值(0.45)自动建工序0 Brief (落库 factory_briefs)
+    let auto = crate::factory::auto_briefs_from_opportunities(pool, 0.45).await;
+    tracing::info!(auto_briefs = auto, "opportunity-driven briefs auto-created");
     Ok((ranked.len(), upserted))
 }
 

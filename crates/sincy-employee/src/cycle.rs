@@ -276,6 +276,16 @@ pub trait LlmPort: Send + Sync {
     async fn generate(&self, prompt: &str, max_tokens: u32) -> Result<String, String>;
 }
 
+/// 把 LlmPort 适配成内容工厂的 TextGenerator 端口 (工序1/2 走同一 LLM)
+struct LlmTextGen<'a>(&'a dyn LlmPort);
+
+#[async_trait::async_trait]
+impl sincy_content::factory::TextGenerator for LlmTextGen<'_> {
+    async fn generate(&self, prompt: &str, max_tokens: u32) -> Result<String, String> {
+        self.0.generate(prompt, max_tokens).await
+    }
+}
+
 /// Publishing execution port (DE §12: separate service; employee only submits
 /// packages and receives structured outcomes).
 #[async_trait]
@@ -616,15 +626,40 @@ pub async fn run_cycle(
     let create_run = run_skill("social_post_generation", &create_input, &hctx)
         .await
         .ok();
-    let draft = match &create_run {
+    // 内容工厂主路径: 工序0 Brief → 工序1 策略 → 工序2 母稿(grounding+事实核查)
+    let factory_draft = {
+        let brief = sincy_content::factory::Brief::from_opportunity(
+            &employee.brand_id.map(|b| b.to_string()).unwrap_or_default(),
+            "",
+            None,
+            &mission.statement,
+            vec![employee.channel.clone()],
+            &opp.topic,
+        );
+        let signals: Vec<serde_json::Value> = evidence_items.iter().take(8).cloned().collect();
+        let llm_gen = LlmTextGen(deps.llm.as_ref());
+        async move {
+            let plan = sincy_content::factory::plan_strategy(&brief, &signals, &llm_gen)
+                .await
+                .ok()?;
+            let master = sincy_content::factory::create_master(&brief, &plan, &signals, &llm_gen)
+                .await
+                .ok()?;
+            Some(master.text)
+        }
+        .await
+        .filter(|t| !t.is_empty())
+    };
+    let fallback_draft = match &create_run {
         Some(r) => r
             .output
             .get("text")
             .and_then(|t| t.as_str())
             .unwrap_or("")
             .to_string(),
-        None => deps.llm.generate(&prompt, 512).await?,
+        None => deps.llm.generate(&prompt, 512).await.unwrap_or_default(),
     };
+    let draft = factory_draft.unwrap_or(fallback_draft);
     if draft.is_empty() {
         return Err("content handler and fallback both produced empty draft".into());
     }

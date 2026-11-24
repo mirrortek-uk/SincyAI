@@ -12,9 +12,10 @@ pub mod package;
 
 pub use ai_label::{AiLabel, PlatformLabelRequirement};
 pub use factory::{
-    Brief, CommandProvider, Learning, LocalStubProvider, MediaJob, MediaOutput, MediaProvider,
-    MetricEvent, PlatformAdapter, PlatformSpec, SimpleAdapter, TriggerSource, default_adapters,
-    learn,
+    Brief, CommandProvider, Learning, LocalStubProvider, MasterAsset, MediaJob, MediaOutput,
+    MediaProvider, MetricEvent, PlatformAdapter, PlatformSpec, SimpleAdapter, StrategyPlan,
+    TextGenerator, TriggerSource, adapt_master, create_master, default_adapters, learn,
+    plan_strategy,
 };
 pub use gate::{GateVerdict, QualityGate, QualityIssue};
 pub use package::{MediaAsset, PackageEditor, PackageError, PublishingPackage};

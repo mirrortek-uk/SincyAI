@@ -14,3 +14,8 @@ uuid = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 async-trait = "0.1"
+
+[dev-dependencies]
+
+tokio = { workspace = true }
+

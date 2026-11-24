@@ -397,7 +397,9 @@ pub async fn run_provider_once(pool: &sqlx::PgPool, provider_id: &str) -> Result
                         &e.canonical_key,
                         rp,
                     );
-                    if let Err(e) = crate::pipeline::ingest_record(pool, &rec).await { tracing::warn!(error = %e, dedup = %rec.dedup_key, "pipeline ingest failed"); }
+                    if let Err(e) = crate::pipeline::ingest_record(pool, &rec).await {
+                        tracing::warn!(error = %e, dedup = %rec.dedup_key, "pipeline ingest failed");
+                    }
                 }
                 total_fetched += fetched;
                 total_new += new;

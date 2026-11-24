@@ -29,7 +29,10 @@ impl HttpConnector {
         Self { manifest, client }
     }
 
-    async fn fetch_source(&self, src: &sincy_intel::pipeline::SourceRef) -> Result<Vec<RawRecord>, ConnectorError> {
+    async fn fetch_source(
+        &self,
+        src: &sincy_intel::pipeline::SourceRef,
+    ) -> Result<Vec<RawRecord>, ConnectorError> {
         if !src.enabled {
             return Ok(vec![]);
         }
@@ -97,11 +100,19 @@ fn parse_json_items(body: &str, label: &str) -> Vec<(String, String, Value)> {
     let arr = find_first_array(&v);
     let mut out = Vec::new();
     for item in arr.unwrap_or(&Vec::new()).iter() {
-        let title = ["title", "name", "full_name", "keyword", "topic", "headline", "query"]
-            .iter()
-            .find_map(|k| item.get(k).and_then(|x| x.as_str()))
-            .unwrap_or("")
-            .to_string();
+        let title = [
+            "title",
+            "name",
+            "full_name",
+            "keyword",
+            "topic",
+            "headline",
+            "query",
+        ]
+        .iter()
+        .find_map(|k| item.get(k).and_then(|x| x.as_str()))
+        .unwrap_or("")
+        .to_string();
         let url = ["url", "html_url", "link", "permalink", "webUrl"]
             .iter()
             .find_map(|k| item.get(k).and_then(|x| x.as_str()))
@@ -122,11 +133,17 @@ fn find_first_array(v: &Value) -> Option<&Vec<Value>> {
         return Some(a);
     }
     if let Some(o) = v.as_object() {
-        for key in ["hits", "items", "results", "list", "data", "articles", "entries"] {
+        for key in [
+            "hits", "items", "results", "list", "data", "articles", "entries",
+        ] {
             if let Some(a) = o.get(key).and_then(|x| x.as_array()) {
                 return Some(a);
             }
-            if let Some(inner) = o.get(key).and_then(|x| x.get("list")).and_then(|x| x.as_array()) {
+            if let Some(inner) = o
+                .get(key)
+                .and_then(|x| x.get("list"))
+                .and_then(|x| x.as_array())
+            {
                 return Some(inner);
             }
         }
@@ -146,7 +163,11 @@ impl Connector for HttpConnector {
         &self.manifest.descriptor
     }
 
-    async fn fetch(&self, params: &FetchParams, _cursor: Option<Cursor>) -> Result<Batch, ConnectorError> {
+    async fn fetch(
+        &self,
+        params: &FetchParams,
+        _cursor: Option<Cursor>,
+    ) -> Result<Batch, ConnectorError> {
         let mut records = Vec::new();
         let mut last: Option<String> = None;
         for src in &self.manifest.sources {
@@ -227,7 +248,9 @@ pub async fn run_scheduler(pool: sqlx::PgPool) {
         for conn in connector_registry() {
             let id = conn.descriptor().id.clone();
             match run_connector(&pool, &id).await {
-                Ok((f, p)) => tracing::info!(connector = %id, fetched = f, processed = p, "connector run done"),
+                Ok((f, p)) => {
+                    tracing::info!(connector = %id, fetched = f, processed = p, "connector run done")
+                }
                 Err(e) => tracing::warn!(connector = %id, error = %e, "connector run failed"),
             }
         }

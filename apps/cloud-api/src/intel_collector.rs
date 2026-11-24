@@ -594,7 +594,9 @@ async fn collect_feed(
                 &dk,
                 rp,
             );
-            if let Err(e) = crate::pipeline::ingest_record(pool, &rec).await { tracing::warn!(error = %e, dedup = %rec.dedup_key, "pipeline ingest failed"); }
+            if let Err(e) = crate::pipeline::ingest_record(pool, &rec).await {
+                tracing::warn!(error = %e, dedup = %rec.dedup_key, "pipeline ingest failed");
+            }
         } else {
             dup += 1;
         }

@@ -14,9 +14,9 @@ pub mod record;
 pub mod signals;
 
 pub use connector::{Connector, ConnectorDescriptor, ConnectorRegistry, DatasetDecl, FetchParams};
-pub use manifest::{ConnectorManifest, SourceRef, default_connector_manifests};
 pub use engine::{PipelineEngine, default_engine};
 pub use graph::{Pipeline, PipelineRegistry};
+pub use manifest::{ConnectorManifest, SourceRef, default_connector_manifests};
 pub use processor::{ProcessingContext, ProcessingResult, Processor, ProcessorRegistry};
 pub use record::{Batch, ConnectorError, Cursor, RawRecord, RecordMetadata, RecordType};
 pub use signals::{IntelEntity, Signal, SignalType};

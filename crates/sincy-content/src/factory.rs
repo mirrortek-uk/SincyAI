@@ -134,10 +134,18 @@ impl PlatformAdapter for SimpleAdapter {
     fn adapt(&self, master: &str, brief: &Brief) -> String {
         let mut out = master.to_string();
         if !self.spec.hashtag_style.is_empty() && !brief.angle.is_empty() {
-            out = format!("{out}\n{}", self.spec.hashtag_style.replace("{topic}", &brief.angle.replace(' ', "")));
+            out = format!(
+                "{out}\n{}",
+                self.spec
+                    .hashtag_style
+                    .replace("{topic}", &brief.angle.replace(' ', ""))
+            );
         }
         if !self.spec.cta_style.is_empty() && !brief.cta.is_empty() {
-            out = format!("{out}\n{}", self.spec.cta_style.replace("{cta}", &brief.cta));
+            out = format!(
+                "{out}\n{}",
+                self.spec.cta_style.replace("{cta}", &brief.cta)
+            );
         }
         if let Some(max) = self.spec.max_chars
             && out.chars().count() > max
@@ -174,6 +182,158 @@ pub fn default_adapters() -> Vec<Box<dyn PlatformAdapter>> {
         mk("linkedin", Some(3000), None, false),
         mk("facebook", Some(63206), None, false),
     ]
+}
+
+// ---------- 工序1/2: 策略选题 + 核心创作 (grounding + 事实核查 → Master Asset) ----------
+
+/// LLM 文本生成端口: cloud-api 用 sincy-ai gateway 实现, 员工周期用 LlmPort 适配
+#[async_trait::async_trait]
+pub trait TextGenerator: Send + Sync {
+    async fn generate(&self, prompt: &str, max_tokens: u32) -> Result<String, String>;
+}
+
+/// 工序1 产出: 策略/选题方案
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategyPlan {
+    pub angle: String,
+    pub key_points: Vec<String>,
+    pub outline: Vec<String>,
+}
+
+/// 工序1 策略/选题: 基于 Brief + 信号库证据生成要点与大纲 (平台无关)
+pub async fn plan_strategy(
+    brief: &Brief,
+    signals: &[Value],
+    llm: &dyn TextGenerator,
+) -> Result<StrategyPlan, String> {
+    let evidence: Vec<String> = signals
+        .iter()
+        .take(8)
+        .map(|s| {
+            format!(
+                "- {} ({}): {}",
+                s.get("signal_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("signal"),
+                s.get("strength").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                s.get("payload")
+                    .and_then(|p| p.get("title").or_else(|| p.get("topic")))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+            )
+        })
+        .collect();
+    let prompt = format!(
+        "You are the strategy step (工序1) of a content factory. Given the brief and grounded signals,          produce a JSON object {{angle, key_points[<=5], outline[3-5 steps]}}. No prose outside JSON.
+
+         Brief: goal={} angle={} platforms={:?} audience={}
+Signals:
+{}",
+        brief.goal, brief.angle, brief.platforms, brief.audience, evidence.join("
+")
+    );
+    let raw = llm.generate(&prompt, 512).await?;
+    parse_plan(&raw, &brief.angle)
+}
+
+fn parse_plan(raw: &str, fallback_angle: &str) -> Result<StrategyPlan, String> {
+    if let Ok(v) = serde_json::from_str::<Value>(raw) {
+        return Ok(StrategyPlan {
+            angle: v["angle"].as_str().unwrap_or(fallback_angle).to_string(),
+            key_points: v["key_points"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            outline: v["outline"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        });
+    }
+    // 回退: 按行拆
+    let lines: Vec<String> = raw
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    Ok(StrategyPlan {
+        angle: fallback_angle.to_string(),
+        key_points: lines.iter().take(5).cloned().collect(),
+        outline: lines,
+    })
+}
+
+/// 工序2 产出: 平台无关的 Master Content Asset (grounding + 事实核查备注)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MasterAsset {
+    pub text: String,
+    pub grounding: Vec<String>,
+    pub fact_check: Vec<String>,
+}
+
+/// 工序2 核心创作: 把策略方案 + 信号证据 grounding 进母稿, 并要求模型列出事实核查点
+pub async fn create_master(
+    brief: &Brief,
+    plan: &StrategyPlan,
+    signals: &[Value],
+    llm: &dyn TextGenerator,
+) -> Result<MasterAsset, String> {
+    let evidence: Vec<String> = signals
+        .iter()
+        .take(8)
+        .filter_map(|s| {
+            s.get("payload")
+                .and_then(|p| p.get("title").or_else(|| p.get("url")))
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        })
+        .collect();
+    let prompt = format!(
+        "You are the core creation step (工序2) of a content factory. Write the platform-agnostic master content.          Ground every claim in the provided signals. End with a JSON block: {{fact_check: [claims to verify]}}.          Output: master text, then the JSON block on the last line.
+
+         Brief: goal={} angle={} audience={} cta={}
+Plan: angle={} key_points={:?} outline={:?}
+Signal evidence:
+{}",
+        brief.goal, brief.angle, brief.audience, brief.cta,
+        plan.angle, plan.key_points, plan.outline, evidence.join("
+")
+    );
+    let raw = llm.generate(&prompt, 1024).await?;
+    // 拆出末行 JSON 作事实核查
+    let mut fact_check = Vec::new();
+    let mut text = raw.clone();
+    if let Some(idx) = raw.rfind('{')
+        && let Ok(v) = serde_json::from_str::<Value>(&raw[idx..])
+    {
+        fact_check = v["fact_check"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        text = raw[..idx].trim().to_string();
+    }
+    Ok(MasterAsset {
+        text,
+        grounding: evidence,
+        fact_check,
+    })
+}
+
+/// 工序3 入口: 用平台 adapter 把 Master Asset 适配成该平台变体
+pub fn adapt_master(master: &MasterAsset, adapter: &dyn PlatformAdapter, brief: &Brief) -> String {
+    adapter.adapt(&master.text, brief)
 }
 
 // ---------- 工序4: 媒体生产端口 (统一 Generator 端口, provider 可互换) ----------
@@ -311,10 +471,18 @@ pub fn learn(events: &[MetricEvent]) -> Vec<Learning> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn brief_from_opportunity_carries_seed() {
-        let b = Brief::from_opportunity("b1", "opp1", Some("sig1"), "grow", vec!["x".into()], "angle");
+        let b = Brief::from_opportunity(
+            "b1",
+            "opp1",
+            Some("sig1"),
+            "grow",
+            vec!["x".into()],
+            "angle",
+        );
         assert_eq!(b.trigger, TriggerSource::OpportunityDriven);
         assert_eq!(b.seed_opportunity_id.as_deref(), Some("opp1"));
         assert_eq!(b.seed_signal_id.as_deref(), Some("sig1"));
@@ -336,11 +504,57 @@ mod tests {
     }
 
     #[test]
+    fn strategy_and_master_flow_with_mock_llm() {
+        struct Mock;
+        #[async_trait::async_trait]
+        impl TextGenerator for Mock {
+            async fn generate(&self, prompt: &str, _m: u32) -> Result<String, String> {
+                if prompt.contains("工序1") {
+                    Ok(r#"{"angle":"AI agents for ops","key_points":["a","b"],"outline":["hook","proof","cta"]}"#.to_string())
+                } else {
+                    Ok("Master text about AI agents.
+{\"fact_check\":[\"statX\"]}
+"
+                    .to_string())
+                }
+            }
+        }
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let brief = Brief::manual("b1", "AI agents", vec!["x".into()]);
+            let signals = vec![json!({"signal_type":"trend_rising","strength":0.9,"payload":{"title":"AI agents trend"}})];
+            let plan = plan_strategy(&brief, &signals, &Mock).await.unwrap();
+            assert_eq!(plan.key_points.len(), 2);
+            let master = create_master(&brief, &plan, &signals, &Mock).await.unwrap();
+            assert!(master.text.contains("Master text"));
+            assert_eq!(master.fact_check, vec!["statX".to_string()]);
+            assert_eq!(master.grounding.len(), 1);
+        });
+    }
+
+    #[test]
     fn learn_aggregates_variants() {
         let now = chrono::Utc::now();
         let ev = vec![
-            MetricEvent { platform: "x".into(), package_id: "p".into(), variant_id: "v1".into(), metric: "ctr".into(), value: 0.1, observed_at: now },
-            MetricEvent { platform: "x".into(), package_id: "p".into(), variant_id: "v1".into(), metric: "ctr".into(), value: 0.2, observed_at: now },
+            MetricEvent {
+                platform: "x".into(),
+                package_id: "p".into(),
+                variant_id: "v1".into(),
+                metric: "ctr".into(),
+                value: 0.1,
+                observed_at: now,
+            },
+            MetricEvent {
+                platform: "x".into(),
+                package_id: "p".into(),
+                variant_id: "v1".into(),
+                metric: "ctr".into(),
+                value: 0.2,
+                observed_at: now,
+            },
         ];
         let ls = learn(&ev);
         assert_eq!(ls.len(), 1);
