@@ -428,6 +428,7 @@ export interface IntelStats {
   by_source: { source_id: string; n: number; last_at: string | null }[];
   opportunities: number;
   opportunities_new: number;
+  opportunities_actionable: number;
   entities_total: number;
   signals_total: number;
   last_pass_inserted_total: number;

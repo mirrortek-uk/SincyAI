@@ -108,7 +108,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
           healthy: status ? status.sources.filter((s) => s.health === "healthy").length : null,
           entities: stats ? stats.entities_total : null,
           signals: stats ? stats.signals_total : null,
-          opportunities: stats ? stats.opportunities_new : null,
+          opportunities: stats ? stats.opportunities_actionable : null,
           factory: briefs ? briefs.briefs.filter((b) => b.status === "draft" || b.status === "running").length : null,
           pending: pkgs ? pkgs.items.filter((p) => p.approval_status === "pending").length : null,
           publishedToday: pkgs
@@ -168,7 +168,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
             {railItem("healthy", rail.healthy, "sources", undefined, "健康信源数 (最近一次抓取成功)")}<span className="rarrow">→</span>
             {railItem("实体", rail.entities, "intel", undefined, "intelligence_entities 累计实体数")}<span className="rarrow">→</span>
             {railItem("信号", rail.signals, "signals", undefined, "intelligence_signals 累计信号数")}<span className="rarrow">→</span>
-            {railItem("机会", rail.opportunities, "signals", undefined, "status=new 待处理机会数 (累计总量见情报页)")}<span className="rarrow">⇒</span>
+            {railItem("机会", rail.opportunities, "signals", undefined, "7 天内 status=new 的可行动机会数 (cycle 只消费这个范围; 历史累计约 1 万条未清理)")}<span className="rarrow">⇒</span>
             {railItem("工厂", rail.factory, "factory", "fac", "进行中 Brief 数 (draft+running)")}<span className="rarrow">→</span>
             {railItem("待审", rail.pending, "approvals", "fac", "待人工审批的内容包")}<span className="rarrow">→</span>
             {railItem("发布", rail.publishedToday, "analytics", undefined, "今日已发布数")}<span className="rarrow">↺</span>

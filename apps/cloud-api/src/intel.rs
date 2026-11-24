@@ -310,6 +310,13 @@ async fn stats(State(state): State<AppState>) -> Result<Json<Value>, axum::respo
         .fetch_one(pool)
         .await
         .map_err(err)?;
+    // 可行动机会 = status new 且 7 天内 (cycle 打分只看这个范围)
+    let opps_actionable: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM intel_opportunities WHERE status = 'new' AND created_at > now() - interval '7 days'",
+    )
+        .fetch_one(pool)
+        .await
+        .map_err(err)?;
     let signals_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM intelligence_signals")
         .fetch_one(pool)
         .await
@@ -345,6 +352,7 @@ async fn stats(State(state): State<AppState>) -> Result<Json<Value>, axum::respo
         "by_source": sources,
         "opportunities": opps,
         "opportunities_new": opps_new,
+        "opportunities_actionable": opps_actionable,
         "entities_total": entities,
         "signals_total": signals_total,
         "last_pass_inserted_total": jobs,
@@ -842,7 +850,15 @@ async fn refresh_opportunities(
 pub async fn expire_stale_opportunities(
     pool: &sqlx::PgPool,
 ) -> Result<u64, axum::response::Response> {
-    let n = sqlx::query("UPDATE intel_opportunities SET status = 'dismissed' WHERE status = 'new' AND created_at < now() - interval '7 days'")
+    let mut n = sqlx::query("UPDATE intel_opportunities SET status = 'dismissed' WHERE status = 'new' AND created_at < now() - interval '7 days'")
+        .execute(pool)
+        .await
+        .map_err(|e| crate::api::app_error_response(sincy_common::AppError::retryable("db", e.to_string())))?
+        .rows_affected();
+    // 机会池上限: 只保留 score 前 500 的 new, 其余直接 dismissed, 避免无人消费时无限累积
+    n += sqlx::query(
+        "UPDATE intel_opportunities SET status = 'dismissed' WHERE status = 'new' AND topic NOT IN (SELECT topic FROM intel_opportunities WHERE status = 'new' ORDER BY score DESC, created_at DESC LIMIT 500)",
+    )
         .execute(pool)
         .await
         .map_err(|e| crate::api::app_error_response(sincy_common::AppError::retryable("db", e.to_string())))?
