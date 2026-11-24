@@ -273,22 +273,28 @@ fn x_publish_post_adapter_validates_and_signs() {
 fn x_publish_post_flow_executes_on_scripted_screens() {
     let yaml = include_str!("../../../adapters/x.publish_post.yaml");
     let def = AdapterDefinition::from_yaml(yaml).unwrap();
+    // v6 真机核验 flow: home(tap_at FAB) -> composer x3 -> tap_at post(side_effect) -> home(verify)
+    let home = || {
+        MockSnapshot::new(
+            vec!["home_navigation_bar_title".into()],
+            vec!["Home".into()],
+        )
+    };
+    let composer = || {
+        MockSnapshot::new(
+            vec!["ComposerRoot".into()],
+            vec!["What's happening?".into()],
+        )
+    };
     let io = ScriptedIo {
         screens: vec![
-            MockSnapshot::new(
-                vec!["com.twitter.android:id/bottom_bar".into()],
-                vec!["Home".into()],
-            ),
-            MockSnapshot::new(
-                vec!["com.twitter.android:id/tweet_text".into()],
-                vec!["What's happening?".into()],
-            ),
-            MockSnapshot::new(
-                vec!["com.twitter.android:id/tweet_text".into()],
-                vec!["What's happening?".into()],
-            ),
-            MockSnapshot::new(vec![], vec!["Your post was sent".into()]),
-            MockSnapshot::new(vec![], vec!["Your post was sent".into()]),
+            home(),
+            composer(),
+            composer(),
+            composer(),
+            composer(),
+            home(),
+            home(),
         ],
         performed: vec![],
         fail_on_side_effect: false,

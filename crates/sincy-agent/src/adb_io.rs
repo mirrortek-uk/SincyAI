@@ -534,11 +534,11 @@ impl PlatformIo for AdbIo {
                 let _ = self.shell("input keyevent KEYCODE_BACK");
             }
             Action::TapAt { x, y } => {
-                let plan = plan_tap(
-                    (*x - 8, *y - 8, *x + 8, *y + 8),
-                    &self.profile,
-                    &mut self.rng,
-                );
+                // yaml 坐标以 1080x2184 为基准, 按实际屏幕等比缩放
+                let (w, h) = self.screen_size();
+                let x = (*x as f32 * w as f32 / 1080.0).round() as i32;
+                let y = (*y as f32 * h as f32 / 2184.0).round() as i32;
+                let plan = plan_tap((x - 8, y - 8, x + 8, y + 8), &self.profile, &mut self.rng);
                 Self::sleep_ms(plan.pre_ms);
                 let o = self.shell(&format!("input tap {} {}", plan.x, plan.y));
                 if !o.status.success() {
@@ -550,7 +550,16 @@ impl PlatformIo for AdbIo {
                 Self::sleep_ms(plan.post_ms);
             }
             Action::SwipePath { x1, y1, x2, y2, ms } => {
-                let mut plan = plan_swipe(*x1, *y1, *x2, *y2, &self.profile, &mut self.rng);
+                // yaml 坐标以 1080x2184 为基准, 按实际屏幕等比缩放
+                let (w, h) = self.screen_size();
+                let sc = |v: i32, ref_v: i32, actual: i32| {
+                    (v as f32 * actual as f32 / ref_v as f32).round() as i32
+                };
+                let x1 = sc(*x1, 1080, w);
+                let y1 = sc(*y1, 2184, h);
+                let x2 = sc(*x2, 1080, w);
+                let y2 = sc(*y2, 2184, h);
+                let mut plan = plan_swipe(x1, y1, x2, y2, &self.profile, &mut self.rng);
                 let total: u64 = plan.segments.iter().map(|s| s.ms).sum();
                 if total > 0 && *ms > 0 {
                     let scale = *ms as f64 / total as f64;

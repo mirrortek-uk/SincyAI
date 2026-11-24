@@ -1,6 +1,7 @@
 # X (Twitter) 设备自动化 App Adapter (v2, 真机核验版)。
 # 不走付费 X API v2，走设备自动化 (PRD 5.3); Sincy 签名发布, 设备只执行签名有效
 # 且 App 版本在范围内的版本。锚点已按真机核验 (X 12.45.1-prod.01, zh locale, 1080x2184)。
+说明: 本文件中 tap_at/swipe_path 坐标均以 1080x2184 为基准分辨率书写, 设备端会按实际屏幕等比缩放。
 adapter: x.publish_post
 version: 6
 app:

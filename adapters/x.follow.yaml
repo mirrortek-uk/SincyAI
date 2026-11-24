@@ -6,6 +6,7 @@
 #   home 顶栏 id: home_navigation_bar_title; 底部导航 "探索" tab
 #   探索页: 顶部搜索框占位 "搜索"; 搜索建议首行在搜索框正下方
 #   资料页 id: UserProfileScreen, 右上 "关注" 按钮
+说明: 本文件中 tap_at/swipe_path 坐标均以 1080x2184 为基准分辨率书写, 设备端会按实际屏幕等比缩放。
 adapter: x.follow
 version: 13
 app:

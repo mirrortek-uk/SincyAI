@@ -6,6 +6,7 @@
 # v19 真机核验 (X 12.45.1-prod.01, 中文 locale, 1080x2184):
 #   home 顶栏 id: home_navigation_bar_title; 首帖操作栏"回复"按钮坐标 ~(223,640)
 #   全屏编辑页 id: ComposerRoot; 输入框占位 "有什么新鲜事？"; 右上发布按钮坐标 ~(964,176)
+说明: 本文件中 tap_at/swipe_path 坐标均以 1080x2184 为基准分辨率书写, 设备端会按实际屏幕等比缩放。
 adapter: x.reply_comment
 version: 40
 app:

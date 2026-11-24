@@ -584,6 +584,22 @@ mod jni {
         }
     }
 
+    /// Adapter yaml 里 tap_at / swipe_path 的坐标以 1080x2184 为基准分辨率书写;
+    /// 这里按设备实际屏幕等比缩放, 换手机 / 换分辨率不用改动 adapter。
+    const REF_W: f32 = 1080.0;
+    const REF_H: f32 = 2184.0;
+
+    fn scale_to_screen(snap: &JsonSnapshot, x: i32, y: i32) -> (i32, i32) {
+        let (w, h) = snap.screen_size();
+        if w <= 0 || h <= 0 {
+            return (x, y);
+        }
+        (
+            (x as f32 * w as f32 / REF_W).round() as i32,
+            (y as f32 * h as f32 / REF_H).round() as i32,
+        )
+    }
+
     /// Serialize an interpreter action into the JSON contract Kotlin parses.
     /// Tap/scroll carry a concrete humanized plan; if the node bounds are not in
     /// the snapshot we fall back to target-based resolution on the Kotlin side.
@@ -636,6 +652,8 @@ mod jni {
             }
             // 视觉/坐标动作: 以坐标为中心造一个小包围盒, 走同样的人性化 tap 规划
             Action::TapAt { x, y } => {
+                // yaml 坐标以 1080x2184 为基准书写, 按实际屏幕等比缩放 (换手机/分辨率不用改 adapter)
+                let (x, y) = scale_to_screen(snap, *x, *y);
                 let b = (x - 8, y - 8, x + 8, y + 8);
                 let plan = plan_tap(b, p, rng);
                 json!({
@@ -647,7 +665,9 @@ mod jni {
                 .to_string()
             }
             Action::SwipePath { x1, y1, x2, y2, ms } => {
-                let plan = plan_swipe(*x1, *y1, *x2, *y2, p, rng);
+                let (x1, y1) = scale_to_screen(snap, *x1, *y1);
+                let (x2, y2) = scale_to_screen(snap, *x2, *y2);
+                let plan = plan_swipe(x1, y1, x2, y2, p, rng);
                 let mut segs = plan.segments;
                 // respect requested duration roughly by scaling segment ms
                 let total: u64 = segs.iter().map(|s| s.ms).sum();
