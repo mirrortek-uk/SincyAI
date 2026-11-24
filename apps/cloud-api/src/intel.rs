@@ -281,8 +281,16 @@ async fn trends(State(state): State<AppState>) -> Result<Json<Value>, axum::resp
 }
 
 /// GET /intel/stats — 数据池规模与采集概况 (WI dashboard §28).
-async fn stats(State(state): State<AppState>) -> Result<Json<Value>, axum::response::Response> {
+/// 视角: owner 角色看全平台 (scope=platform); 普通租户看 共享池规模 + 自己租户的认领/工厂数
+/// (scope=tenant)——实体/信号/机会池是全局共享资产, 让租户感知后端数据体量,
+/// 同时只能看到自己租户的机会认领数与内容工厂数据。
+async fn stats(
+    State(state): State<AppState>,
+    axum::extract::Extension(auth): axum::extract::Extension<crate::auth::AuthCtx>,
+) -> Result<Json<Value>, axum::response::Response> {
     let pool = state.pool().map_err(app_error_response)?;
+    let is_owner = auth.roles.iter().any(|r| r == "owner" || r == "admin");
+    let scope = if is_owner { "platform" } else { "tenant" };
     let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM intel_items")
         .fetch_one(pool)
         .await
@@ -346,13 +354,33 @@ async fn stats(State(state): State<AppState>) -> Result<Json<Value>, axum::respo
             })
         })
         .collect();
+    // 租户私有补充指标 (仅非 owner): 本租户员工的机会认领数 + 内容工厂 brief 数
+    let (claimed, factory_briefs): (i64, i64) = if is_owner {
+        (0, 0)
+    } else {
+        let agency = auth.agency_id.as_uuid();
+        let c: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM opportunity_claims c JOIN digital_employees e ON e.id = c.employee_id WHERE e.agency_id = $1",
+        )
+        .bind(agency)
+        .fetch_one(pool).await.map_err(err)?;
+        let f: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM factory_briefs WHERE agency_id = $1")
+            .bind(agency)
+            .fetch_one(pool)
+            .await
+            .map_err(err)?;
+        (c, f)
+    };
     Ok(Json(json!({
+        "scope": scope,
         "total_items": total,
         "by_kind": kinds,
         "by_source": sources,
         "opportunities": opps,
         "opportunities_new": opps_new,
         "opportunities_actionable": opps_actionable,
+        "opportunities_claimed": claimed,
+        "factory_briefs": factory_briefs,
         "entities_total": entities,
         "signals_total": signals_total,
         "last_pass_inserted_total": jobs,
@@ -855,9 +883,11 @@ pub async fn expire_stale_opportunities(
         .await
         .map_err(|e| crate::api::app_error_response(sincy_common::AppError::retryable("db", e.to_string())))?
         .rows_affected();
-    // 机会池上限: 只保留 score 前 500 的 new, 其余直接 dismissed, 避免无人消费时无限累积
+    // 机会池上限: 动态化 (0048)—— cap = GREATEST(500, 50 * 全平台活跃员工数),
+    // 活跃员工越多池子越大, 避免多员工把共享 new 池抢光; platform_active_employee_count()
+    // 是 SECURITY DEFINER, 后台无租户上下文时也能统计 (digital_employees 有 RLS)。
     n += sqlx::query(
-        "UPDATE intel_opportunities SET status = 'dismissed' WHERE status = 'new' AND topic NOT IN (SELECT topic FROM intel_opportunities WHERE status = 'new' ORDER BY score DESC, created_at DESC LIMIT 500)",
+        "UPDATE intel_opportunities SET status = 'dismissed' WHERE status = 'new' AND topic NOT IN (SELECT topic FROM intel_opportunities WHERE status = 'new' ORDER BY score DESC, created_at DESC LIMIT (SELECT GREATEST(500, 50 * platform_active_employee_count())))",
     )
         .execute(pool)
         .await

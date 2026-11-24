@@ -1419,14 +1419,27 @@ impl CycleStore for PgCycleStore {
         .map_err(|e| e.to_string())?;
         Ok(rows.iter().map(|r| r.get::<String, _>(0)).collect())
     }
-    async fn mark_opportunity(&self, topic: &str, status: &str) -> Result<(), String> {
-        sqlx::query("UPDATE intel_opportunities SET status = $1 WHERE topic = $2")
-            .bind(status)
-            .bind(topic)
-            .execute(&self.pool)
-            .await
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+    /// 认领机会: 写入 per-employee 认领表 (共享池不互斥, 0048)。
+    /// 不再改动 intel_opportunities 的全局 status——同一 topic 可被不同员工消费,
+    /// 各自基于自己的 voice/focus/pillars 生成不同内容; 同一员工不重复认领。
+    async fn mark_opportunity(
+        &self,
+        employee_id: Uuid,
+        topic: &str,
+        status: &str,
+    ) -> Result<(), String> {
+        sqlx::query(
+            "INSERT INTO opportunity_claims (agency_id, employee_id, topic, status)
+             SELECT agency_id, $1, $2, $3 FROM digital_employees WHERE id = $1
+             ON CONFLICT (employee_id, topic) DO NOTHING",
+        )
+        .bind(employee_id)
+        .bind(topic)
+        .bind(status)
+        .execute(&self.pool)
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
     }
 
     async fn add_experiment(
@@ -1605,10 +1618,18 @@ impl IntelPort for PgIntelPort {
         ctx: &EmployeeContext,
         limit: usize,
     ) -> Result<Vec<Opportunity>, String> {
+        // 排除本员工已认领的 topic (0048 per-employee 认领); 其他员工的认领不影响共享池
+        let emp_uuid = uuid::Uuid::parse_str(&ctx.employee_id).unwrap_or(uuid::Uuid::nil());
         let rows = sqlx::query(
-            "SELECT topic, score, rationale, evidence FROM intel_opportunities WHERE status = 'new' AND created_at > now() - interval '7 days' ORDER BY score DESC LIMIT 400",
+            "SELECT topic, score, rationale, evidence FROM intel_opportunities \
+             WHERE status = 'new' AND created_at > now() - interval '7 days' \
+             AND topic NOT IN (SELECT topic FROM opportunity_claims WHERE employee_id = $1) \
+             ORDER BY score DESC LIMIT 400",
         )
-        .fetch_all(&self.pool).await.map_err(|e| e.to_string())?;
+        .bind(emp_uuid)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| e.to_string())?;
         let mut out: Vec<Opportunity> = Vec::new();
         // WS2: 领域画像 → 现算 per-员工相关性 (原则1: 不烤死在实体上)
         let focus = ctx

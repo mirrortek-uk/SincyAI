@@ -76,7 +76,7 @@ impl CycleStore for MemStore {
     async fn recent_topics(&self, _e: Uuid, _l: usize) -> Result<Vec<String>, String> {
         Ok(vec![])
     }
-    async fn mark_opportunity(&self, topic: &str, status: &str) -> Result<(), String> {
+    async fn mark_opportunity(&self, _e: Uuid, topic: &str, status: &str) -> Result<(), String> {
         self.opp_status
             .lock()
             .unwrap()
@@ -397,8 +397,8 @@ async fn critic_rejects_overlong_draft_on_reject_platform() {
         async fn recent_topics(&self, e: Uuid, l: usize) -> Result<Vec<String>, String> {
             self.0.recent_topics(e, l).await
         }
-        async fn mark_opportunity(&self, t: &str, s: &str) -> Result<(), String> {
-            self.0.mark_opportunity(t, s).await
+        async fn mark_opportunity(&self, e: Uuid, t: &str, s: &str) -> Result<(), String> {
+            self.0.mark_opportunity(e, t, s).await
         }
         async fn review_rule(&self, platform: &str) -> Result<PlatformReviewRule, String> {
             Ok(PlatformReviewRule {

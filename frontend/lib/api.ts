@@ -429,6 +429,9 @@ export interface IntelStats {
   opportunities: number;
   opportunities_new: number;
   opportunities_actionable: number;
+  opportunities_claimed?: number;
+  factory_briefs?: number;
+  scope?: "platform" | "tenant";
   entities_total: number;
   signals_total: number;
   last_pass_inserted_total: number;

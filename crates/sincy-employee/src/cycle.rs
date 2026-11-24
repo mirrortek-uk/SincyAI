@@ -103,7 +103,13 @@ pub trait CycleStore: Send + Sync {
         confidence: f64,
     ) -> Result<(), String>;
     async fn recent_topics(&self, employee_id: Uuid, limit: usize) -> Result<Vec<String>, String>;
-    async fn mark_opportunity(&self, topic: &str, status: &str) -> Result<(), String>;
+    /// 认领机会: per-employee (共享池不互斥), 由实现写入 opportunity_claims。
+    async fn mark_opportunity(
+        &self,
+        employee_id: Uuid,
+        topic: &str,
+        status: &str,
+    ) -> Result<(), String>;
     /// 落实验假说 (learning 闭环: Analytics → Hypothesis → Experiment)。
     /// 默认不支持, 由云端 PG 实现写 employee_experiments。
     async fn add_experiment(
@@ -398,8 +404,8 @@ impl CycleStore for Box<dyn CycleStore> {
     async fn recent_topics(&self, e: Uuid, l: usize) -> Result<Vec<String>, String> {
         (**self).recent_topics(e, l).await
     }
-    async fn mark_opportunity(&self, t: &str, s: &str) -> Result<(), String> {
-        (**self).mark_opportunity(t, s).await
+    async fn mark_opportunity(&self, e: Uuid, t: &str, s: &str) -> Result<(), String> {
+        (**self).mark_opportunity(e, t, s).await
     }
     async fn add_experiment(&self, e: Uuid, h: &str, v: &str) -> Result<Uuid, String> {
         (**self).add_experiment(e, h, v).await
@@ -644,7 +650,7 @@ pub async fn run_cycle(
         });
     };
     deps.store
-        .mark_opportunity(&opp.topic, "selected")
+        .mark_opportunity(employee.id, &opp.topic, "selected")
         .await
         .ok();
     step(
