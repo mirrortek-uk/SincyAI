@@ -63,6 +63,71 @@ android {
     buildFeatures { buildConfig = true }
 }
 
+// Rust core (libsincy_agent_core.so) 交叉编译: cargo-ndk -> app/src/main/jniLibs,
+// 由 preBuild 触发, 保证打包进 APK。缺 NDK / cargo-ndk 时跳过并告警 (纯 Kotlin 壳仍可构建),
+// CI 的 android-agent job 会安装 NDK + cargo-ndk 并校验 .so 产物。
+val rustCoreDir = File(rootDir, "rust-core")
+val jniLibsDir = File(rootDir, "app/src/main/jniLibs")
+val ndkHome: String? = System.getenv("ANDROID_NDK_HOME")
+    ?: runCatching {
+        val props = Properties()
+        File(rootDir, "local.properties").inputStream().use { props.load(it) }
+        props.getProperty("ndk.dir")
+            ?: props.getProperty("sdk.dir")?.let { sdk ->
+                File(sdk, "ndk").listFiles()?.filter { it.isDirectory }?.maxByOrNull { it.name }?.absolutePath
+            }
+    }.getOrNull()
+
+tasks.register("buildRustCore") {
+    group = "build"
+    description = "Cross-compile the Rust agent core into app/src/main/jniLibs via cargo-ndk"
+    inputs.dir(File(rustCoreDir, "src"))
+    inputs.file(File(rustCoreDir, "Cargo.toml"))
+    outputs.dir(jniLibsDir)
+    onlyIf {
+        if (!File(rustCoreDir, "Cargo.toml").exists()) return@onlyIf false
+        if (ndkHome == null) {
+            logger.warn("buildRustCore skipped: ANDROID_NDK_HOME / local.properties ndk.dir not set")
+            return@onlyIf false
+        }
+        val ok = runCatching {
+            ProcessBuilder("cargo", "ndk", "--version")
+                .redirectErrorStream(true).start().waitFor() == 0
+        }.getOrDefault(false)
+        if (!ok) logger.warn("buildRustCore skipped: cargo-ndk not installed (cargo install cargo-ndk)")
+        ok
+    }
+    doLast {
+        val p = ProcessBuilder(
+            "cargo", "ndk", "-t", "arm64-v8a", "-t", "armeabi-v7a",
+            "-o", jniLibsDir.absolutePath, "build", "--release"
+        )
+            .directory(rustCoreDir)
+            .apply { environment()["ANDROID_NDK_HOME"] = ndkHome!! }
+            .redirectErrorStream(true)
+            .start()
+        val out = p.inputStream.bufferedReader().readText()
+        if (p.waitFor() != 0) {
+            // 构建失败但已有预编译 .so 时降级告警继续 (本地增量开发不被卡住);
+            // 一个 .so 都没有时必须失败, 否则 APK 会缺 native core, 手机上直接 UnsatisfiedLinkError
+            val prebuilt = File(jniLibsDir, "arm64-v8a/libsincy_agent_core.so")
+            if (prebuilt.exists() && prebuilt.length() > 0L) {
+                logger.warn("buildRustCore: cargo-ndk failed, falling back to prebuilt $prebuilt\n$out")
+            } else {
+                throw GradleException("cargo-ndk failed and no prebuilt .so in $jniLibsDir:\n$out")
+            }
+        }
+        // 产物校验: arm64 .so 必须存在 (armeabi-v7a 尽力而为)
+        val so = File(jniLibsDir, "arm64-v8a/libsincy_agent_core.so")
+        if (!so.exists() || so.length() == 0L) {
+            throw GradleException("rust core .so missing after build: $so")
+        }
+        logger.lifecycle("buildRustCore: libsincy_agent_core.so present at $so")
+    }
+}
+
+tasks.named("preBuild") { dependsOn("buildRustCore") }
+
 dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.appcompat:appcompat:1.7.0")

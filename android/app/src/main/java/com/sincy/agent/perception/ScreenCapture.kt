@@ -30,6 +30,9 @@ object ScreenCapture {
     private var width = 0
     private var height = 0
 
+    /** true when a MediaProjection session is actively capturing. */
+    fun isRunning(): Boolean = projection != null && display != null
+
     @Synchronized
     fun start(proj: MediaProjection, disp: Display, densityDpi: Int = 420) {
         stop()

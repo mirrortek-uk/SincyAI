@@ -245,8 +245,20 @@ class AgentForegroundService : Service() {
         // agentic 任务的 goal 在 task_context 里 (数据, 非签名参数)
         val taskContext = brief.optJSONObject("task_context")?.toString() ?: "{}"
 
-        // agentic 闭环走"控件树 + 截图"双通道: 没授权录屏时弹一次系统授权框 (用户点允许即可)
-        if (brief.optString("adapter_id") == "system.agentic") {
+        // Rust core 未打包进 APK 时明确报错, 而不是让 external fun 抛 UnsatisfiedLinkError
+        if (!com.sincy.agent.adapter.AdapterRuntime.nativeLoaded) {
+            send(webSocket, "device.task.result", JSONObject()
+                .put("task_id", taskId)
+                .put("outcome", "no_side_effect_failure")
+                .put("reason", "rust core (libsincy_agent_core.so) not loaded — APK built without cargo-ndk output; run gradle buildRustCore (needs ANDROID_NDK_HOME + cargo-ndk)"))
+            return
+        }
+
+        // agentic 闭环走"控件树 + 截图"双通道: 没授权录屏时弹一次系统授权框 (用户点允许即可);
+        // 只有 agentic 任务的快照带截图, 普通 adapter 快照不抓帧 (避免拖垮无障碍服务)
+        val isAgentic = brief.optString("adapter_id") == "system.agentic"
+        com.sincy.agent.perception.SincyAccessibilityService.snapshotWithVision = isAgentic
+        if (isAgentic) {
             try { com.sincy.agent.MainActivity.requestScreenCapIfNeeded() } catch (_: Exception) {}
         }
 

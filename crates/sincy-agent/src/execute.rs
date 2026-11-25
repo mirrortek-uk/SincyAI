@@ -850,21 +850,27 @@ mod tests {
     }
 
     fn screens() -> Vec<MockSnapshot> {
-        vec![
+        // v6 真机核验 flow: home(tap_at FAB) -> composer x3 -> tap_at post(side_effect) -> home(verify)
+        let home = || {
             MockSnapshot::new(
-                vec!["com.twitter.android:id/bottom_bar".into()],
+                vec!["home_navigation_bar_title".into()],
                 vec!["Home".into()],
-            ),
+            )
+        };
+        let composer = || {
             MockSnapshot::new(
-                vec!["com.twitter.android:id/tweet_text".into()],
+                vec!["ComposerRoot".into()],
                 vec!["What's happening?".into()],
-            ),
-            MockSnapshot::new(
-                vec!["com.twitter.android:id/tweet_text".into()],
-                vec!["What's happening?".into()],
-            ),
-            MockSnapshot::new(vec![], vec!["Your post was sent".into()]),
-            MockSnapshot::new(vec![], vec!["Your post was sent".into()]),
+            )
+        };
+        vec![
+            home(),
+            composer(),
+            composer(),
+            composer(),
+            composer(),
+            home(),
+            home(),
         ]
     }
 

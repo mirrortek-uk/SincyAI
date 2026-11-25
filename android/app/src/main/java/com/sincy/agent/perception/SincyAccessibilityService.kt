@@ -30,23 +30,45 @@ import org.json.JSONObject
 class SincyAccessibilityService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        val root = rootInActiveWindow ?: return
-        latestSnapshot = summarize(root)
-        root.recycle()
+        // 事件回调保持轻量: 不做全树遍历/抓帧/JPEG/base64, 否则每次
+        // typeWindowContentChanged 都会把无障碍服务拖垮甚至 ANR。
+        // 快照改为 currentSnapshotJson() 按需现采 (见 companion)。
+        lastEventAt = System.currentTimeMillis()
     }
 
     override fun onInterrupt() = Unit
 
     companion object {
 
+        private const val EMPTY_SNAPSHOT = "{\"ids\":[],\"texts\":[],\"nodes\":[],\"width\":1080,\"height\":2400}"
+
         @Volatile
-        private var latestSnapshot: String = "{\"ids\":[],\"texts\":[],\"nodes\":[],\"width\":1080,\"height\":2400}"
+        private var lastEventAt: Long = 0L
+
+        /** true 时 currentSnapshotJson() 附带截图 (仅 system.agentic 视觉决策需要, 且需录屏授权)。 */
+        @Volatile
+        var snapshotWithVision: Boolean = false
 
         @Volatile
         var instance: SincyAccessibilityService? = null
 
-        /** Current screen summary for the Rust core: ids/texts for anchor match + nodes with bounds for touch. */
-        fun currentSnapshotJson(): String = latestSnapshot
+        /**
+         * Current screen summary for the Rust core: ids/texts for anchor match + nodes with
+         * bounds for touch. 按需对 rootInActiveWindow 现采, 保证读到的是实时屏幕而不是上一次
+         * 事件时的旧帧; 截图只在 snapshotWithVision=true 且录屏在跑时才抓。
+         */
+        fun currentSnapshotJson(): String {
+            val svc = instance ?: return EMPTY_SNAPSHOT
+            val root = svc.rootInActiveWindow ?: return EMPTY_SNAPSHOT
+            return try {
+                summarize(root, withScreenshot = snapshotWithVision && ScreenCapture.isRunning())
+            } catch (e: Exception) {
+                android.util.Log.w("SincyAgent", "on-demand snapshot failed: ${e.message}")
+                EMPTY_SNAPSHOT
+            } finally {
+                root.recycle()
+            }
+        }
 
         /** Installed versionName of a package, for the adapter version_range guard. */
         fun installedVersion(packageName: String): String? {
@@ -293,7 +315,7 @@ class SincyAccessibilityService : AccessibilityService() {
             return svc.dispatchGesture(builder.build(), null, null)
         }
 
-        private fun summarize(root: AccessibilityNodeInfo): String {
+        private fun summarize(root: AccessibilityNodeInfo, withScreenshot: Boolean = false): String {
             val ids = JSONArray()
             val texts = JSONArray()
             val nodes = JSONArray()
@@ -334,8 +356,10 @@ class SincyAccessibilityService : AccessibilityService() {
                 }
             }
             walk(root, 0)
-            // 视觉通道: 若已授权录屏, 附带当前帧截图 (base64 jpeg, 带元素编号标注), 喂给 VLM
-            val shot = try { ScreenCapture.captureBase64Jpeg(marks = marks.ifEmpty { null }) } catch (_: Exception) { null }
+            // 视觉通道: 只在明确需要 (agentic VLM 决策) 且已授权录屏时才抓帧, 不再挂在每条无障碍事件上
+            val shot = if (withScreenshot) {
+                try { ScreenCapture.captureBase64Jpeg(marks = marks.ifEmpty { null }) } catch (_: Exception) { null }
+            } else null
             return JSONObject()
                 .put("ids", ids)
                 .put("texts", texts)
