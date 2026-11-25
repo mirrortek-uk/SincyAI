@@ -126,9 +126,13 @@ object AdapterRuntime {
         }
     }
 
-    /** Called by the Rust core before each interpreter step: current screen summary. */
-    fun snapshotJson(): String =
-        com.sincy.agent.perception.SincyAccessibilityService.currentSnapshotJson()
+    /**
+     * Called by the Rust core before each interpreter step: current screen summary.
+     * withScreenshot=true only for the agentic VLM decision path; deterministic
+     * adapters pass false and never trigger MediaProjection.
+     */
+    fun snapshotJson(withScreenshot: Boolean): String =
+        com.sincy.agent.perception.SincyAccessibilityService.currentSnapshotJson(withScreenshot)
 
     /**
      * Called by the Rust core for each step action; the accessibility service

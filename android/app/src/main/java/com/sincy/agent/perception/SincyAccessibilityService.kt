@@ -1,6 +1,7 @@
 package com.sincy.agent.perception
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.AccessibilityServiceInfo
 import android.accessibilityservice.GestureDescription
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -45,23 +46,20 @@ class SincyAccessibilityService : AccessibilityService() {
         @Volatile
         private var lastEventAt: Long = 0L
 
-        /** true 时 currentSnapshotJson() 附带截图 (仅 system.agentic 视觉决策需要, 且需录屏授权)。 */
-        @Volatile
-        var snapshotWithVision: Boolean = false
-
         @Volatile
         var instance: SincyAccessibilityService? = null
 
         /**
          * Current screen summary for the Rust core: ids/texts for anchor match + nodes with
          * bounds for touch. 按需对 rootInActiveWindow 现采, 保证读到的是实时屏幕而不是上一次
-         * 事件时的旧帧; 截图只在 snapshotWithVision=true 且录屏在跑时才抓。
+         * 事件时的旧帧。withScreenshot=true 时附带截图 (仅 system.agentic 的 VLM 决策需要,
+         * 且录屏必须在跑; 确定性 adapter 路径传 false, 不触发 MediaProjection)。
          */
-        fun currentSnapshotJson(): String {
+        fun currentSnapshotJson(withScreenshot: Boolean = false): String {
             val svc = instance ?: return EMPTY_SNAPSHOT
             val root = svc.rootInActiveWindow ?: return EMPTY_SNAPSHOT
             return try {
-                summarize(root, withScreenshot = snapshotWithVision && ScreenCapture.isRunning())
+                summarize(root, withScreenshot = withScreenshot && ScreenCapture.isRunning())
             } catch (e: Exception) {
                 android.util.Log.w("SincyAgent", "on-demand snapshot failed: ${e.message}")
                 EMPTY_SNAPSHOT
@@ -374,6 +372,11 @@ class SincyAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
+        // 有些 OEM 会忽略 XML 里的 accessibilityFlags, 运行时再 OR 一次, 保证
+        // viewIdResourceName (所有 {id: ...} 锚点的依据) 一定可用
+        serviceInfo = serviceInfo.apply {
+            flags = flags or AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS
+        }
     }
 
     override fun onUnbind(intent: Intent?): Boolean {

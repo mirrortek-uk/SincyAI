@@ -85,6 +85,8 @@ tasks.register("buildRustCore") {
     inputs.file(File(rustCoreDir, "Cargo.toml"))
     outputs.dir(jniLibsDir)
     onlyIf {
+        // -PskipRust: 纯 Kotlin 迭代时跳过 Rust 交叉编译
+        if (project.findProperty("skipRust") == "true") return@onlyIf false
         if (!File(rustCoreDir, "Cargo.toml").exists()) return@onlyIf false
         if (ndkHome == null) {
             logger.warn("buildRustCore skipped: ANDROID_NDK_HOME / local.properties ndk.dir not set")
@@ -100,7 +102,7 @@ tasks.register("buildRustCore") {
     doLast {
         val p = ProcessBuilder(
             "cargo", "ndk", "-t", "arm64-v8a", "-t", "armeabi-v7a",
-            "-o", jniLibsDir.absolutePath, "build", "--release"
+            "-o", jniLibsDir.absolutePath, "build", "--release", "-p", "sincy-agent-core"
         )
             .directory(rustCoreDir)
             .apply { environment()["ANDROID_NDK_HOME"] = ndkHome!! }

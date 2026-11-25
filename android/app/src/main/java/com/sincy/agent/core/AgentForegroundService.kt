@@ -242,23 +242,23 @@ class AgentForegroundService : Service() {
                 .put("reason", "accessibility service not enabled — 请在系统设置里打开 Sincy Agent 无障碍服务"))
             return
         }
-        // agentic 任务的 goal 在 task_context 里 (数据, 非签名参数)
-        val taskContext = brief.optJSONObject("task_context")?.toString() ?: "{}"
-
-        // Rust core 未打包进 APK 时明确报错, 而不是让 external fun 抛 UnsatisfiedLinkError
+        // Rust core 未打包进 APK 时尽早拒绝 (放在预启动目标 app 之前, 避免死包还白拉起 app);
+        // external fun 是懒链接, 不查 nativeLoaded 直接调会在运行时抛 UnsatisfiedLinkError 打崩任务线程
         if (!com.sincy.agent.adapter.AdapterRuntime.nativeLoaded) {
             send(webSocket, "device.task.result", JSONObject()
                 .put("task_id", taskId)
-                .put("outcome", "no_side_effect_failure")
-                .put("reason", "rust core (libsincy_agent_core.so) not loaded — APK built without cargo-ndk output; run gradle buildRustCore (needs ANDROID_NDK_HOME + cargo-ndk)"))
+                .put("outcome", "refused")
+                .put("reason", "native core not packaged on this build — libsincy_agent_core.so missing; rebuild with gradle buildRustCore (needs ANDROID_NDK_HOME + cargo-ndk)")
+                .put("side_effect_done", false)
+                .put("captured", JSONObject()))
             return
         }
 
-        // agentic 闭环走"控件树 + 截图"双通道: 没授权录屏时弹一次系统授权框 (用户点允许即可);
-        // 只有 agentic 任务的快照带截图, 普通 adapter 快照不抓帧 (避免拖垮无障碍服务)
-        val isAgentic = brief.optString("adapter_id") == "system.agentic"
-        com.sincy.agent.perception.SincyAccessibilityService.snapshotWithVision = isAgentic
-        if (isAgentic) {
+        // agentic 任务的 goal 在 task_context 里 (数据, 非签名参数)
+        val taskContext = brief.optJSONObject("task_context")?.toString() ?: "{}"
+
+        // agentic 闭环走"控件树 + 截图"双通道: 没授权录屏时弹一次系统授权框 (用户点允许即可)
+        if (brief.optString("adapter_id") == "system.agentic") {
             try { com.sincy.agent.MainActivity.requestScreenCapIfNeeded() } catch (_: Exception) {}
         }
 
@@ -283,13 +283,24 @@ class AgentForegroundService : Service() {
             }
             Thread.sleep(4000)
         }
-        val resultJson = AdapterRuntime.runAdapter(
-            brief.getString("adapter_yaml"),
-            brief.getString("signature"),
-            brief.optString("signature_scheme", "hmac-sha256"),
-            appVersion,
-            taskContext,
-        )
+        // 兜底: nativeLoaded=true 但符号仍缺失时, UnsatisfiedLinkError 转成 uncertain 回传而不是崩服务
+        val resultJson = try {
+            AdapterRuntime.runAdapter(
+                brief.getString("adapter_yaml"),
+                brief.getString("signature"),
+                brief.optString("signature_scheme", "hmac-sha256"),
+                appVersion,
+                taskContext,
+            )
+        } catch (e: UnsatisfiedLinkError) {
+            send(webSocket, "device.task.result", JSONObject()
+                .put("task_id", taskId)
+                .put("outcome", "uncertain")
+                .put("reason", "UnsatisfiedLinkError from native core: ${e.message}")
+                .put("side_effect_done", false)
+                .put("captured", JSONObject()))
+            return
+        }
         val result = JSONObject(resultJson)
 
         // stream step evidence

@@ -431,13 +431,21 @@ mod jni {
         profile: HumanProfile,
         rng: Rng,
         last_snapshot: String,
+        /// true only for system.agentic: the VLM decision path needs a screenshot;
+        /// deterministic adapters never pay for MediaProjection.
+        want_vision: bool,
     }
 
     impl<'a> PlatformIo for JniBridge<'a> {
         fn snapshot(&mut self) -> Box<dyn ScreenSnapshot> {
             let json = self
                 .env
-                .call_method(&self.thiz, "snapshotJson", "()Ljava/lang/String;", &[])
+                .call_method(
+                    &self.thiz,
+                    "snapshotJson",
+                    "(Z)Ljava/lang/String;",
+                    &[JValue::Bool(self.want_vision as u8)],
+                )
                 .and_then(|v| v.l())
                 .ok()
                 .and_then(|o| {
@@ -734,12 +742,17 @@ mod jni {
         } else {
             serde_json::from_str(&task_context_json).ok()
         };
+        let want_vision = serde_json::from_str::<serde_json::Value>(&adapter_json)
+            .ok()
+            .and_then(|v| v["adapter"].as_str().map(|a| a == "system.agentic"))
+            .unwrap_or(false);
         let mut bridge = JniBridge {
             env,
             thiz,
             profile: HumanProfile::default(),
             rng: Rng::from_time(),
             last_snapshot: "{\"ids\":[],\"texts\":[],\"nodes\":[]}".into(),
+            want_vision,
         };
         // catch_unwind: 任何 Rust panic 都不能穿过 JNI abort 掉整个进程
         // (进程一死, MIUI 会把无障碍服务标记为 crashed, 任务全部卡死)
